@@ -2,6 +2,10 @@
 
 `v2s` is a macOS menu bar app for turning live voice into bilingual subtitles.
 
+
+![Screenshot 2026-03-17 at 1 29 49 PM](https://github.com/user-attachments/assets/d5f10b08-a4a2-463e-9c0c-ad18c5d890b0)
+
+
 ## What It Does
 
 - Captures audio from a selected microphone or a selected macOS app
