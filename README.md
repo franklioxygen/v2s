@@ -30,6 +30,16 @@
 - Apple Translation pipeline for bilingual subtitle output.
 - Overlay styling controls so the subtitle bar stays readable on top of real work.
 
+## Privacy & Connectivity
+
+- No v2s account, cloud backend, analytics SDK, or custom telemetry is built into this repository.
+- This codebase does not send captured audio or subtitle text to any v2s-operated server, because there is no v2s server in the product flow.
+- Translation uses Apple's system Translation framework and local language assets on the Mac when available; some language assets may need to be downloaded first.
+- Internet is not required to contact any v2s service.
+- Full offline operation is not guaranteed for every language or device in the current implementation:
+- Apple documents that some Speech framework recognition paths depend on Apple servers unless on-device recognition is explicitly required.
+- The current speech pipeline uses `SFSpeechRecognizer` but does not set `requiresOnDeviceRecognition = true`, so speech recognition may still depend on Apple's service for some locales.
+
 ## What You Can Use Today
 
 - Launch v2s as a macOS menu bar app.
@@ -42,8 +52,8 @@
 
 - Better subtitle segmentation and pacing.
 - Wider app-audio compatibility and diagnostics.
-- Signed and notarized distribution.
-- Smoother release packaging workflow.
+- Release CI automation and credential setup.
+- Polished onboarding and production install docs.
 
 ## Requirements
 
@@ -91,7 +101,10 @@ The release script:
 
 - requires a clean `main` worktree
 - bumps `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` in `v2s.xcodeproj/project.pbxproj`
-- builds the Release app with code signing disabled
+- builds the Release app
+- signs the app with `Developer ID Application`
+- creates a signed installer package with `Developer ID Installer`
+- notarizes the package with Apple and staples the notarization ticket
 - creates `dist/v2s-<version>.pkg` and `dist/v2s-<version>.sha256`
 - commits the version bump, tags `v<version>`, pushes to GitHub, and creates a GitHub release with both assets attached
 
@@ -99,8 +112,20 @@ Requirements:
 
 - authenticated GitHub CLI: `gh auth login`
 - a buildable project state
+- installed `Developer ID Application` and `Developer ID Installer` certificates in your keychain
+- notarization credentials via one of:
+- `NOTARYTOOL_KEYCHAIN_PROFILE` from `xcrun notarytool store-credentials`
+- `NOTARYTOOL_APPLE_ID`, `NOTARYTOOL_TEAM_ID`, and `NOTARYTOOL_APP_PASSWORD`
+- `NOTARYTOOL_KEY_PATH` and `NOTARYTOOL_KEY_ID`, plus `NOTARYTOOL_ISSUER` when required
 
-Current release packaging is unsigned, so add signing and notarization later if you want a production-ready macOS distribution flow.
+Example with a keychain profile:
+
+```bash
+export APP_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+export PKG_SIGN_IDENTITY="Developer ID Installer: Your Name (TEAMID)"
+export NOTARYTOOL_KEYCHAIN_PROFILE="AC_NOTARY"
+./scripts/release.sh
+```
 
 ## Documents
 
