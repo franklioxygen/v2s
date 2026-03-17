@@ -409,7 +409,7 @@ main() {
   [[ -f "$PROJECT_FILE" ]] || fail "Xcode project file not found: ${PROJECT_FILE}"
   [[ -z "$notes_file" || -f "$notes_file" ]] || fail "Release notes file not found: ${notes_file}"
   xcrun notarytool --version >/dev/null 2>&1 || fail "xcrun notarytool is unavailable in the active Xcode toolchain."
-  xcrun stapler help >/dev/null 2>&1 || fail "xcrun stapler is unavailable in the active Xcode toolchain."
+  xcrun --find stapler >/dev/null 2>&1 || fail "xcrun stapler is unavailable in the active Xcode toolchain."
 
   gh auth status >/dev/null 2>&1 || fail "GitHub CLI is not authenticated. Run 'gh auth login' first."
 
