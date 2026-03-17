@@ -26,6 +26,12 @@
 		A0000000000000000000005F /* StatusBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000003F /* StatusBarController.swift */; };
 		A00000000000000000000060 /* StatusBarPopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000040 /* StatusBarPopoverView.swift */; };
 		A00000000000000000000061 /* LiveTranscriptionSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000041 /* LiveTranscriptionSession.swift */; };
+		A00000000000000000000063 /* ModeConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000042 /* ModeConfig.swift */; };
+		A00000000000000000000064 /* SegmentStateMachine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000043 /* SegmentStateMachine.swift */; };
+		A00000000000000000000065 /* SubtitleSegment.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000044 /* SubtitleSegment.swift */; };
+		A00000000000000000000066 /* EntityCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000045 /* EntityCache.swift */; };
+		A00000000000000000000067 /* GlossaryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000046 /* GlossaryService.swift */; };
+		A00000000000000000000068 /* SpeedMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000047 /* SpeedMonitor.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -50,6 +56,12 @@
 		A0000000000000000000003F /* StatusBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarController.swift; sourceTree = "<group>"; };
 		A00000000000000000000040 /* StatusBarPopoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarPopoverView.swift; sourceTree = "<group>"; };
 		A00000000000000000000041 /* LiveTranscriptionSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveTranscriptionSession.swift; sourceTree = "<group>"; };
+		A00000000000000000000042 /* ModeConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModeConfig.swift; sourceTree = "<group>"; };
+		A00000000000000000000043 /* SegmentStateMachine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SegmentStateMachine.swift; sourceTree = "<group>"; };
+		A00000000000000000000044 /* SubtitleSegment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleSegment.swift; sourceTree = "<group>"; };
+		A00000000000000000000045 /* EntityCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntityCache.swift; sourceTree = "<group>"; };
+		A00000000000000000000046 /* GlossaryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlossaryService.swift; sourceTree = "<group>"; };
+		A00000000000000000000047 /* SpeedMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeedMonitor.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -116,9 +128,12 @@
 				A00000000000000000000033 /* AppSettings.swift */,
 				A00000000000000000000034 /* InputSource.swift */,
 				A00000000000000000000035 /* LanguageOption.swift */,
+				A00000000000000000000042 /* ModeConfig.swift */,
 				A00000000000000000000036 /* OverlayPreviewState.swift */,
 				A00000000000000000000037 /* OverlayStyle.swift */,
+				A00000000000000000000043 /* SegmentStateMachine.swift */,
 				A00000000000000000000038 /* SessionState.swift */,
+				A00000000000000000000044 /* SubtitleSegment.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -126,9 +141,12 @@
 		A0000000000000000000000F /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				A00000000000000000000045 /* EntityCache.swift */,
+				A00000000000000000000046 /* GlossaryService.swift */,
+				A00000000000000000000041 /* LiveTranscriptionSession.swift */,
 				A00000000000000000000039 /* SettingsStore.swift */,
 				A0000000000000000000003A /* SourceCatalogService.swift */,
-				A00000000000000000000041 /* LiveTranscriptionSession.swift */,
+				A00000000000000000000047 /* SpeedMonitor.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -253,11 +271,17 @@
 				A00000000000000000000053 /* AppSettings.swift in Sources */,
 				A00000000000000000000054 /* InputSource.swift in Sources */,
 				A00000000000000000000055 /* LanguageOption.swift in Sources */,
+				A00000000000000000000063 /* ModeConfig.swift in Sources */,
 				A00000000000000000000056 /* OverlayPreviewState.swift in Sources */,
 				A00000000000000000000057 /* OverlayStyle.swift in Sources */,
+				A00000000000000000000064 /* SegmentStateMachine.swift in Sources */,
 				A00000000000000000000058 /* SessionState.swift in Sources */,
+				A00000000000000000000065 /* SubtitleSegment.swift in Sources */,
+				A00000000000000000000066 /* EntityCache.swift in Sources */,
+				A00000000000000000000067 /* GlossaryService.swift in Sources */,
 				A00000000000000000000059 /* SettingsStore.swift in Sources */,
 				A0000000000000000000005A /* SourceCatalogService.swift in Sources */,
+				A00000000000000000000068 /* SpeedMonitor.swift in Sources */,
 				A0000000000000000000005B /* OverlayView.swift in Sources */,
 				A0000000000000000000005C /* OverlayWindowController.swift in Sources */,
 				A0000000000000000000005D /* SettingsView.swift in Sources */,
@@ -306,7 +330,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Config/Info.plist;
@@ -315,7 +339,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.0;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.franklioxygen.v2s;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -335,7 +359,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Config/Info.plist;
@@ -344,7 +368,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.franklioxygen.v2s;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;

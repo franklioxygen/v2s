@@ -9,6 +9,22 @@ SCHEME="v2s"
 APP_NAME="v2s"
 DERIVED_DATA_PATH="$ROOT_DIR/.build/release"
 DIST_DIR="$ROOT_DIR/dist"
+PROJECT_FILE_BACKUP=""
+ROLLBACK_ON_EXIT=0
+
+cleanup() {
+  local exit_code=$?
+
+  if [[ $ROLLBACK_ON_EXIT -eq 1 && -n "$PROJECT_FILE_BACKUP" && -f "$PROJECT_FILE_BACKUP" ]]; then
+    mv "$PROJECT_FILE_BACKUP" "$PROJECT_FILE"
+  elif [[ -n "$PROJECT_FILE_BACKUP" && -f "$PROJECT_FILE_BACKUP" ]]; then
+    rm -f "$PROJECT_FILE_BACKUP"
+  fi
+
+  exit "$exit_code"
+}
+
+trap cleanup EXIT
 
 usage() {
   cat <<'EOF'
@@ -236,6 +252,10 @@ main() {
 
   printf 'Releasing %s (build %s -> %s)\n' "$next_version" "$current_build" "$next_build"
 
+  PROJECT_FILE_BACKUP="${PROJECT_FILE}.release.bak"
+  cp "$PROJECT_FILE" "$PROJECT_FILE_BACKUP"
+  ROLLBACK_ON_EXIT=1
+
   apply_version_bump "$next_version" "$next_build"
   build_release_app
   release_asset="$(package_release "$next_version" "$package_identifier")"
@@ -246,6 +266,7 @@ main() {
   git -C "$ROOT_DIR" tag -a "$tag" -m "$tag"
   git -C "$ROOT_DIR" push origin HEAD
   git -C "$ROOT_DIR" push origin "$tag"
+  ROLLBACK_ON_EXIT=0
 
   if [[ -n "$notes_file" ]]; then
     gh release create "$tag" "$release_asset" "$checksum_asset" --title "$tag" --notes-file "$notes_file" --verify-tag
