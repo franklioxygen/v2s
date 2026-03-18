@@ -435,14 +435,13 @@ final class LiveTranscriptionSession: NSObject {
                 // Boost quiet audio before the VAD / recognizer sees it.
                 boostIfQuiet(buffer: convertedBuffer)
 
+                // Always forward audio to the recognizer — VAD is used only
+                // for silence-commit timing, not to gate the audio stream.
+                recognitionRequest.append(convertedBuffer)
+
                 if let vadEngine {
                     let vadResult = vadEngine.process(buffer: convertedBuffer)
                     lastVADProbability = vadResult.speechProbability
-
-                    // Only forward speech frames to the ASR.
-                    if vadResult.isSpeech {
-                        recognitionRequest.append(convertedBuffer)
-                    }
 
                     if vadResult.containsSpeechOffset {
                         scheduleVADSilenceCommit()
@@ -450,9 +449,6 @@ final class LiveTranscriptionSession: NSObject {
                     if vadResult.containsSpeechOnset {
                         cancelVADSilenceTimer()
                     }
-                } else {
-                    // Fallback: no VAD, pass everything through.
-                    recognitionRequest.append(convertedBuffer)
                 }
             }
         case .error:
