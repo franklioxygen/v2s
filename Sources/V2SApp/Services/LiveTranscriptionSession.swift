@@ -10,6 +10,16 @@ struct RecognizedSentence: Equatable, Sendable {
 }
 
 final class LiveTranscriptionSession: NSObject {
+    private struct AudioLevelStats {
+        let peak: Float
+        let rms: Float
+    }
+
+    private enum RecognitionBackend {
+        case legacy
+        case speechAnalyzer
+    }
+
     enum SessionError: LocalizedError {
         case speechPermissionDenied
         case microphonePermissionDenied
@@ -46,6 +56,12 @@ final class LiveTranscriptionSession: NSObject {
     }
 
     private let captureQueue = DispatchQueue(label: "com.franklioxygen.v2s.capture", qos: .userInitiated)
+    private let processingFormat = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: 16_000,
+        channels: 1,
+        interleaved: true
+    )!
 
     private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
@@ -53,9 +69,23 @@ final class LiveTranscriptionSession: NSObject {
     /// Incremented on every restart. Handlers capture their generation at creation time
     /// and discard callbacks that arrive after a newer generation has started.
     private var recognitionGeneration: Int = 0
+    private var preprocessingConverter: AVAudioConverter?
+    private var preprocessingConverterInputSignature: AudioFormatSignature?
     private var audioConverter: AVAudioConverter?
     private var audioConverterInputSignature: AudioFormatSignature?
+    private var modernAudioConverter: AVAudioConverter?
+    private var modernAudioConverterInputSignature: AudioFormatSignature?
     private var committedSegmentCount = 0
+    private var recognitionContextualStrings: [String] = []
+    private var recognitionBackend: RecognitionBackend = .legacy
+    private var activeLocaleIdentifier: String?
+    private var modernAnalyzerTask: Task<Void, Never>?
+    private var modernResultsTask: Task<Void, Never>?
+    private var lastModernCommittedResultIdentity: String?
+    private var speechAnalyzerState: AnyObject?
+    private var speechTranscriberState: AnyObject?
+    private var analyzerInputContinuationState: Any?
+    private var analyzerInputFormat: AVAudioFormat?
 
     private var microphoneCaptureSession: AVCaptureSession?
     private var applicationAudioCapture: ApplicationAudioCapture?
@@ -69,6 +99,7 @@ final class LiveTranscriptionSession: NSObject {
     private var currentDraftId = UUID()
     private var lastDraftText = ""
     private var lastDraftTextChangeTime = Date.distantPast
+    private var lastRecognitionResultTime = Date.distantPast
     private var draftChangeHistory: [(text: String, time: Date)] = []
     private var draftPrefixCandidate = ""
     private var draftPrefixCandidateTime = Date.distantPast
@@ -86,11 +117,20 @@ final class LiveTranscriptionSession: NSObject {
     private var vadEngine: SileroVADEngine?
     private var lastVADProbability: Float = 0.0
     private var vadSilenceCommitTimer: DispatchSourceTimer?
+    private var noiseFloorRMS: Float = 0.0012
+    private var highPassPreviousInput: Float = 0.0
+    private var highPassPreviousOutput: Float = 0.0
+
+    private enum SilenceCommitTrigger {
+        case asrInactivity
+        case vadOffset
+    }
 
     func start(
         source: InputSource,
         localeIdentifier: String,
         modeConfig: ModeConfig = .balanced,
+        contextualStrings: [String] = [],
         transcriptHandler: @escaping @MainActor (RecognizedSentence) -> Void,
         partialHandler: @escaping @MainActor (DraftSegment?) -> Void,
         errorHandler: @escaping @MainActor (String) -> Void
@@ -98,10 +138,14 @@ final class LiveTranscriptionSession: NSObject {
         self.transcriptHandler = transcriptHandler
         self.partialHandler = partialHandler
         self.modeConfig = modeConfig
+        self.recognitionContextualStrings = sanitizeContextualStrings(contextualStrings)
+        self.activeLocaleIdentifier = localeIdentifier
         self.errorHandler = errorHandler
 
         try await requestRequiredPermissions(for: source)
-        try configureSpeechRecognizer(localeIdentifier: localeIdentifier)
+        if try await configureModernSpeechRecognizer(localeIdentifier: localeIdentifier) == false {
+            try configureSpeechRecognizer(localeIdentifier: localeIdentifier)
+        }
 
         switch source.category {
         case .microphone:
@@ -121,13 +165,14 @@ final class LiveTranscriptionSession: NSObject {
         applicationAudioCapture?.stop()
         applicationAudioCapture = nil
 
+        stopModernSpeechRecognizer()
         recognitionRequest?.endAudio()
         recognitionTask?.cancel()
         recognitionTask = nil
         recognitionRequest = nil
         speechRecognizer = nil
-        audioConverter = nil
-        audioConverterInputSignature = nil
+        activeLocaleIdentifier = nil
+        resetAudioProcessingState()
         committedSegmentCount = 0
 
         vadEngine = nil
@@ -179,6 +224,7 @@ final class LiveTranscriptionSession: NSObject {
     }
 
     private func configureSpeechRecognizer(localeIdentifier: String) throws {
+        stopModernSpeechRecognizer()
         let locale = Locale(identifier: localeIdentifier)
         guard let recognizer = SFSpeechRecognizer(locale: locale) else {
             throw SessionError.unsupportedSpeechLocale(localeIdentifier)
@@ -188,17 +234,15 @@ final class LiveTranscriptionSession: NSObject {
             throw SessionError.unavailableSpeechRecognizer(localeIdentifier)
         }
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.taskHint = .dictation
+        let request = makeRecognitionRequest()
 
         let task = recognizer.recognitionTask(with: request, resultHandler: makeRecognitionHandler())
 
         speechRecognizer = recognizer
         recognitionRequest = request
         recognitionTask = task
-        audioConverter = nil
-        audioConverterInputSignature = nil
+        recognitionBackend = .legacy
+        resetAudioProcessingState()
         committedSegmentCount = 0
         latestSegments = []
         latestFormattedText = ""
@@ -213,6 +257,213 @@ final class LiveTranscriptionSession: NSObject {
             vadEngine = nil
             Task { await emitError("Silero VAD unavailable: \(error.localizedDescription). Falling back to ASR-based silence detection.") }
         }
+    }
+
+    private func configureModernSpeechRecognizer(localeIdentifier: String) async throws -> Bool {
+        guard #available(macOS 26.0, *), SpeechTranscriber.isAvailable else {
+            return false
+        }
+
+        do {
+            return try await configureSpeechAnalyzerRecognizer(localeIdentifier: localeIdentifier)
+        } catch {
+            stopModernSpeechRecognizer()
+            return false
+        }
+    }
+
+    @available(macOS 26.0, *)
+    private func configureSpeechAnalyzerRecognizer(localeIdentifier: String) async throws -> Bool {
+        let requestedLocale = Locale(identifier: localeIdentifier)
+        guard let resolvedLocale = await SpeechTranscriber.supportedLocale(equivalentTo: requestedLocale) else {
+            return false
+        }
+
+        let transcriber = SpeechTranscriber(
+            locale: resolvedLocale,
+            transcriptionOptions: [.etiquetteReplacements],
+            reportingOptions: [.volatileResults, .fastResults],
+            attributeOptions: [.audioTimeRange, .transcriptionConfidence]
+        )
+
+        try await ensureSpeechAnalyzerAssetsIfNeeded(for: transcriber, locale: resolvedLocale)
+
+        let options = SpeechAnalyzer.Options(priority: .userInitiated, modelRetention: .whileInUse)
+        let analyzer = SpeechAnalyzer(modules: [transcriber], options: options)
+        let context = AnalysisContext()
+        if recognitionContextualStrings.isEmpty == false {
+            context.contextualStrings[.general] = recognitionContextualStrings
+        }
+        try await analyzer.setContext(context)
+
+        let preferredFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
+            compatibleWith: [transcriber],
+            considering: processingFormat
+        ) ?? processingFormat
+        try await analyzer.prepareToAnalyze(in: preferredFormat)
+
+        let inputStream = AsyncStream<AnalyzerInput>(bufferingPolicy: .bufferingNewest(12)) { continuation in
+            self.analyzerInputContinuationState = continuation
+        }
+
+        modernResultsTask?.cancel()
+        modernResultsTask = Task { [weak self] in
+            do {
+                for try await result in transcriber.results {
+                    self?.captureQueue.async { [weak self] in
+                        self?.processModernRecognitionResult(result)
+                    }
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.fallbackFromSpeechAnalyzer(error)
+            }
+        }
+
+        modernAnalyzerTask?.cancel()
+        modernAnalyzerTask = Task { [weak self] in
+            do {
+                try await analyzer.start(inputSequence: inputStream)
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.fallbackFromSpeechAnalyzer(error)
+            }
+        }
+
+        speechAnalyzerState = analyzer
+        speechTranscriberState = transcriber
+        analyzerInputFormat = preferredFormat
+        recognitionBackend = .speechAnalyzer
+        recognitionRequest = nil
+        recognitionTask = nil
+        speechRecognizer = nil
+        audioConverter = nil
+        audioConverterInputSignature = nil
+        committedSegmentCount = 0
+        latestSegments = []
+        latestFormattedText = ""
+        cancelSilenceTimer()
+        cancelVADSilenceTimer()
+        resetDraftState()
+        lastModernCommittedResultIdentity = nil
+
+        // Initialize Silero VAD engine for draft confidence / silence scoring only.
+        do {
+            vadEngine = try SileroVADEngine()
+        } catch {
+            vadEngine = nil
+        }
+
+        return true
+    }
+
+    @available(macOS 26.0, *)
+    private func ensureSpeechAnalyzerAssetsIfNeeded(
+        for transcriber: SpeechTranscriber,
+        locale: Locale
+    ) async throws {
+        let installedLocales = await Set(SpeechTranscriber.installedLocales.map(\.identifier))
+        if installedLocales.contains(locale.identifier) {
+            return
+        }
+
+        if let installer = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            try await installer.downloadAndInstall()
+        }
+    }
+
+    private func stopModernSpeechRecognizer() {
+        modernAnalyzerTask?.cancel()
+        modernAnalyzerTask = nil
+        modernResultsTask?.cancel()
+        modernResultsTask = nil
+        lastModernCommittedResultIdentity = nil
+        recognitionBackend = .legacy
+        modernAudioConverter = nil
+        modernAudioConverterInputSignature = nil
+
+        if #available(macOS 26.0, *) {
+            (analyzerInputContinuationState as? AsyncStream<AnalyzerInput>.Continuation)?.finish()
+            analyzerInputContinuationState = nil
+            let analyzer = speechAnalyzerState as? SpeechAnalyzer
+            speechAnalyzerState = nil
+            speechTranscriberState = nil
+            analyzerInputFormat = nil
+
+            if let analyzer {
+                Task {
+                    await analyzer.cancelAndFinishNow()
+                }
+            }
+        }
+    }
+
+    private func fallbackFromSpeechAnalyzer(_ error: Error) {
+        captureQueue.async { [weak self] in
+            guard let self,
+                  self.recognitionBackend == .speechAnalyzer,
+                  let localeIdentifier = self.activeLocaleIdentifier else {
+                return
+            }
+
+            self.stopModernSpeechRecognizer()
+
+            do {
+                try self.configureSpeechRecognizer(localeIdentifier: localeIdentifier)
+            } catch {
+                Task {
+                    await self.emitError("Speech recognition stopped: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func makeRecognitionRequest() -> SFSpeechAudioBufferRecognitionRequest {
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        request.taskHint = .dictation
+        request.addsPunctuation = true
+        request.contextualStrings = recognitionContextualStrings
+        return request
+    }
+
+    private func sanitizeContextualStrings(_ candidates: [String]) -> [String] {
+        var result: [String] = []
+        var seen = Set<String>()
+
+        for candidate in candidates {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false,
+                  trimmed.count <= 40 else {
+                continue
+            }
+
+            let normalized = trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            guard seen.insert(normalized).inserted else {
+                continue
+            }
+
+            result.append(trimmed)
+            if result.count >= 60 {
+                break
+            }
+        }
+
+        return result
+    }
+
+    private func resetAudioProcessingState() {
+        preprocessingConverter = nil
+        preprocessingConverterInputSignature = nil
+        audioConverter = nil
+        audioConverterInputSignature = nil
+        modernAudioConverter = nil
+        modernAudioConverterInputSignature = nil
+        noiseFloorRMS = 0.0012
+        highPassPreviousInput = 0
+        highPassPreviousOutput = 0
     }
 
     private func startMicrophoneCapture(deviceUniqueID: String) throws {
@@ -341,7 +592,7 @@ final class LiveTranscriptionSession: NSObject {
         // Fall back to direct append if conversion fails.
         if let pcmBuffer = pcmBuffer(from: sampleBuffer) {
             append(audioBuffer: pcmBuffer)
-        } else {
+        } else if recognitionBackend == .legacy {
             recognitionRequest?.appendAudioSampleBuffer(sampleBuffer)
         }
     }
@@ -371,22 +622,107 @@ final class LiveTranscriptionSession: NSObject {
     }
 
     private func append(audioBuffer: AVAudioPCMBuffer) {
-        guard audioBuffer.frameLength > 0,
-              let recognitionRequest else {
+        guard audioBuffer.frameLength > 0 else {
             return
         }
 
-        let nativeFormat = recognitionRequest.nativeAudioFormat
-
-        if audioBuffer.format.matches(nativeFormat) {
-            recognitionRequest.append(audioBuffer)
+        guard let processingBuffer = prepareProcessingBuffer(from: audioBuffer) else {
             return
+        }
+
+        let audioLevels = cleanUpSpeechBuffer(processingBuffer)
+        boostIfQuiet(buffer: processingBuffer, levels: audioLevels)
+
+        if let vadEngine {
+            let vadResult = vadEngine.process(buffer: processingBuffer)
+            lastVADProbability = vadResult.speechProbability
+
+            if recognitionBackend == .legacy {
+                if vadResult.containsSpeechOffset {
+                    scheduleVADSilenceCommit()
+                }
+                if vadResult.containsSpeechOnset {
+                    cancelVADSilenceTimer()
+                }
+            }
+        }
+
+        if recognitionBackend == .speechAnalyzer {
+            appendToSpeechAnalyzer(processingBuffer)
+            return
+        }
+
+        guard let recognitionRequest else {
+            return
+        }
+
+        guard let recognizerBuffer = makeRecognizerBuffer(from: processingBuffer, nativeFormat: recognitionRequest.nativeAudioFormat) else {
+            return
+        }
+
+        // Always forward audio to the recognizer — VAD is used only
+        // for silence-commit timing, not to gate the audio stream.
+        recognitionRequest.append(recognizerBuffer)
+    }
+
+    private func appendToSpeechAnalyzer(_ processingBuffer: AVAudioPCMBuffer) {
+        guard #available(macOS 26.0, *),
+              recognitionBackend == .speechAnalyzer,
+              let continuation = analyzerInputContinuationState as? AsyncStream<AnalyzerInput>.Continuation else {
+            return
+        }
+
+        guard let analyzerBuffer = makeSpeechAnalyzerBuffer(from: processingBuffer) else {
+            return
+        }
+
+        continuation.yield(AnalyzerInput(buffer: analyzerBuffer))
+    }
+
+    private func prepareProcessingBuffer(from audioBuffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        if audioBuffer.format.matches(processingFormat) {
+            guard let copiedBuffer = copyPCMBuffer(audioBuffer) else {
+                Task {
+                    await emitError("Failed to copy captured audio for speech preprocessing.")
+                }
+                return nil
+            }
+            return copiedBuffer
         }
 
         let inputSignature = AudioFormatSignature(audioBuffer.format)
+        if preprocessingConverterInputSignature != inputSignature {
+            preprocessingConverter = AVAudioConverter(from: audioBuffer.format, to: processingFormat)
+            preprocessingConverterInputSignature = inputSignature
+        }
 
+        guard let preprocessingConverter else {
+            Task {
+                await emitError("Failed to prepare the speech-preprocessing audio converter.")
+            }
+            return nil
+        }
+
+        return convertBuffer(
+            audioBuffer,
+            using: preprocessingConverter,
+            to: processingFormat,
+            allocationError: "Failed to allocate a speech-preprocessing audio buffer.",
+            failurePrefix: "Failed to preprocess captured audio"
+        )
+    }
+
+    private func makeRecognizerBuffer(
+        from processingBuffer: AVAudioPCMBuffer,
+        nativeFormat: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        if processingBuffer.format.matches(nativeFormat) {
+            return processingBuffer
+        }
+
+        let inputSignature = AudioFormatSignature(processingBuffer.format)
         if audioConverterInputSignature != inputSignature {
-            audioConverter = AVAudioConverter(from: audioBuffer.format, to: nativeFormat)
+            audioConverter = AVAudioConverter(from: processingBuffer.format, to: nativeFormat)
             audioConverterInputSignature = inputSignature
         }
 
@@ -394,24 +730,67 @@ final class LiveTranscriptionSession: NSObject {
             Task {
                 await emitError("Failed to prepare the audio converter for speech recognition.")
             }
-            return
+            return nil
         }
 
+        return convertBuffer(
+            processingBuffer,
+            using: audioConverter,
+            to: nativeFormat,
+            allocationError: "Failed to allocate a speech-recognition audio buffer.",
+            failurePrefix: "Failed to convert captured audio for speech recognition"
+        )
+    }
+
+    private func makeSpeechAnalyzerBuffer(from processingBuffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard #available(macOS 26.0, *),
+              let analyzerInputFormat else {
+            return processingBuffer
+        }
+
+        if processingBuffer.format.matches(analyzerInputFormat) {
+            return processingBuffer
+        }
+
+        let inputSignature = AudioFormatSignature(processingBuffer.format)
+        if modernAudioConverterInputSignature != inputSignature {
+            modernAudioConverter = AVAudioConverter(from: processingBuffer.format, to: analyzerInputFormat)
+            modernAudioConverterInputSignature = inputSignature
+        }
+
+        guard let modernAudioConverter else {
+            return nil
+        }
+
+        return convertBuffer(
+            processingBuffer,
+            using: modernAudioConverter,
+            to: analyzerInputFormat,
+            allocationError: "Failed to allocate a SpeechAnalyzer audio buffer.",
+            failurePrefix: "Failed to convert captured audio for SpeechAnalyzer"
+        )
+    }
+
+    private func convertBuffer(
+        _ inputBuffer: AVAudioPCMBuffer,
+        using converter: AVAudioConverter,
+        to outputFormat: AVAudioFormat,
+        allocationError: String,
+        failurePrefix: String
+    ) -> AVAudioPCMBuffer? {
         let outputFrameCapacity = max(
-            AVAudioFrameCount(ceil(Double(audioBuffer.frameLength) * nativeFormat.sampleRate / audioBuffer.format.sampleRate)),
+            AVAudioFrameCount(ceil(Double(inputBuffer.frameLength) * outputFormat.sampleRate / inputBuffer.format.sampleRate)),
             1
         )
 
-        guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: nativeFormat, frameCapacity: outputFrameCapacity) else {
-            Task {
-                await emitError("Failed to allocate a speech-recognition audio buffer.")
-            }
-            return
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outputFrameCapacity) else {
+            Task { await emitError(allocationError) }
+            return nil
         }
 
         var didProvideInput = false
         var conversionError: NSError?
-        let status = audioConverter.convert(to: convertedBuffer, error: &conversionError) { _, outStatus in
+        let status = converter.convert(to: outputBuffer, error: &conversionError) { _, outStatus in
             if didProvideInput {
                 outStatus.pointee = .noDataNow
                 return nil
@@ -419,45 +798,89 @@ final class LiveTranscriptionSession: NSObject {
 
             didProvideInput = true
             outStatus.pointee = .haveData
-            return audioBuffer
+            return inputBuffer
         }
 
         if let conversionError {
             Task {
-                await emitError("Failed to convert captured audio: \(conversionError.localizedDescription)")
+                await emitError("\(failurePrefix): \(conversionError.localizedDescription)")
             }
-            return
+            return nil
         }
 
         switch status {
         case .haveData, .inputRanDry, .endOfStream:
-            if convertedBuffer.frameLength > 0 {
-                // Boost quiet audio before the VAD / recognizer sees it.
-                boostIfQuiet(buffer: convertedBuffer)
-
-                // Always forward audio to the recognizer — VAD is used only
-                // for silence-commit timing, not to gate the audio stream.
-                recognitionRequest.append(convertedBuffer)
-
-                if let vadEngine {
-                    let vadResult = vadEngine.process(buffer: convertedBuffer)
-                    lastVADProbability = vadResult.speechProbability
-
-                    if vadResult.containsSpeechOffset {
-                        scheduleVADSilenceCommit()
-                    }
-                    if vadResult.containsSpeechOnset {
-                        cancelVADSilenceTimer()
-                    }
-                }
-            }
+            guard outputBuffer.frameLength > 0 else { return nil }
+            return outputBuffer
         case .error:
             Task {
-                await emitError("Audio conversion failed while feeding the speech recognizer.")
+                await emitError("\(failurePrefix).")
             }
+            return nil
         @unknown default:
-            break
+            return nil
         }
+    }
+
+    private func copyPCMBuffer(_ source: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let copy = AVAudioPCMBuffer(pcmFormat: source.format, frameCapacity: source.frameLength) else {
+            return nil
+        }
+
+        copy.frameLength = source.frameLength
+        let sourceBuffers = UnsafeMutableAudioBufferListPointer(source.mutableAudioBufferList)
+        let destinationBuffers = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
+
+        for (sourceBuffer, destinationBuffer) in zip(sourceBuffers, destinationBuffers) {
+            guard let sourceData = sourceBuffer.mData,
+                  let destinationData = destinationBuffer.mData else {
+                continue
+            }
+
+            memcpy(destinationData, sourceData, Int(sourceBuffer.mDataByteSize))
+        }
+
+        return copy
+    }
+
+    private func cleanUpSpeechBuffer(_ buffer: AVAudioPCMBuffer) -> AudioLevelStats {
+        guard let channelData = buffer.floatChannelData else {
+            return AudioLevelStats(peak: 0, rms: 0)
+        }
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0 else {
+            return AudioLevelStats(peak: 0, rms: 0)
+        }
+
+        let samples = channelData[0]
+        let highPassAlpha: Float = 0.995
+        var sumSquares: Float = 0
+        var peak: Float = 0
+
+        for index in 0..<frameCount {
+            let input = samples[index]
+            let filtered = input - highPassPreviousInput + highPassAlpha * highPassPreviousOutput
+            highPassPreviousInput = input
+            highPassPreviousOutput = filtered
+            samples[index] = filtered
+
+            let magnitude = abs(filtered)
+            sumSquares += magnitude * magnitude
+            if magnitude > peak {
+                peak = magnitude
+            }
+        }
+
+        let rms = sqrt(sumSquares / Float(frameCount))
+        updateNoiseFloorEstimate(rms: rms, peak: peak)
+        return AudioLevelStats(peak: peak, rms: rms)
+    }
+
+    private func updateNoiseFloorEstimate(rms: Float, peak: Float) {
+        let clampedRMS = min(max(rms, 0.0003), 0.03)
+        let likelyNoiseOnly = peak < 0.02 || rms <= noiseFloorRMS * 1.6
+        let smoothing: Float = likelyNoiseOnly ? 0.08 : 0.01
+        noiseFloorRMS = max(0.0005, min(0.02, noiseFloorRMS * (1 - smoothing) + clampedRMS * smoothing))
     }
 
     // MARK: - Audio gain boost
@@ -469,25 +892,23 @@ final class LiveTranscriptionSession: NSObject {
     /// - Quiet speech range: peak 0.002 – 0.30 → boost toward target peak 0.35 (up to 4×)
     /// - Silence (< 0.002): no boost (would just amplify noise floor)
     /// - Normal/loud (≥ 0.30): no boost (already loud enough; avoid clipping)
-    private func boostIfQuiet(buffer: AVAudioPCMBuffer) {
+    private func boostIfQuiet(buffer: AVAudioPCMBuffer, levels: AudioLevelStats) {
         guard let channelData = buffer.floatChannelData else { return }
         let frameCount = Int(buffer.frameLength)
         let channelCount = Int(buffer.format.channelCount)
         guard frameCount > 0, channelCount > 0 else { return }
 
-        var peak: Float = 0
-        for ch in 0..<channelCount {
-            let ptr = channelData[ch]
-            for i in 0..<frameCount {
-                let abs = ptr[i] < 0 ? -ptr[i] : ptr[i]
-                if abs > peak { peak = abs }
-            }
+        let peak = levels.peak
+        let rms = levels.rms
+        let speechFloor = max(0.006, noiseFloorRMS * 4.0)
+        let targetPeak: Float = 0.35
+        guard peak > speechFloor,
+              rms > max(noiseFloorRMS * 1.8, 0.0015),
+              peak < targetPeak else {
+            return
         }
 
-        let targetPeak: Float = 0.35
-        guard peak > 0.002, peak < targetPeak else { return }
-
-        let gain = min(targetPeak / peak, 4.0)
+        let gain = min(targetPeak / peak, 3.0)
         for ch in 0..<channelCount {
             let ptr = channelData[ch]
             for i in 0..<frameCount {
@@ -522,6 +943,7 @@ final class LiveTranscriptionSession: NSObject {
     }
 
     private func processRecognitionResult(_ result: SFSpeechRecognitionResult) {
+        lastRecognitionResultTime = Date()
         let transcription = result.bestTranscription
         let segments = transcription.segments
         let formattedText = transcription.formattedString as NSString
@@ -563,9 +985,9 @@ final class LiveTranscriptionSession: NSObject {
 
             // Boundaries that fire mid-loop (require a gap to a *next* word, or explicit cues)
             let punctuationBoundary = segment.substring.containsSentenceTerminator
-            // 0.65 s: above typical ASR timestamp-reporting noise and natural within-sentence
-            // clause pauses (200–450 ms), below genuine mid-sentence breath pauses.
-            let strongPauseBoundary = (nextPauseDuration ?? 0) >= 0.65
+            // 0.85 s leaves more room for expressive pauses and background-noise jitter
+            // before we cut the sentence. Shorter silences are handled by the commit timers.
+            let strongPauseBoundary = (nextPauseDuration ?? 0) >= 0.85
             // Char-length limit removed: 40 chars is only ~6 English words and caused
             // false mid-sentence cuts. Segment count + audio duration are sufficient.
             let forcedBoundary = currentSegmentCount >= 18
@@ -649,17 +1071,14 @@ final class LiveTranscriptionSession: NSObject {
         // dispatched by the cancelled task are silently ignored.
         recognitionGeneration &+= 1
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.taskHint = .dictation
+        let request = makeRecognitionRequest()
 
         let task = recognizer.recognitionTask(with: request, resultHandler: makeRecognitionHandler())
 
         recognitionRequest = request
         recognitionTask = task
         // Reset the converter — new request may have a different nativeAudioFormat.
-        audioConverter = nil
-        audioConverterInputSignature = nil
+        resetAudioProcessingState()
         committedSegmentCount = 0
         latestSegments = []
         latestFormattedText = ""
@@ -706,6 +1125,163 @@ final class LiveTranscriptionSession: NSObject {
         }
     }
 
+    @available(macOS 26.0, *)
+    private func processModernRecognitionResult(_ result: SpeechTranscriber.Result) {
+        lastRecognitionResultTime = Date()
+        let text = normalizedTranscriberText(result.text)
+
+        if result.isFinal {
+            let identity = modernResultIdentity(for: result)
+            guard identity != lastModernCommittedResultIdentity else { return }
+            lastModernCommittedResultIdentity = identity
+
+            cancelSilenceTimer()
+            cancelVADSilenceTimer()
+            resetDraftState()
+
+            if text.isEmpty == false {
+                Task {
+                    await emitRecognizedSentence(RecognizedSentence(text: text))
+                    await emitPartialDraft(nil)
+                }
+            } else {
+                Task { await emitPartialDraft(nil) }
+            }
+            return
+        }
+
+        guard text.isEmpty == false else {
+            Task { await emitPartialDraft(nil) }
+            return
+        }
+
+        emitDraftUpdate(from: result, text: text)
+    }
+
+    @available(macOS 26.0, *)
+    private func emitDraftUpdate(from result: SpeechTranscriber.Result, text: String) {
+        let now = Date()
+
+        if text != lastDraftText {
+            lastDraftText = text
+            lastDraftTextChangeTime = now
+            draftChangeHistory.append((text: text, time: now))
+        }
+        draftChangeHistory.removeAll { now.timeIntervalSince($0.time) > 0.4 }
+
+        let silenceMs = Int(now.timeIntervalSince(lastDraftTextChangeTime) * 1000)
+        let recentChanges = draftChangeHistory.count
+        let stabilityScore: Float
+        switch recentChanges {
+        case 0, 1: stabilityScore = 1.0
+        case 2:    stabilityScore = 0.7
+        default:   stabilityScore = max(0.1, 0.5 - Float(recentChanges - 2) * 0.15)
+        }
+
+        let boundaryScore: Float = String(text.suffix(1)).containsSentenceTerminator ? 0.9 : 0.45
+        let lengthFitScore = draftLengthFitScore(for: text)
+        let averageConfidence = transcriberAverageConfidence(result.text)
+
+        let chunkScore = ChunkScorer.score(
+            silenceMs: silenceMs,
+            vadProbability: lastVADProbability,
+            stabilityScore: stabilityScore,
+            boundaryScore: boundaryScore,
+            lengthFitScore: lengthFitScore,
+            confidenceScore: averageConfidence
+        )
+
+        let stablePrefixLen = computeStablePrefixLength(text: text, now: now)
+        let mutableTail = String(text.dropFirst(min(stablePrefixLen, text.count)))
+        let timeRange = transcriberTimeRange(result.text)
+        let startMs = timeRange.map { cmTimeMilliseconds($0.start) } ?? 0
+
+        let draft = DraftSegment(
+            segmentId: currentDraftId,
+            sourceText: text,
+            stablePrefixLength: stablePrefixLen,
+            mutableTailText: mutableTail,
+            avgConfidence: averageConfidence,
+            startMs: startMs,
+            lastUpdateMs: Int(now.timeIntervalSinceReferenceDate * 1000),
+            silenceMs: silenceMs,
+            stabilityScore: stabilityScore,
+            boundaryScore: boundaryScore,
+            chunkScore: chunkScore,
+            vadProbability: lastVADProbability,
+            words: []
+        )
+
+        Task { await emitPartialDraft(draft) }
+    }
+
+    @available(macOS 26.0, *)
+    private func normalizedTranscriberText(_ text: AttributedString) -> String {
+        String(text.characters)
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @available(macOS 26.0, *)
+    private func transcriberAverageConfidence(_ text: AttributedString) -> Float {
+        var total: Double = 0
+        var count = 0
+
+        for run in text.runs {
+            if let confidence = run.transcriptionConfidence {
+                total += confidence
+                count += 1
+            }
+        }
+
+        guard count > 0 else { return 0.82 }
+        return Float(total / Double(count))
+    }
+
+    @available(macOS 26.0, *)
+    private func transcriberTimeRange(_ text: AttributedString) -> CMTimeRange? {
+        for run in text.runs {
+            if let timeRange = run.audioTimeRange {
+                return timeRange
+            }
+        }
+
+        return nil
+    }
+
+    @available(macOS 26.0, *)
+    private func modernResultIdentity(for result: SpeechTranscriber.Result) -> String {
+        let startMs = cmTimeMilliseconds(result.range.start)
+        let durationMs = cmTimeMilliseconds(result.range.duration)
+        return "\(startMs):\(durationMs):\(normalizedTranscriberText(result.text))"
+    }
+
+    private func draftLengthFitScore(for text: String) -> Float {
+        let charCount = text.count
+        let isCJK = text.containsCJKCharacters
+
+        if isCJK {
+            switch charCount {
+            case 12...20: return 1.0
+            case 5..<12:  return Float(charCount) / 12.0 * 0.6
+            case 21...30: return 0.7
+            default:      return 0.3
+            }
+        }
+
+        switch charCount {
+        case 28...56: return 1.0
+        case 10..<28: return Float(charCount) / 28.0 * 0.6
+        case 57...84: return 0.7
+        default:      return 0.3
+        }
+    }
+
+    private func cmTimeMilliseconds(_ time: CMTime) -> Int {
+        guard time.isNumeric else { return 0 }
+        return Int((CMTimeGetSeconds(time) * 1000.0).rounded())
+    }
+
     // MARK: - Silence-commit timer
 
     /// Time after the last ASR callback before we force-commit pending text.
@@ -724,15 +1300,12 @@ final class LiveTranscriptionSession: NSObject {
         max(700, modeConfig.minSilenceCommitMs + 500)
     }
 
+    private var vadSilenceCommitDeadlineMs: Int {
+        max(280, modeConfig.minSilenceCommitMs)
+    }
+
     private func scheduleSilenceCommit() {
-        silenceCommitTimer?.cancel()
-        let timer = DispatchSource.makeTimerSource(queue: captureQueue)
-        timer.schedule(deadline: .now() + .milliseconds(silenceCommitDeadlineMs))
-        timer.setEventHandler { [weak self] in
-            self?.forceCommitOnSilence()
-        }
-        timer.resume()
-        silenceCommitTimer = timer
+        scheduleSilenceCommit(trigger: .asrInactivity, afterMs: silenceCommitDeadlineMs)
     }
 
     private func cancelSilenceTimer() {
@@ -746,15 +1319,7 @@ final class LiveTranscriptionSession: NSObject {
     /// Uses the mode's minSilenceCommitMs (100–200 ms) — much faster than the
     /// ASR-inactivity timer (700+ ms).
     private func scheduleVADSilenceCommit() {
-        vadSilenceCommitTimer?.cancel()
-        let deadline = modeConfig.minSilenceCommitMs
-        let timer = DispatchSource.makeTimerSource(queue: captureQueue)
-        timer.schedule(deadline: .now() + .milliseconds(deadline))
-        timer.setEventHandler { [weak self] in
-            self?.forceCommitOnSilence()
-        }
-        timer.resume()
-        vadSilenceCommitTimer = timer
+        scheduleSilenceCommit(trigger: .vadOffset, afterMs: vadSilenceCommitDeadlineMs)
     }
 
     private func cancelVADSilenceTimer() {
@@ -762,14 +1327,52 @@ final class LiveTranscriptionSession: NSObject {
         vadSilenceCommitTimer = nil
     }
 
+    private func scheduleSilenceCommit(trigger: SilenceCommitTrigger, afterMs: Int) {
+        cancelSilenceCommitTimer(for: trigger)
+        let timer = DispatchSource.makeTimerSource(queue: captureQueue)
+        timer.schedule(deadline: .now() + .milliseconds(afterMs))
+        timer.setEventHandler { [weak self] in
+            self?.forceCommitOnSilence(trigger: trigger)
+        }
+        timer.resume()
+
+        switch trigger {
+        case .asrInactivity:
+            silenceCommitTimer = timer
+        case .vadOffset:
+            vadSilenceCommitTimer = timer
+        }
+    }
+
+    private func cancelSilenceCommitTimer(for trigger: SilenceCommitTrigger) {
+        switch trigger {
+        case .asrInactivity:
+            cancelSilenceTimer()
+        case .vadOffset:
+            cancelVADSilenceTimer()
+        }
+    }
+
     /// Called by the silence timer when no new ASR result has arrived for
     /// silenceCommitDeadlineMs — meaning the user has paused.
-    private func forceCommitOnSilence() {
-        silenceCommitTimer = nil
+    private func forceCommitOnSilence(trigger: SilenceCommitTrigger) {
+        switch trigger {
+        case .asrInactivity:
+            silenceCommitTimer = nil
+        case .vadOffset:
+            vadSilenceCommitTimer = nil
+        }
+
         let segments = latestSegments
         let formattedText = latestFormattedText
 
         guard committedSegmentCount < segments.count else { return }
+
+        let pendingSegments = Array(segments[committedSegmentCount...])
+        if let delayMs = requiredCommitDelayMs(trigger: trigger, pendingSegments: pendingSegments) {
+            scheduleSilenceCommit(trigger: trigger, afterMs: delayMs)
+            return
+        }
 
         let lastIdx = segments.count - 1
         let currentRange = combinedRange(for: segments, from: committedSegmentCount, to: lastIdx)
@@ -787,12 +1390,41 @@ final class LiveTranscriptionSession: NSObject {
         Task { await emitPartialDraft(nil) }
     }
 
+    private func requiredCommitDelayMs(
+        trigger: SilenceCommitTrigger,
+        pendingSegments: [SFTranscriptionSegment]
+    ) -> Int? {
+        guard pendingSegments.isEmpty == false else {
+            return nil
+        }
+
+        let now = Date()
+        let lastUpdateTime = max(lastRecognitionResultTime, lastDraftTextChangeTime)
+        let elapsedMs = Int(now.timeIntervalSince(lastUpdateTime) * 1000)
+        let averageConfidence = pendingSegments.map(\.confidence).reduce(0, +) / Float(pendingSegments.count)
+
+        var settleWindowMs = trigger == .vadOffset ? 320 : 220
+        if pendingSegments.count <= 2 {
+            settleWindowMs += 80
+        }
+        if averageConfidence < 0.78 {
+            settleWindowMs += 120
+        }
+
+        guard elapsedMs < settleWindowMs else {
+            return nil
+        }
+
+        return settleWindowMs - max(elapsedMs, 0)
+    }
+
     // MARK: - Draft helpers (called on captureQueue)
 
     private func resetDraftState() {
         currentDraftId = UUID()
         lastDraftText = ""
         lastDraftTextChangeTime = Date.distantPast
+        lastRecognitionResultTime = Date.distantPast
         draftChangeHistory = []
         draftPrefixCandidate = ""
         draftPrefixCandidateTime = Date.distantPast

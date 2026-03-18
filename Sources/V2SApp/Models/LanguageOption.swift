@@ -18,4 +18,16 @@ enum LanguageCatalog {
     static func displayName(for identifier: String) -> String {
         common.first(where: { $0.id == identifier })?.displayName ?? identifier
     }
+
+    static func speechLocaleIdentifier(for identifier: String) -> String {
+        switch identifier {
+        case "en": return "en-US"
+        case "zh-Hans": return "zh-CN"
+        case "ja": return "ja-JP"
+        case "ko": return "ko-KR"
+        case "fr": return "fr-FR"
+        case "de": return "de-DE"
+        default: return identifier
+        }
+    }
 }

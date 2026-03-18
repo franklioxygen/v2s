@@ -22,6 +22,8 @@ final class AppModel: ObservableObject {
     private var fadeTask: Task<Void, Never>?
     private var draftTranslationTask: Task<Void, Never>?
     private var lastDraftStablePrefix = ""
+    private var displayedCaptionLastVisualUpdateAt = Date.distantPast
+    private var displayedCaptionLastVisualUpdateWasLateTranslation = false
     // Revision tracking: captionID → (committedTranslation, committedAt, revisionCount)
     private var translationRevisions: [UUID: (text: String, committedAt: Date, count: Int)] = [:]
 
@@ -162,12 +164,15 @@ final class AppModel: ObservableObject {
         let session = LiveTranscriptionSession()
         liveTranscriptionSession = session
         let config = ModeConfig.config(for: subtitleMode)
+        let speechLocaleIdentifier = LanguageCatalog.speechLocaleIdentifier(for: inputLanguageID)
+        let recognitionHints = recognitionContextualStrings()
 
         do {
             try await session.start(
                 source: selectedSource,
-                localeIdentifier: inputLanguageID,
+                localeIdentifier: speechLocaleIdentifier,
                 modeConfig: config,
+                contextualStrings: recognitionHints,
                 transcriptHandler: { [weak self] sentence in
                     self?.enqueueRecognizedSentence(sentence, sourceName: selectedSource.name)
                 },
@@ -254,6 +259,18 @@ final class AppModel: ObservableObject {
         settingsStore.save(settings)
     }
 
+    private func recognitionContextualStrings() -> [String] {
+        glossary.keys
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+            .sorted { lhs, rhs in
+                if lhs.count == rhs.count {
+                    return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+                }
+                return lhs.count < rhs.count
+            }
+    }
+
     func languageName(for identifier: String) -> String {
         LanguageCatalog.displayName(for: identifier)
     }
@@ -333,21 +350,51 @@ final class AppModel: ObservableObject {
         overlayState?.draftSourceText = nil
         overlayState?.draftTranslatedText = nil
         displayedCaption = nil
+        displayedCaptionLastVisualUpdateAt = Date.distantPast
+        displayedCaptionLastVisualUpdateWasLateTranslation = false
     }
 
     /// Snapshots the currently committed caption into the previous layer at full opacity.
     /// The previous layer stays visible until `startPreviousCaptionFade()` is called.
     private func capturePreviousCaption() {
         guard let current = overlayState,
+              displayedCaption != nil,
               !current.translatedText.isEmpty,
               current.translatedText != "Listening…",
               current.translatedText != "Capture stopped",
               current.translatedText != "Unable to start" else { return }
+
+        if inputLanguageID != outputLanguageID,
+           current.translatedText == current.sourceText {
+            return
+        }
+
+        if displayedCaptionLastVisualUpdateWasLateTranslation,
+           Date().timeIntervalSince(displayedCaptionLastVisualUpdateAt) < 0.8 {
+            return
+        }
+
         fadeTask?.cancel()
         fadeTask = nil
         overlayState?.previousTranslatedText = current.translatedText
         overlayState?.previousSourceText = current.sourceText
         overlayState?.previousFadeProgress = 0.0   // fully visible — no animation yet
+    }
+
+    private func updateCommittedOverlay(
+        translatedText: String,
+        sourceText: String,
+        bumpEpoch: Bool = false,
+        lateTranslation: Bool = false
+    ) {
+        if bumpEpoch {
+            overlayState?.captionEpoch = (overlayState?.captionEpoch ?? 0) + 1
+        }
+
+        overlayState?.translatedText = translatedText
+        overlayState?.sourceText = sourceText
+        displayedCaptionLastVisualUpdateAt = Date()
+        displayedCaptionLastVisualUpdateWasLateTranslation = lateTranslation
     }
 
     /// Triggers the scroll-up + fade animation on the previous caption layer.
@@ -488,8 +535,11 @@ final class AppModel: ObservableObject {
                     return
                 }
 
-                overlayState?.translatedText = translatedText
-                overlayState?.sourceText = displayedCaption.sourceText
+                updateCommittedOverlay(
+                    translatedText: translatedText,
+                    sourceText: displayedCaption.sourceText,
+                    lateTranslation: translatedText != displayedCaption.sourceText
+                )
             }
         }
     }
@@ -512,6 +562,8 @@ final class AppModel: ObservableObject {
         translationRevisions.removeAll()
         displayedCaption = nil
         activeInputLanguageID = nil
+        displayedCaptionLastVisualUpdateAt = Date.distantPast
+        displayedCaptionLastVisualUpdateWasLateTranslation = false
 
         Task {
             await translationService.reset()
@@ -556,9 +608,11 @@ final class AppModel: ObservableObject {
 
             // Source-first: show source text immediately while translation is pending
             displayedCaption = caption
-            overlayState?.captionEpoch = (overlayState?.captionEpoch ?? 0) + 1
-            overlayState?.translatedText = caption.sourceText
-            overlayState?.sourceText = caption.sourceText
+            updateCommittedOverlay(
+                translatedText: caption.sourceText,
+                sourceText: caption.sourceText,
+                bumpEpoch: true
+            )
             overlayState?.sourceName = caption.sourceName
             overlayState?.draftSourceText = nil
             overlayState?.draftTranslatedText = nil
@@ -569,7 +623,11 @@ final class AppModel: ObservableObject {
 
             guard liveTranscriptionSession != nil else { break }
 
-            overlayState?.translatedText = finalText
+            updateCommittedOverlay(
+                translatedText: finalText,
+                sourceText: caption.sourceText,
+                lateTranslation: finalText != caption.sourceText
+            )
             translationRevisions[caption.id] = (text: finalText, committedAt: Date(), count: 0)
 
             // New translation is now visible — scroll the previous caption upward
@@ -686,7 +744,11 @@ final class AppModel: ObservableObject {
         translationRevisions[captionId] = entry
 
         if displayedCaption?.id == captionId {
-            overlayState?.translatedText = revised
+            updateCommittedOverlay(
+                translatedText: revised,
+                sourceText: displayedCaption?.sourceText ?? revised,
+                lateTranslation: true
+            )
         }
     }
 

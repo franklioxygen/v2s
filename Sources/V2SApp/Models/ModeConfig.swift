@@ -37,24 +37,24 @@ struct ModeConfig: Sendable {
         firstTokenTargetMs: 300,
         commitSourceTargetMs: 600,
         commitTranslationTargetMs: 900,
-        maxChunkAudioSec: 2.0,
-        minSilenceCommitMs: 150
+        maxChunkAudioSec: 3.2,
+        minSilenceCommitMs: 280
     )
 
     static let follow = ModeConfig(
         firstTokenTargetMs: 200,
         commitSourceTargetMs: 450,
         commitTranslationTargetMs: 700,
-        maxChunkAudioSec: 1.5,
-        minSilenceCommitMs: 100
+        maxChunkAudioSec: 2.4,
+        minSilenceCommitMs: 220
     )
 
     static let reading = ModeConfig(
         firstTokenTargetMs: 400,
         commitSourceTargetMs: 800,
         commitTranslationTargetMs: 1200,
-        maxChunkAudioSec: 2.5,
-        minSilenceCommitMs: 200
+        maxChunkAudioSec: 3.8,
+        minSilenceCommitMs: 340
     )
 
     static func config(for mode: SubtitleMode) -> ModeConfig {
