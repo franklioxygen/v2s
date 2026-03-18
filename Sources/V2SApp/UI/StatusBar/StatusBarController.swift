@@ -80,6 +80,14 @@ final class StatusBarController {
         statusItem.button?.image = image
     }
 
+    /// Screen rect of the status bar button, for animation targeting.
+    var statusItemScreenRect: NSRect? {
+        guard let button = statusItem.button,
+              let window = button.window else { return nil }
+        let rect = button.convert(button.bounds, to: nil)
+        return window.convertToScreen(rect)
+    }
+
     @objc
     private func togglePopover(_ sender: Any?) {
         guard let button = statusItem.button else {

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import QuartzCore
 import SwiftUI
 
 @MainActor
@@ -26,6 +27,17 @@ final class OverlayWindowController {
     private var resizeDragStartHeight: Double?
     private var resizeDragStartTopLeft: NSPoint?
     private var mouseTrackingTimer: Timer?
+
+    // MARK: - Genie Animation State
+    var trayIconRectProvider: (() -> NSRect?)?
+    private var geniePhase: GeniePhase = .idle
+    private var panelsShown = false
+    private var genieHideWindow: NSWindow?
+    private var pendingHideSnapshot: NSWindow?
+
+    private enum GeniePhase {
+        case idle, showing, hiding
+    }
 
     init(model: AppModel) {
         self.model = model
@@ -133,11 +145,23 @@ final class OverlayWindowController {
 
     private func bindModel() {
         model.$isOverlayVisible
-            .sink { [weak self] _ in self?.scheduleWindowSync() }
+            .sink { [weak self] newVisible in
+                guard let self else { return }
+                // Capture snapshot synchronously (before SwiftUI re-renders)
+                // @Published fires on willSet, so current view content is still intact
+                self.captureHideSnapshotIfNeeded(
+                    newVisible: newVisible, newState: self.model.overlayState)
+                self.scheduleWindowSync()
+            }
             .store(in: &cancellables)
 
         model.$overlayState
-            .sink { [weak self] _ in self?.scheduleWindowSync() }
+            .sink { [weak self] newState in
+                guard let self else { return }
+                self.captureHideSnapshotIfNeeded(
+                    newVisible: self.model.isOverlayVisible, newState: newState)
+                self.scheduleWindowSync()
+            }
             .store(in: &cancellables)
 
         model.$overlayStyle
@@ -149,6 +173,14 @@ final class OverlayWindowController {
             .store(in: &cancellables)
     }
 
+    /// Pre-capture a snapshot of the overlay while content is still rendered.
+    /// Called synchronously from Combine sinks (during willSet, before SwiftUI updates).
+    private func captureHideSnapshotIfNeeded(newVisible: Bool, newState: OverlayPreviewState?) {
+        let willShow = newVisible && newState != nil
+        guard !willShow, panelsShown, pendingHideSnapshot == nil else { return }
+        pendingHideSnapshot = createSnapshotWindow(of: panel, frame: panel.frame)
+    }
+
     private func scheduleWindowSync() {
         DispatchQueue.main.async { [weak self] in
             self?.syncWindow()
@@ -156,18 +188,261 @@ final class OverlayWindowController {
     }
 
     private func syncWindow() {
-        guard model.isOverlayVisible, model.overlayState != nil else {
+        let shouldShow = model.isOverlayVisible && model.overlayState != nil
+
+        if shouldShow && !panelsShown {
+            // Transition: hidden → visible
+            panelsShown = true
+            if geniePhase == .hiding { cancelGenieAnimation() }
+            positionPanels()
+            animateGenieShow()
+        } else if !shouldShow && panelsShown {
+            // Transition: visible → hidden
+            panelsShown = false
+            if geniePhase == .showing { cancelGenieAnimation() }
             stopMouseTracking()
             interactionState.updatePassThroughBubble(nil)
-            orderOutAllPanels()
+            animateGenieHide()
+        } else if shouldShow && geniePhase == .idle {
+            // Already visible, just update layout
+            positionPanels()
+            orderFrontAllPanels()
+            startMouseTrackingIfNeeded()
+            updatePassThroughBubble()
+        }
+    }
+
+    // MARK: - Genie Effect Animation
+
+    private func animateGenieShow() {
+        pendingHideSnapshot?.orderOut(nil)
+        pendingHideSnapshot = nil
+
+        guard let trayRect = trayIconRectProvider?() else {
+            // No tray rect available – show instantly
+            geniePhase = .idle
+            orderFrontAllPanels()
+            startMouseTrackingIfNeeded()
+            updatePassThroughBubble()
             return
         }
 
-        positionPanels()
-        orderFrontAllPanels()
-        startMouseTrackingIfNeeded()
-        updatePassThroughBubble()
+        geniePhase = .showing
+        let finalFrame = panel.frame
+        let duration: TimeInterval = 0.48
+
+        // Start as a tiny strip at the tray icon
+        let startFrame = NSRect(
+            x: trayRect.midX - 15,
+            y: trayRect.minY - 4,
+            width: 30,
+            height: 8
+        )
+
+        // Hide control panels during animation
+        let controlPanels = [controlsChromePanel, moveButtonPanel, closeButtonPanel, resizeButtonPanel]
+        controlPanels.forEach { $0.alphaValue = 0; $0.orderOut(nil) }
+
+        // Set initial state for main panel
+        panel.setFrame(startFrame, display: false)
+        panel.alphaValue = 0
+        panel.orderFront(nil)
+        panel.orderFrontRegardless()
+
+        // Apply initial perspective warp (tapered toward tray)
+        applyPerspectiveTransform(angle: 0.3)
+
+        // Animate perspective back to flat
+        animateLayerPerspective(fromAngle: 0.3, toAngle: 0, duration: duration,
+                                timing: CAMediaTimingFunction(controlPoints: 0.16, 1.0, 0.3, 1.0))
+
+        // Animate frame + alpha
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1.0, 0.3, 1.0)
+            self.panel.animator().setFrame(finalFrame, display: true)
+            self.panel.animator().alphaValue = 1.0
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.geniePhase == .showing else { return }
+                self.resetLayerTransform()
+                self.geniePhase = .idle
+                self.positionPanels()
+                self.orderFrontAllPanels()
+                self.fadeInControlPanels()
+                self.startMouseTrackingIfNeeded()
+                self.updatePassThroughBubble()
+            }
+        })
     }
+
+    private func animateGenieHide() {
+        // Use the pre-captured snapshot (taken synchronously before SwiftUI re-render)
+        let animWindow = pendingHideSnapshot
+        pendingHideSnapshot = nil
+
+        guard let trayRect = trayIconRectProvider?() else {
+            // No tray rect – hide instantly
+            geniePhase = .idle
+            orderOutAllPanels()
+            animWindow?.orderOut(nil)
+            return
+        }
+
+        geniePhase = .hiding
+        let duration: TimeInterval = 0.42
+
+        // Target: tiny strip at tray icon
+        let targetFrame = NSRect(
+            x: trayRect.midX - 15,
+            y: trayRect.minY - 4,
+            width: 30,
+            height: 8
+        )
+
+        // Hide all real panels immediately
+        orderOutAllPanels()
+
+        guard let animWindow else {
+            geniePhase = .idle
+            return
+        }
+
+        animWindow.orderFront(nil)
+        animWindow.orderFrontRegardless()
+        self.genieHideWindow = animWindow
+
+        // Animate perspective warp on snapshot (flat → tapered toward tray)
+        if let layer = animWindow.contentView?.layer {
+            let anim = CABasicAnimation(keyPath: "transform")
+            anim.fromValue = CATransform3DIdentity
+            var toT = CATransform3DIdentity
+            toT.m34 = -1.0 / 300.0
+            toT = CATransform3DRotate(toT, 0.3, 1, 0, 0)
+            anim.toValue = toT
+            anim.duration = duration
+            anim.timingFunction = CAMediaTimingFunction(controlPoints: 0.5, 0.0, 1.0, 0.35)
+            anim.isRemovedOnCompletion = true
+            layer.transform = toT
+            layer.add(anim, forKey: "geniePerspective")
+        }
+
+        // Animate frame + alpha on snapshot window
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.5, 0.0, 1.0, 0.35)
+            animWindow.animator().setFrame(targetFrame, display: true)
+            animWindow.animator().alphaValue = 0.0
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                animWindow.orderOut(nil)
+                self?.genieHideWindow = nil
+                if self?.geniePhase == .hiding {
+                    self?.geniePhase = .idle
+                }
+            }
+        })
+    }
+
+    private func createSnapshotWindow(of sourcePanel: NSPanel, frame: NSRect) -> NSWindow? {
+        guard let contentView = sourcePanel.contentView,
+              let bitmapRep = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else {
+            return nil
+        }
+        contentView.cacheDisplay(in: contentView.bounds, to: bitmapRep)
+
+        let image = NSImage(size: contentView.bounds.size)
+        image.addRepresentation(bitmapRep)
+
+        let imageView = NSImageView(frame: NSRect(origin: .zero, size: frame.size))
+        imageView.image = image
+        imageView.imageScaling = .scaleAxesIndependently
+        imageView.wantsLayer = true
+
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.level = .statusBar
+        window.hasShadow = false
+        window.hidesOnDeactivate = false
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle, .stationary]
+        window.contentView = imageView
+
+        return window
+    }
+
+    private func cancelGenieAnimation() {
+        panel.contentView?.layer?.removeAllAnimations()
+        resetLayerTransform()
+        genieHideWindow?.contentView?.layer?.removeAllAnimations()
+        genieHideWindow?.orderOut(nil)
+        genieHideWindow = nil
+        pendingHideSnapshot?.orderOut(nil)
+        pendingHideSnapshot = nil
+        geniePhase = .idle
+    }
+
+    private func applyPerspectiveTransform(angle: CGFloat) {
+        guard let contentView = panel.contentView else { return }
+        contentView.wantsLayer = true
+        guard let layer = contentView.layer else { return }
+        var t = CATransform3DIdentity
+        t.m34 = -1.0 / 300.0
+        t = CATransform3DRotate(t, angle, 1, 0, 0)
+        layer.transform = t
+    }
+
+    private func animateLayerPerspective(fromAngle: CGFloat, toAngle: CGFloat,
+                                          duration: TimeInterval,
+                                          timing: CAMediaTimingFunction) {
+        guard let contentView = panel.contentView else { return }
+        contentView.wantsLayer = true
+        guard let layer = contentView.layer else { return }
+
+        var fromT = CATransform3DIdentity
+        if fromAngle != 0 {
+            fromT.m34 = -1.0 / 300.0
+            fromT = CATransform3DRotate(fromT, fromAngle, 1, 0, 0)
+        }
+
+        var toT = CATransform3DIdentity
+        if toAngle != 0 {
+            toT.m34 = -1.0 / 300.0
+            toT = CATransform3DRotate(toT, toAngle, 1, 0, 0)
+        }
+
+        let anim = CABasicAnimation(keyPath: "transform")
+        anim.fromValue = fromT
+        anim.toValue = toT
+        anim.duration = duration
+        anim.timingFunction = timing
+        anim.isRemovedOnCompletion = true
+        layer.transform = toT
+        layer.add(anim, forKey: "geniePerspective")
+    }
+
+    private func resetLayerTransform() {
+        panel.contentView?.layer?.transform = CATransform3DIdentity
+    }
+
+    private func fadeInControlPanels() {
+        positionPanels()
+        let controlPanels = [controlsChromePanel, moveButtonPanel, closeButtonPanel, resizeButtonPanel]
+        controlPanels.forEach { $0.alphaValue = 0; $0.orderFront(nil) }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.25
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            controlPanels.forEach { $0.animator().alphaValue = 1.0 }
+        }
+    }
+
+    // MARK: - Panel Ordering
 
     private func orderFrontAllPanels() {
         panel.orderFront(nil)
@@ -355,7 +630,9 @@ final class OverlayWindowController {
         guard mouseTrackingTimer == nil else { return }
 
         let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            self?.updatePassThroughBubble()
+            MainActor.assumeIsolated {
+                self?.updatePassThroughBubble()
+            }
         }
         mouseTrackingTimer = timer
         RunLoop.main.add(timer, forMode: .common)

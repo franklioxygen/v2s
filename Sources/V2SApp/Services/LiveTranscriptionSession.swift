@@ -9,7 +9,7 @@ struct RecognizedSentence: Equatable, Sendable {
     let text: String
 }
 
-final class LiveTranscriptionSession: NSObject {
+final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private struct AudioLevelStats {
         let peak: Float
         let rms: Float
