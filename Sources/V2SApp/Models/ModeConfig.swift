@@ -75,18 +75,35 @@ struct ModeConfig: Sendable {
 enum ChunkScorer {
     static func score(
         silenceMs: Int,
+        vadProbability: Float,
         stabilityScore: Float,
         boundaryScore: Float,
         lengthFitScore: Float,
         confidenceScore: Float
     ) -> Float {
-        silenceScoreValue(silenceMs: silenceMs) * 0.30
+        let silenceScore = vadSilenceScoreValue(probability: vadProbability)
+        return silenceScore     * 0.30
             + stabilityScore  * 0.20
             + boundaryScore   * 0.20
             + lengthFitScore  * 0.15
             + confidenceScore * 0.15
     }
 
+    /// VAD-based silence scoring:
+    ///   probability < 0.1  → 1.0  (clear silence, strong commit signal)
+    ///   probability 0.1–0.35 → 0.7–0.4  (fading speech)
+    ///   probability 0.35–0.5 → 0.4  (ambiguous)
+    ///   probability > 0.5  → 0.0  (active speech, do not commit)
+    private static func vadSilenceScoreValue(probability: Float) -> Float {
+        switch probability {
+        case ..<0.1:      return 1.0
+        case 0.1..<0.35:  return 0.7 - (probability - 0.1) / 0.25 * 0.3
+        case 0.35..<0.5:  return 0.4
+        default:          return 0.0
+        }
+    }
+
+    /// Legacy heuristic silence scoring (kept for reference).
     /// silence < 120 ms → 0.0 · 120–250 ms → 0.4–0.7 · >= 250 ms → 1.0
     private static func silenceScoreValue(silenceMs: Int) -> Float {
         switch silenceMs {

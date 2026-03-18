@@ -20,6 +20,7 @@ struct DraftSegment: Equatable, Sendable {
     var stabilityScore: Float
     var boundaryScore: Float
     var chunkScore: Float
+    var vadProbability: Float
     var words: [WordToken]
 
     var stablePrefixText: String {

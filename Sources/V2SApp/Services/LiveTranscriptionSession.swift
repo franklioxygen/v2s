@@ -82,6 +82,11 @@ final class LiveTranscriptionSession: NSObject {
     private var latestSegments: [SFTranscriptionSegment] = []
     private var latestFormattedText: NSString = ""
 
+    // MARK: Silero VAD (captureQueue)
+    private var vadEngine: SileroVADEngine?
+    private var lastVADProbability: Float = 0.0
+    private var vadSilenceCommitTimer: DispatchSourceTimer?
+
     func start(
         source: InputSource,
         localeIdentifier: String,
@@ -108,6 +113,7 @@ final class LiveTranscriptionSession: NSObject {
 
     func stop() {
         cancelSilenceTimer()
+        cancelVADSilenceTimer()
 
         microphoneCaptureSession?.stopRunning()
         microphoneCaptureSession = nil
@@ -123,6 +129,9 @@ final class LiveTranscriptionSession: NSObject {
         audioConverter = nil
         audioConverterInputSignature = nil
         committedSegmentCount = 0
+
+        vadEngine = nil
+        lastVADProbability = 0
 
         latestSegments = []
         latestFormattedText = ""
@@ -195,6 +204,15 @@ final class LiveTranscriptionSession: NSObject {
         latestFormattedText = ""
         cancelSilenceTimer()
         resetDraftState()
+
+        // Initialize Silero VAD engine.
+        do {
+            vadEngine = try SileroVADEngine()
+        } catch {
+            // VAD is optional — fall back to implicit ASR-based silence detection.
+            vadEngine = nil
+            Task { await emitError("Silero VAD unavailable: \(error.localizedDescription). Falling back to ASR-based silence detection.") }
+        }
     }
 
     private func startMicrophoneCapture(deviceUniqueID: String) throws {
@@ -414,10 +432,28 @@ final class LiveTranscriptionSession: NSObject {
         switch status {
         case .haveData, .inputRanDry, .endOfStream:
             if convertedBuffer.frameLength > 0 {
-                // Boost quiet audio before the recognizer's VAD sees it.
-                // convertedBuffer is always Float32 (nativeFormat) and owned by us.
+                // Boost quiet audio before the VAD / recognizer sees it.
                 boostIfQuiet(buffer: convertedBuffer)
-                recognitionRequest.append(convertedBuffer)
+
+                if let vadEngine {
+                    let vadResult = vadEngine.process(buffer: convertedBuffer)
+                    lastVADProbability = vadResult.speechProbability
+
+                    // Only forward speech frames to the ASR.
+                    if vadResult.isSpeech {
+                        recognitionRequest.append(convertedBuffer)
+                    }
+
+                    if vadResult.containsSpeechOffset {
+                        scheduleVADSilenceCommit()
+                    }
+                    if vadResult.containsSpeechOnset {
+                        cancelVADSilenceTimer()
+                    }
+                } else {
+                    // Fallback: no VAD, pass everything through.
+                    recognitionRequest.append(convertedBuffer)
+                }
             }
         case .error:
             Task {
@@ -611,6 +647,8 @@ final class LiveTranscriptionSession: NSObject {
         recognitionRequest?.endAudio()
         recognitionTask?.cancel()
         cancelSilenceTimer()
+        cancelVADSilenceTimer()
+        vadEngine?.reset()
 
         // Bump generation BEFORE creating the new handler so any late callbacks
         // dispatched by the cancelled task are silently ignored.
@@ -705,6 +743,28 @@ final class LiveTranscriptionSession: NSObject {
     private func cancelSilenceTimer() {
         silenceCommitTimer?.cancel()
         silenceCommitTimer = nil
+    }
+
+    // MARK: - VAD-based silence commit
+
+    /// Schedules a fast commit based on Silero VAD detecting speech offset.
+    /// Uses the mode's minSilenceCommitMs (100–200 ms) — much faster than the
+    /// ASR-inactivity timer (700+ ms).
+    private func scheduleVADSilenceCommit() {
+        vadSilenceCommitTimer?.cancel()
+        let deadline = modeConfig.minSilenceCommitMs
+        let timer = DispatchSource.makeTimerSource(queue: captureQueue)
+        timer.schedule(deadline: .now() + .milliseconds(deadline))
+        timer.setEventHandler { [weak self] in
+            self?.forceCommitOnSilence()
+        }
+        timer.resume()
+        vadSilenceCommitTimer = timer
+    }
+
+    private func cancelVADSilenceTimer() {
+        vadSilenceCommitTimer?.cancel()
+        vadSilenceCommitTimer = nil
     }
 
     /// Called by the silence timer when no new ASR result has arrived for
@@ -809,6 +869,7 @@ final class LiveTranscriptionSession: NSObject {
 
         let chunkScore = ChunkScorer.score(
             silenceMs: silenceMs,
+            vadProbability: lastVADProbability,
             stabilityScore: stabilityScore,
             boundaryScore: boundaryScore,
             lengthFitScore: lengthFitScore,
@@ -840,6 +901,7 @@ final class LiveTranscriptionSession: NSObject {
             stabilityScore: stabilityScore,
             boundaryScore: boundaryScore,
             chunkScore: chunkScore,
+            vadProbability: lastVADProbability,
             words: words
         )
 
