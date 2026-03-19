@@ -141,6 +141,14 @@ struct OverlayView: View {
                         .multilineTextAlignment(.center)
                         .lineLimit(2)
                         .frame(maxWidth: .infinity)
+                } else if model.shouldReserveDraftTranslationSlot {
+                    Text(" ")
+                        .font(.system(size: model.overlayStyle.scaledTranslatedFontSize, weight: .semibold))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity)
+                        .hidden()
+                        .accessibilityHidden(true)
                 }
 
                 let prefixLen = min(state.draftStablePrefixLength, draftText.count)

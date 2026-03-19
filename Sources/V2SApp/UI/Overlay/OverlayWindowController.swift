@@ -586,7 +586,7 @@ final class OverlayWindowController {
             + style.scaledSourceFontSize * 0.82
             + 20.0
 
-        let draftExtra = style.scaledSourceFontSize + 12.0
+        let draftExtra = style.scaledTranslatedFontSize + style.scaledSourceFontSize + 18.0
 
         return min(max(base + historyExtra + draftExtra, 88.0), 280.0)
     }

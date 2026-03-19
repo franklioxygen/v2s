@@ -5,13 +5,29 @@ struct SessionActionButtonLabel: View {
     let showsActivity: Bool
 
     var body: some View {
-        HStack(spacing: 6) {
-            if showsActivity {
-                SessionWaitIndicator()
+        ZStack {
+            HStack(spacing: 6) {
+                SessionWaitIndicatorGlyph()
+                Text("Start")
             }
+            .hidden()
 
-            Text(title)
+            HStack(spacing: 6) {
+                if showsActivity {
+                    SessionWaitIndicator()
+                }
+
+                Text(title)
+            }
         }
+    }
+}
+
+private struct SessionWaitIndicatorGlyph: View {
+    var body: some View {
+        Image(systemName: "arrow.triangle.2.circlepath")
+            .font(.system(size: 11, weight: .semibold))
+            .accessibilityHidden(true)
     }
 }
 
@@ -19,8 +35,7 @@ private struct SessionWaitIndicator: View {
     @State private var isAnimating = false
 
     var body: some View {
-        Image(systemName: "arrow.triangle.2.circlepath")
-            .font(.system(size: 11, weight: .semibold))
+        SessionWaitIndicatorGlyph()
             .rotationEffect(.degrees(isAnimating ? 360 : 0))
             .animation(.linear(duration: 0.9).repeatForever(autoreverses: false), value: isAnimating)
             .onAppear {

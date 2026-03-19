@@ -732,13 +732,17 @@ final class AppModel: ObservableObject {
 
     private func handlePartialDraft(_ draft: DraftSegment?) {
         guard liveTranscriptionSession != nil else { return }
-        overlayState?.draftSourceText = draft?.sourceText
-        overlayState?.draftStablePrefixLength = draft?.stablePrefixLength ?? 0
+        let draftText = sanitizedDisplayText(draft?.sourceText ?? "")
+        overlayState?.draftSourceText = draftText.isEmpty ? nil : draftText
+        overlayState?.draftStablePrefixLength = draftText.isEmpty
+            ? 0
+            : min(draft?.stablePrefixLength ?? 0, draftText.count)
 
-        let stablePrefix = draft.map { String($0.sourceText.prefix($0.stablePrefixLength)) } ?? ""
+        let stablePrefix = draftText.isEmpty
+            ? ""
+            : String(draftText.prefix(min(draft?.stablePrefixLength ?? 0, draftText.count)))
         lastDraftStablePrefix = stablePrefix
 
-        let draftText = draft?.sourceText.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard draftText != lastDraftTranslationSource else { return }
         lastDraftTranslationSource = draftText
 
@@ -747,8 +751,16 @@ final class AppModel: ObservableObject {
             draftTranslationTask = nil
             draftTranslationGeneration &+= 1
             overlayState?.draftTranslatedText = nil
-        } else {
+        } else if shouldReserveDraftTranslationSlot {
+            // Clear the previous draft translation immediately so a stale line
+            // never lingers above a newer source draft.
+            overlayState?.draftTranslatedText = nil
             scheduleDraftTranslation(for: draftText)
+        } else {
+            draftTranslationTask?.cancel()
+            draftTranslationTask = nil
+            draftTranslationGeneration &+= 1
+            overlayState?.draftTranslatedText = draftText
         }
     }
 
@@ -880,7 +892,7 @@ final class AppModel: ObservableObject {
     // MARK: - Caption queue
 
     private func enqueueRecognizedSentence(_ sentence: RecognizedSentence, sourceName: String) {
-        let sourceText = sentence.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sourceText = sanitizedDisplayText(sentence.text)
         guard sourceText.isEmpty == false else {
             return
         }
@@ -957,6 +969,10 @@ final class AppModel: ObservableObject {
 
     private var currentSourceLanguageID: String {
         activeInputLanguageID ?? inputLanguageID
+    }
+
+    var shouldReserveDraftTranslationSlot: Bool {
+        currentSourceLanguageID != outputLanguageID
     }
 
     private func resetLiveTextPipeline() {
@@ -1069,6 +1085,23 @@ final class AppModel: ObservableObject {
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { $0.isEmpty == false }
             .joined(separator: " ")
+    }
+
+    private func sanitizedDisplayText(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            return ""
+        }
+
+        return containsSubtitleContent(trimmed) ? trimmed : ""
+    }
+
+    private func containsSubtitleContent(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            CharacterSet.whitespacesAndNewlines.contains(scalar) == false
+                && CharacterSet.punctuationCharacters.contains(scalar) == false
+                && CharacterSet.symbols.contains(scalar) == false
+        }
     }
 
     private func shouldEnqueueRecognizedSentence(_ text: String) -> Bool {
@@ -1279,8 +1312,8 @@ final class AppModel: ObservableObject {
     }
 
     private func shouldStoreOverlayHistory(translatedText: String, sourceText: String) -> Bool {
-        let normalizedTranslated = translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedSource = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedTranslated = sanitizedDisplayText(translatedText)
+        let normalizedSource = sanitizedDisplayText(sourceText)
         guard normalizedTranslated.isEmpty == false || normalizedSource.isEmpty == false else {
             return false
         }
