@@ -2,6 +2,7 @@ import SwiftUI
 
 struct StatusBarPopoverView: View {
     @ObservedObject var model: AppModel
+    let closePopover: () -> Void
     let openSettings: () -> Void
     let quitApp: () -> Void
 
@@ -40,7 +41,13 @@ struct StatusBarPopoverView: View {
                     .padding(.vertical, 6)
                     .background(.quaternary, in: Capsule())
             }
-            Button { model.toggleSession() } label: {
+            Button {
+                let shouldCloseAfterStart = model.sessionState != .running
+                model.toggleSession()
+                if shouldCloseAfterStart {
+                    closePopover()
+                }
+            } label: {
                 SessionActionButtonLabel(
                     title: model.sessionButtonTitle,
                     showsActivity: model.showsSessionWaitIndicator
@@ -130,6 +137,7 @@ struct StatusBarPopoverView: View {
                     Text("Controls Only")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Toggle("1 px White Text Outline", isOn: whiteTextOutlineBinding)
                 sliderRow(
                     label: "Opacity",
                     value: overlayOpacityBinding, in: 0.0 ... 1.0,
@@ -223,6 +231,12 @@ struct StatusBarPopoverView: View {
         Binding(
             get: { model.overlayStyle.translatedFontSize },
             set: { v in model.updateOverlayStyle { $0.translatedFontSize = v } }
+        )
+    }
+    private var whiteTextOutlineBinding: Binding<Bool> {
+        Binding(
+            get: { model.overlayStyle.usesWhiteTextOutline },
+            set: { v in model.updateOverlayStyle { $0.usesWhiteTextOutline = v } }
         )
     }
     private var sourceFontBinding: Binding<Double> {

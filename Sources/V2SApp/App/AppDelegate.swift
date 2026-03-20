@@ -29,10 +29,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.overlayWindowController = overlayWindowController
         self.statusBarController = statusBarController
 
-        appModel.onTranslationPreparationUIRequested = { [weak settingsWindowController] in
-            settingsWindowController?.showSettingsForPreparationIfAllowed()
-        }
-
         overlayWindowController.trayIconRectProvider = { [weak self] in
             self?.statusBarController?.statusItemScreenRect
         }

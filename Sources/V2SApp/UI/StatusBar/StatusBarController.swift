@@ -48,6 +48,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.contentViewController = NSHostingController(
             rootView: StatusBarPopoverView(
                 model: model,
+                closePopover: { [weak self] in
+                    self?.popover.performClose(nil)
+                },
                 openSettings: { [weak self] in
                     self?.popover.performClose(nil)
                     self?.openSettings()

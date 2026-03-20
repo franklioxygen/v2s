@@ -158,6 +158,8 @@ struct SettingsView: View {
                 Spacer()
             }
 
+            Toggle("1 px White Text Outline", isOn: whiteTextOutlineBinding)
+
             LabeledSlider(
                 title: "Top Inset",
                 value: topInsetBinding,
@@ -233,6 +235,10 @@ struct SettingsView: View {
 
     private var backgroundOpacityBinding: Binding<Double> {
         overlayBinding(\.backgroundOpacity)
+    }
+
+    private var whiteTextOutlineBinding: Binding<Bool> {
+        overlayBinding(\.usesWhiteTextOutline)
     }
 
     private var translatedFontBinding: Binding<Double> {

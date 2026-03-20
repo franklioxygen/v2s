@@ -4,7 +4,6 @@ import SwiftUI
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let dockVisibilityController: DockVisibilityController
-    private var suppressNextPreparationAutoShow = false
     private lazy var subtitleModeInfoWindowController = SubtitleModeInfoWindowController()
 
     init(model: AppModel, dockVisibilityController: DockVisibilityController) {
@@ -37,7 +36,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func showSettings() {
-        suppressNextPreparationAutoShow = false
         dockVisibilityController.setVisible(true, for: .settingsWindow)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
@@ -45,17 +43,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func closeForSessionStart() {
-        suppressNextPreparationAutoShow = true
         window?.performClose(nil)
-    }
-
-    func showSettingsForPreparationIfAllowed() {
-        if suppressNextPreparationAutoShow {
-            suppressNextPreparationAutoShow = false
-            return
-        }
-
-        showSettings()
     }
 
     func windowWillClose(_ notification: Notification) {

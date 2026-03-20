@@ -54,7 +54,7 @@ struct OverlayView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                     .mask(continuousFlowMask)
-                    .animation(Self.captionFlowAnimation, value: state)
+                    .animation(Self.captionFlowAnimation, value: flowAnimationState(for: state))
                     .onPreferenceChange(DraftSlotHeightPreferenceKey.self) { height in
                         guard height > 0 else { return }
                         let snappedHeight = ceil(height)
@@ -114,21 +114,27 @@ struct OverlayView: View {
     }
 
     private func translatedText(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.system(size: model.overlayStyle.scaledTranslatedFontSize, weight: .semibold))
-            .foregroundStyle(color)
-            .multilineTextAlignment(.center)
-            .lineLimit(2)
-            .frame(maxWidth: .infinity)
+        captionText(
+            attributedCaptionText(
+                text: text,
+                fillColor: color,
+                fontSize: model.overlayStyle.scaledTranslatedFontSize
+            ),
+            fontSize: model.overlayStyle.scaledTranslatedFontSize,
+            weight: .semibold
+        )
     }
 
     private func sourceText(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.system(size: model.overlayStyle.scaledSourceFontSize, weight: .regular))
-            .foregroundStyle(color)
-            .multilineTextAlignment(.center)
-            .lineLimit(2)
-            .frame(maxWidth: .infinity)
+        captionText(
+            attributedCaptionText(
+                text: text,
+                fillColor: color,
+                fontSize: model.overlayStyle.scaledSourceFontSize
+            ),
+            fontSize: model.overlayStyle.scaledSourceFontSize,
+            weight: .regular
+        )
     }
 
     // MARK: - Draft layer (50–65% opacity, stable prefix slightly brighter)
@@ -160,14 +166,15 @@ struct OverlayView: View {
                     let stable = String(draftText.prefix(prefixLen))
                     let mutable = String(draftText.dropFirst(prefixLen))
 
-                    (
-                        Text(stable).foregroundStyle(Color.white.opacity(0.62))
-                            + Text(mutable).foregroundStyle(Color.white.opacity(0.48))
+                    captionText(
+                        draftSourceAttributedText(
+                            stable: stable,
+                            mutable: mutable,
+                            fontSize: model.overlayStyle.scaledSourceFontSize
+                        ),
+                        fontSize: model.overlayStyle.scaledSourceFontSize,
+                        weight: .regular
                     )
-                    .font(.system(size: model.overlayStyle.scaledSourceFontSize, weight: .regular))
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity)
                 }
                 .background(draftSlotHeightReader),
                     key: promotionKey(
@@ -237,6 +244,15 @@ struct OverlayView: View {
 
     private func hasCommittedCaption(_ state: OverlayPreviewState) -> Bool {
         state.translatedText.isEmpty == false || state.sourceText.isEmpty == false
+    }
+
+    private func flowAnimationState(for state: OverlayPreviewState) -> OverlayFlowAnimationState {
+        OverlayFlowAnimationState(
+            captionEpoch: state.captionEpoch,
+            translatedText: state.translatedText,
+            sourceText: state.sourceText,
+            historyIDs: state.history.map(\.id)
+        )
     }
 
     private var historyRowHeight: CGFloat {
@@ -351,6 +367,64 @@ struct OverlayView: View {
             .fill(Color.black.opacity(model.overlayStyle.backgroundOpacity))
     }
 
+    private func captionText(
+        _ attributedText: AttributedString,
+        fontSize: Double,
+        weight: Font.Weight
+    ) -> some View {
+        Text(attributedText)
+            .font(.system(size: fontSize, weight: weight))
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
+            .frame(maxWidth: .infinity)
+    }
+
+    private func attributedCaptionText(
+        text: String,
+        fillColor: Color,
+        fontSize: Double
+    ) -> AttributedString {
+        var attributed = AttributedString(text)
+        attributed.foregroundColor = fillColor
+        applyWhiteTextOutlineIfNeeded(to: &attributed, fontSize: fontSize)
+        return attributed
+    }
+
+    private func draftSourceAttributedText(
+        stable: String,
+        mutable: String,
+        fontSize: Double
+    ) -> AttributedString {
+        var attributed = AttributedString()
+
+        if stable.isEmpty == false {
+            var stablePart = AttributedString(stable)
+            stablePart.foregroundColor = Color.white.opacity(0.62)
+            attributed += stablePart
+        }
+
+        if mutable.isEmpty == false {
+            var mutablePart = AttributedString(mutable)
+            mutablePart.foregroundColor = Color.white.opacity(0.48)
+            attributed += mutablePart
+        }
+
+        applyWhiteTextOutlineIfNeeded(to: &attributed, fontSize: fontSize)
+        return attributed
+    }
+
+    private func applyWhiteTextOutlineIfNeeded(
+        to attributed: inout AttributedString,
+        fontSize: Double
+    ) {
+        guard model.overlayStyle.usesWhiteTextOutline, fontSize > 0 else {
+            return
+        }
+
+        attributed.strokeColor = .white
+        attributed.strokeWidth = -(100.0 / fontSize)
+    }
+
     @ViewBuilder
     private var passThroughBubble: some View {
         if let hint = renderedPassThroughBubble {
@@ -421,6 +495,13 @@ private extension OverlayView {
     static let captionPairSpacing: CGFloat = 4.0
 }
 
+private struct OverlayFlowAnimationState: Equatable {
+    let captionEpoch: Int
+    let translatedText: String
+    let sourceText: String
+    let historyIDs: [UUID]
+}
+
 private struct DraftSlotHeightPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0.0
 
@@ -433,11 +514,9 @@ private struct OverlayTranslationHostModifier: ViewModifier {
     @ObservedObject var model: AppModel
 
     func body(content: Content) -> some View {
-        if model.sessionState == .running {
-            content.v2sTranslationHost(model: model)
-        } else {
-            content
-        }
+        // Translation resource preparation can begin before the live session
+        // flips to `.running`, so keep a host attached for the lifetime of the overlay view.
+        content.v2sTranslationHost(model: model)
     }
 }
 

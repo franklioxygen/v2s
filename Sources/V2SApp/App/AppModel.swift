@@ -21,17 +21,17 @@ final class AppModel: ObservableObject {
     private var activeInputLanguageID: String?
     private var isBootstrapping = true
     private var draftTranslationTask: Task<Void, Never>?
+    private var draftClearTask: Task<Void, Never>?
     private var languageResourcePreparationTask: Task<Void, Never>?
     private var lastDraftStablePrefix = ""
     private var lastDraftTranslationSource = ""
     private var draftTranslationGeneration: Int = 0
+    private var draftClearGeneration: Int = 0
     private var displayedCaptionLastVisualUpdateAt = Date.distantPast
     private var displayedCaptionLastVisualUpdateWasLateTranslation = false
     // Revision tracking: captionID → (committedTranslation, committedAt, revisionCount)
     private var translationRevisions: [UUID: (text: String, committedAt: Date, count: Int)] = [:]
     private var recentRecognizedCaptionTexts: [(text: String, time: Date)] = []
-    var onTranslationPreparationUIRequested: (() -> Void)?
-
     @Published private(set) var applicationSources: [InputSource] = []
     @Published private(set) var microphoneSources: [InputSource] = []
     @Published private(set) var sessionState: SessionState = .idle
@@ -188,6 +188,9 @@ final class AppModel: ObservableObject {
         }
 
         resetLiveTextPipeline()
+        statusMessage = "Checking language resources..."
+        await awaitSelectedLanguageResourcePreparationIfNeeded()
+
         activeInputLanguageID = inputLanguageID
         isOverlayVisible = true
         overlayState = OverlayPreviewState(
@@ -196,8 +199,6 @@ final class AppModel: ObservableObject {
             sourceName: selectedSource.name
         )
         overlayHistoryScrollOffset = 0
-        statusMessage = "Checking language resources..."
-        await awaitSelectedLanguageResourcePreparationIfNeeded()
         statusMessage = "Preparing \(selectedSource.name)…"
 
         let session = LiveTranscriptionSession()
@@ -565,7 +566,6 @@ final class AppModel: ObservableObject {
         let statusID = "translation:\(sourceLanguageID)->\(targetLanguageID)"
         let downloadingDetail = "Downloading on-device translation resources..."
         let waitingDetail = "Waiting for translation resources to finish installing..."
-        var didRequestPreparationUI = false
 
         while Task.isCancelled == false {
             let availabilityStatus = await translationAvailabilityStatus(
@@ -599,10 +599,6 @@ final class AppModel: ObservableObject {
                 )
 
                 do {
-                    if didRequestPreparationUI == false {
-                        didRequestPreparationUI = true
-                        onTranslationPreparationUIRequested?()
-                    }
                     try await translationCoordinator.prepareIfNeeded(from: sourceLanguageID, to: targetLanguageID)
                     removeLanguageResourceStatus(id: statusID)
                     return
@@ -743,32 +739,24 @@ final class AppModel: ObservableObject {
     private func handlePartialDraft(_ draft: DraftSegment?) {
         guard liveTranscriptionSession != nil else { return }
         let draftText = sanitizedDisplayText(draft?.sourceText ?? "")
-        overlayState?.draftSourceText = draftText.isEmpty ? nil : draftText
-        overlayState?.draftStablePrefixLength = draftText.isEmpty
-            ? 0
-            : min(draft?.stablePrefixLength ?? 0, draftText.count)
-
-        if draftText.isEmpty == false {
-            dismissListeningPlaceholderIfNeeded()
+        if draftText.isEmpty {
+            scheduleDraftClear()
+            return
         }
 
-        let stablePrefix = draftText.isEmpty
-            ? ""
-            : String(draftText.prefix(min(draft?.stablePrefixLength ?? 0, draftText.count)))
+        cancelPendingDraftClear()
+        overlayState?.draftSourceText = draftText
+        overlayState?.draftStablePrefixLength = min(draft?.stablePrefixLength ?? 0, draftText.count)
+
+        dismissListeningPlaceholderIfNeeded()
+
+        let stablePrefix = String(draftText.prefix(min(draft?.stablePrefixLength ?? 0, draftText.count)))
         lastDraftStablePrefix = stablePrefix
 
         guard draftText != lastDraftTranslationSource else { return }
         lastDraftTranslationSource = draftText
 
-        if draftText.isEmpty {
-            draftTranslationTask?.cancel()
-            draftTranslationTask = nil
-            draftTranslationGeneration &+= 1
-            overlayState?.draftTranslatedText = nil
-        } else if shouldReserveDraftTranslationSlot {
-            // Clear the previous draft translation immediately so a stale line
-            // never lingers above a newer source draft.
-            overlayState?.draftTranslatedText = nil
+        if shouldReserveDraftTranslationSlot {
             scheduleDraftTranslation(for: draftText)
         } else {
             draftTranslationTask?.cancel()
@@ -776,6 +764,47 @@ final class AppModel: ObservableObject {
             draftTranslationGeneration &+= 1
             overlayState?.draftTranslatedText = draftText
         }
+    }
+
+    private func scheduleDraftClear() {
+        draftClearTask?.cancel()
+        draftClearGeneration &+= 1
+        let generation = draftClearGeneration
+
+        draftClearTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            do {
+                try await Task.sleep(nanoseconds: Self.draftClearDelayNanoseconds)
+            } catch {
+                return
+            }
+
+            guard !Task.isCancelled,
+                  liveTranscriptionSession != nil,
+                  generation == draftClearGeneration else { return }
+
+            clearDraftOverlay()
+        }
+    }
+
+    private func cancelPendingDraftClear() {
+        draftClearTask?.cancel()
+        draftClearTask = nil
+        draftClearGeneration &+= 1
+    }
+
+    private func clearDraftOverlay() {
+        draftClearTask?.cancel()
+        draftClearTask = nil
+        overlayState?.draftSourceText = nil
+        overlayState?.draftStablePrefixLength = 0
+        overlayState?.draftTranslatedText = nil
+        lastDraftStablePrefix = ""
+        lastDraftTranslationSource = ""
+        draftTranslationTask?.cancel()
+        draftTranslationTask = nil
+        draftTranslationGeneration &+= 1
     }
 
     private func scheduleDraftTranslation(for text: String) {
@@ -992,11 +1021,14 @@ final class AppModel: ObservableObject {
     private func resetLiveTextPipeline() {
         captionDisplayTask?.cancel()
         captionDisplayTask = nil
+        draftClearTask?.cancel()
+        draftClearTask = nil
         draftTranslationTask?.cancel()
         draftTranslationTask = nil
         lastDraftStablePrefix = ""
         lastDraftTranslationSource = ""
         draftTranslationGeneration &+= 1
+        draftClearGeneration &+= 1
         cancelCaptionTranslations()
         pendingCaptions.removeAll()
         readyCaptionTranslations.removeAll()
@@ -1410,6 +1442,7 @@ final class AppModel: ObservableObject {
 private extension AppModel {
     static let overlayHistoryLimit = 120
     static let listeningPlaceholderText = "Listening…"
+    static let draftClearDelayNanoseconds: UInt64 = 150_000_000
 }
 
 private struct QueuedCaption: Identifiable, Equatable {
