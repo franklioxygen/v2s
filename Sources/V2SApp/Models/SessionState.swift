@@ -5,14 +5,14 @@ enum SessionState: String, Codable {
     case running
     case error
 
-    var displayName: String {
+    func displayName(in languageID: String) -> String {
         switch self {
         case .idle:
-            return "Idle"
+            return AppLocalization.string(.idle, languageID: languageID)
         case .running:
-            return "Running"
+            return AppLocalization.string(.running, languageID: languageID)
         case .error:
-            return "Error"
+            return AppLocalization.string(.error, languageID: languageID)
         }
     }
 }

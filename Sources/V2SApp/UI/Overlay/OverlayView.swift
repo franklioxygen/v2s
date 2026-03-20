@@ -766,7 +766,7 @@ struct OverlayHistoryScrollbarView: View {
         .scaleEffect(0.9 + (0.1 * revealProgress))
         .allowsHitTesting(revealProgress > 0.05)
         .animation(.easeOut(duration: 0.16), value: revealProgress)
-        .accessibilityLabel("Scroll to latest subtitle")
+        .accessibilityLabel(model.localized(.scrollToLatestSubtitle))
     }
 }
 

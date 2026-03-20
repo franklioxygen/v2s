@@ -4,19 +4,36 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     let closeSettings: () -> Void
+    let quitApp: () -> Void
     let openSubtitleModeInfo: () -> Void
 
     var body: some View {
-        Form {
-            generalSection
-            sourceSection
-            languageSection
-            overlaySection
-            glossarySection
+        VStack(spacing: 16) {
+            Form {
+                generalSection
+                sourceSection
+                languageSection
+                overlaySection
+                glossarySection
+            }
+            .formStyle(.grouped)
+
+            HStack {
+                Spacer()
+                Button(model.localized(.minimize)) {
+                    closeSettings()
+                }
+                .buttonStyle(.bordered)
+
+                Button(model.localized(.quit)) {
+                    quitApp()
+                }
+                .buttonStyle(.bordered)
+            }
         }
-        .formStyle(.grouped)
         .padding(20)
         .frame(minWidth: 720, minHeight: 560)
+        .environment(\.locale, model.interfaceLocale)
         .v2sTranslationHost(model: model)
         .onChange(of: model.sessionState) { _, newState in
             if newState == .running {
@@ -26,9 +43,15 @@ struct SettingsView: View {
     }
 
     private var generalSection: some View {
-        Section("General") {
-            row(title: "Session State", value: model.sessionBadgeText)
-            row(title: "Status", value: model.statusMessage)
+        Section {
+            row(title: model.localized(.sessionState), value: model.sessionBadgeText)
+            row(title: model.localized(.status), value: model.statusMessage)
+
+            Picker(model.localized(.interfaceLanguage), selection: interfaceLanguageBinding) {
+                ForEach(LanguageCatalog.common) { option in
+                    Text(option.localizedDisplayName(in: model.resolvedInterfaceLanguageID)).tag(option.id)
+                }
+            }
 
             HStack {
                 Button {
@@ -42,57 +65,62 @@ struct SettingsView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(model.isSessionButtonDisabled)
 
-                Button("Show Subtitle Preview") {
+                Button(model.localized(.showSubtitlePreview)) {
                     model.showOverlayPreview()
                 }
                 .buttonStyle(.bordered)
             }
+        } header: {
+            Text(model.localized(.general))
         }
     }
 
     private var sourceSection: some View {
-        Section("Input Source") {
-            Picker("Selected Source", selection: selectedSourceBinding) {
+        Section {
+            Picker(model.localized(.selectedSource), selection: selectedSourceBinding) {
                 if model.allSources.isEmpty {
-                    Text("No sources detected").tag("")
+                    Text(model.localized(.noSourcesDetected)).tag("")
                 } else {
                     ForEach(model.allSources) { source in
-                        Text("\(source.category.displayName) · \(source.name)").tag(source.id)
+                        Text("\(source.category.displayName(in: model.resolvedInterfaceLanguageID)) · \(source.name)")
+                            .tag(source.id)
                     }
                 }
             }
             .pickerStyle(.menu)
 
-            Button("Refresh Sources") {
+            Button(model.localized(.refreshSources)) {
                 model.refreshSources()
             }
             .buttonStyle(.bordered)
+        } header: {
+            Text(model.localized(.inputSource))
         }
     }
 
     private var languageSection: some View {
-        Section("Languages") {
-            Picker("Input Language", selection: inputLanguageBinding) {
+        Section {
+            Picker(model.localized(.inputLanguage), selection: inputLanguageBinding) {
                 ForEach(LanguageCatalog.common) { option in
-                    Text(option.displayName).tag(option.id)
+                    Text(option.localizedDisplayName(in: model.resolvedInterfaceLanguageID)).tag(option.id)
                 }
             }
 
-            Picker("Subtitle Language", selection: outputLanguageBinding) {
+            Picker(model.localized(.subtitleLanguage), selection: outputLanguageBinding) {
                 ForEach(LanguageCatalog.common) { option in
-                    Text(option.displayName).tag(option.id)
+                    Text(option.localizedDisplayName(in: model.resolvedInterfaceLanguageID)).tag(option.id)
                 }
             }
 
             HStack {
                 HStack(spacing: 6) {
-                    Text("Subtitle Mode")
+                    Text(model.localized(.subtitleMode))
                     Button(action: openSubtitleModeInfo) {
                         Image(systemName: "info.circle")
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .help("Explain the differences between subtitle modes")
+                    .help(model.localized(.subtitleModeHelp))
                 }
 
                 Spacer()
@@ -100,8 +128,10 @@ struct SettingsView: View {
                 Picker("", selection: subtitleModeBinding) {
                     ForEach(SubtitleMode.allCases, id: \.self) { mode in
                         VStack(alignment: .leading) {
-                            Text(mode.displayName)
-                            Text(mode.detail).font(.caption).foregroundStyle(.secondary)
+                            Text(mode.displayName(in: model.resolvedInterfaceLanguageID))
+                            Text(mode.detail(in: model.resolvedInterfaceLanguageID))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         .tag(mode)
                     }
@@ -109,7 +139,7 @@ struct SettingsView: View {
                 .labelsHidden()
             }
 
-            Button("Refresh Language Resources") {
+            Button(model.localized(.refreshLanguageResources)) {
                 model.refreshLanguageResources()
             }
             .buttonStyle(.bordered)
@@ -118,13 +148,15 @@ struct SettingsView: View {
                 LanguageResourceStatusListView(statuses: model.languageResourceStatuses)
                     .padding(.top, 4)
             }
+        } header: {
+            Text(model.localized(.languages))
         }
     }
 
     private var glossarySection: some View {
-        Section("Glossary") {
+        Section {
             if model.glossary.isEmpty {
-                Text("No terms added. Use + to add source → target term pairs.")
+                Text(model.localized(.glossaryEmpty))
                     .foregroundStyle(.secondary)
                     .font(.caption)
             } else {
@@ -148,38 +180,43 @@ struct SettingsView: View {
                 }
             }
 
-            GlossaryAddRow { source, target in
+            GlossaryAddRow(
+                sourcePlaceholder: model.localized(.sourceTerm),
+                targetPlaceholder: model.localized(.targetTerm)
+            ) { source, target in
                 guard !source.isEmpty, !target.isEmpty else { return }
                 model.glossary[source] = target
             }
+        } header: {
+            Text(model.localized(.glossary))
         }
     }
 
     private var overlaySection: some View {
-        Section("Subtitle Overlay") {
+        Section {
             HStack {
-                Text("Only the 3 controls accept clicks")
+                Text(model.localized(.onlyThreeControlsAcceptClicks))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
             }
 
-            Toggle("Text Outline", isOn: whiteTextOutlineBinding)
+            Toggle(model.localized(.textOutline), isOn: whiteTextOutlineBinding)
 
             ColorPicker(
-                "Subtitle Color",
+                model.localized(.subtitleColor),
                 selection: subtitleColorBinding,
                 supportsOpacity: false
             )
 
             ColorPicker(
-                "Background Color",
+                model.localized(.backgroundColor),
                 selection: backgroundColorBinding,
                 supportsOpacity: false
             )
 
             HStack {
-                Button("Reset Colors") {
+                Button(model.localized(.resetColors)) {
                     model.updateOverlayStyle { style in
                         style.subtitleColor = .defaultSubtitle
                         style.backgroundColor = .defaultBackground
@@ -192,39 +229,41 @@ struct SettingsView: View {
             }
 
             LabeledSlider(
-                title: "Top Inset",
+                title: model.localized(.topInset),
                 value: topInsetBinding,
                 range: 0 ... 48,
                 precision: 0
             )
 
             LabeledSlider(
-                title: "Width Ratio",
+                title: model.localized(.widthRatio),
                 value: widthRatioBinding,
                 range: 0.10 ... 1.00,
                 precision: 2
             )
 
             LabeledSlider(
-                title: "Background Opacity",
+                title: model.localized(.backgroundOpacity),
                 value: backgroundOpacityBinding,
                 range: 0.16 ... 0.72,
                 precision: 2
             )
 
             LabeledSlider(
-                title: "Translated Font",
+                title: model.localized(.translatedFont),
                 value: translatedFontBinding,
                 range: 8 ... 34,
                 precision: 0
             )
 
             LabeledSlider(
-                title: "Source Font",
+                title: model.localized(.sourceFont),
                 value: sourceFontBinding,
                 range: 5 ... 28,
                 precision: 0
             )
+        } header: {
+            Text(model.localized(.subtitleOverlay))
         }
     }
 
@@ -253,6 +292,13 @@ struct SettingsView: View {
         Binding(
             get: { model.subtitleMode },
             set: { model.subtitleMode = $0 }
+        )
+    }
+
+    private var interfaceLanguageBinding: Binding<String> {
+        Binding(
+            get: { model.interfaceLanguageID },
+            set: { model.interfaceLanguageID = $0 }
         )
     }
 
@@ -376,13 +422,15 @@ struct LanguageResourceStatusListView: View {
 }
 
 private struct GlossaryAddRow: View {
+    let sourcePlaceholder: String
+    let targetPlaceholder: String
     let onAdd: (String, String) -> Void
     @State private var source = ""
     @State private var target = ""
 
     var body: some View {
         HStack(spacing: 8) {
-            TextField("Source term", text: $source)
+            TextField(sourcePlaceholder, text: $source)
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: .infinity)
 
@@ -390,7 +438,7 @@ private struct GlossaryAddRow: View {
                 .foregroundStyle(.secondary)
                 .font(.caption)
 
-            TextField("Target term", text: $target)
+            TextField(targetPlaceholder, text: $target)
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: .infinity)
 

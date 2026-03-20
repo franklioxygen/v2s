@@ -7,19 +7,43 @@ enum SubtitleMode: String, Codable, CaseIterable, Sendable {
     case follow
     case reading
 
-    var displayName: String {
+    func displayName(in languageID: String) -> String {
         switch self {
-        case .balanced: return "Balanced"
-        case .follow:   return "Follow"
-        case .reading:  return "Reading"
+        case .balanced: return AppLocalization.string(.modeBalancedName, languageID: languageID)
+        case .follow:   return AppLocalization.string(.modeFollowName, languageID: languageID)
+        case .reading:  return AppLocalization.string(.modeReadingName, languageID: languageID)
         }
     }
 
-    var detail: String {
+    func detail(in languageID: String) -> String {
         switch self {
-        case .balanced: return "Suitable for most use cases"
-        case .follow:   return "Live broadcasts and meetings"
-        case .reading:  return "Lectures and courses"
+        case .balanced: return AppLocalization.string(.modeBalancedDetail, languageID: languageID)
+        case .follow:   return AppLocalization.string(.modeFollowDetail, languageID: languageID)
+        case .reading:  return AppLocalization.string(.modeReadingDetail, languageID: languageID)
+        }
+    }
+
+    func longDescription(in languageID: String) -> String {
+        switch self {
+        case .balanced: return AppLocalization.string(.modeBalancedLong, languageID: languageID)
+        case .follow:   return AppLocalization.string(.modeFollowLong, languageID: languageID)
+        case .reading:  return AppLocalization.string(.modeReadingLong, languageID: languageID)
+        }
+    }
+
+    func bestFor(in languageID: String) -> String {
+        switch self {
+        case .balanced: return AppLocalization.string(.modeBalancedBestFor, languageID: languageID)
+        case .follow:   return AppLocalization.string(.modeFollowBestFor, languageID: languageID)
+        case .reading:  return AppLocalization.string(.modeReadingBestFor, languageID: languageID)
+        }
+    }
+
+    func tradeoff(in languageID: String) -> String {
+        switch self {
+        case .balanced: return AppLocalization.string(.modeBalancedTradeoff, languageID: languageID)
+        case .follow:   return AppLocalization.string(.modeFollowTradeoff, languageID: languageID)
+        case .reading:  return AppLocalization.string(.modeReadingTradeoff, languageID: languageID)
         }
     }
 }

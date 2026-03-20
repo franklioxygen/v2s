@@ -3,6 +3,10 @@ import Foundation
 struct LanguageOption: Identifiable, Hashable {
     let id: String
     let displayName: String
+
+    func localizedDisplayName(in interfaceLanguageID: String) -> String {
+        LanguageCatalog.displayName(for: id, in: interfaceLanguageID)
+    }
 }
 
 enum LanguageCatalog {
@@ -21,6 +25,16 @@ enum LanguageCatalog {
 
     static func displayName(for identifier: String) -> String {
         common.first(where: { $0.id == identifier })?.displayName ?? identifier
+    }
+
+    static func displayName(for identifier: String, in interfaceLanguageID: String) -> String {
+        let locale = Locale(identifier: interfaceLanguageID)
+        return locale.localizedString(forIdentifier: identifier)
+            ?? displayName(for: identifier)
+    }
+
+    static func preferredInterfaceLanguageID(storedIdentifier: String?) -> String {
+        AppLocalization.resolvedInterfaceLanguageID(storedIdentifier: storedIdentifier)
     }
 
     static func speechLocaleIdentifier(for identifier: String) -> String {

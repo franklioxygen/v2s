@@ -21,6 +21,7 @@ struct StatusBarPopoverView: View {
         }
         .padding(16)
         .frame(width: 380)
+        .environment(\.locale, model.interfaceLocale)
         .v2sTranslationHost(model: model)
         .onChange(of: model.sessionState) { _, newState in
             if newState == .running {
@@ -63,14 +64,14 @@ struct StatusBarPopoverView: View {
     // MARK: - Input Source
 
     private var sourceSection: some View {
-        GroupBox("Input Source") {
+        GroupBox {
             VStack(spacing: 8) {
-                row("Source") {
+                row(model.localized(.sourceShort)) {
                     Picker("", selection: selectedSourceBinding) {
-                        Text(model.allSources.isEmpty ? "No sources" : "Choose…")
+                        Text(model.allSources.isEmpty ? model.localized(.noSources) : model.localized(.choose))
                             .tag(nil as String?)
                         ForEach(model.allSources) { s in
-                            Text("\(s.category.displayName) · \(s.name)")
+                            Text("\(s.category.displayName(in: model.resolvedInterfaceLanguageID)) · \(s.name)")
                                 .tag(Optional(s.id))
                         }
                     }
@@ -79,42 +80,50 @@ struct StatusBarPopoverView: View {
                     .frame(width: Self.pickerW)
                 }
                 row(nil) {
-                    Button("Refresh Sources") { model.refreshSources() }
+                    Button(model.localized(.refreshSources)) { model.refreshSources() }
                         .buttonStyle(.bordered)
                         .frame(width: Self.pickerW)
                 }
             }
+        } label: {
+            Text(model.localized(.inputSource))
         }
     }
 
     // MARK: - Languages
 
     private var languageSection: some View {
-        GroupBox("Languages") {
+        GroupBox {
             VStack(spacing: 8) {
-                row("Input") {
+                row(model.localized(.inputShort)) {
                     Picker("", selection: inputLanguageBinding) {
-                        ForEach(LanguageCatalog.common) { o in Text(o.displayName).tag(o.id) }
+                        ForEach(LanguageCatalog.common) { option in
+                            Text(option.localizedDisplayName(in: model.resolvedInterfaceLanguageID)).tag(option.id)
+                        }
                     }
                     .pickerStyle(.menu).labelsHidden()
                     .frame(width: Self.pickerW)
                 }
-                row("Subtitle") {
+                row(model.localized(.subtitleShort)) {
                     Picker("", selection: outputLanguageBinding) {
-                        ForEach(LanguageCatalog.common) { o in Text(o.displayName).tag(o.id) }
+                        ForEach(LanguageCatalog.common) { option in
+                            Text(option.localizedDisplayName(in: model.resolvedInterfaceLanguageID)).tag(option.id)
+                        }
                     }
                     .pickerStyle(.menu).labelsHidden()
                     .frame(width: Self.pickerW)
                 }
-                row("Mode") {
+                row(model.localized(.modeShort)) {
                     Picker("", selection: subtitleModeBinding) {
-                        ForEach(SubtitleMode.allCases, id: \.self) { m in Text(m.displayName).tag(m) }
+                        ForEach(SubtitleMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName(in: model.resolvedInterfaceLanguageID)).tag(mode)
+                        }
                     }
                     .pickerStyle(.menu).labelsHidden()
                     .frame(width: Self.pickerW)
                 }
                 row(nil) {
-                    Button("Refresh Language Resources") {
+                    Button(model.localized(.refreshLanguageResources)) {
                         model.refreshLanguageResources()
                     }
                     .buttonStyle(.bordered)
@@ -128,41 +137,45 @@ struct StatusBarPopoverView: View {
                     }
                 }
             }
+        } label: {
+            Text(model.localized(.languages))
         }
     }
 
     // MARK: - Overlay
 
     private var overlaySection: some View {
-        GroupBox("Overlay") {
+        GroupBox {
             VStack(spacing: 10) {
                 HStack {
-                    Button(model.isOverlayVisible ? "Hide Overlay" : "Show Preview") {
+                    Button(model.isOverlayVisible ? model.localized(.hideOverlay) : model.localized(.showPreview)) {
                         if model.isOverlayVisible { model.toggleOverlayVisibility() }
                         else { model.showOverlayPreview() }
                     }
                     .buttonStyle(.bordered)
                     Spacer()
-                    Text("Controls Only")
+                    Text(model.localized(.controlsOnly))
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Toggle("Text Outline", isOn: whiteTextOutlineBinding)
+                Toggle(model.localized(.textOutline), isOn: whiteTextOutlineBinding)
                 sliderRow(
-                    label: "Opacity",
+                    label: model.localized(.opacity),
                     value: overlayOpacityBinding, in: 0.0 ... 1.0,
                     display: "\(Int((model.overlayStyle.backgroundOpacity * 100).rounded()))%"
                 )
                 sliderRow(
-                    label: "Font Size",
+                    label: model.localized(.fontSize),
                     value: translatedFontBinding, in: 8 ... 34,
                     display: "\(Int(model.overlayStyle.translatedFontSize.rounded()))pt"
                 )
                 sliderRow(
-                    label: "Source Size",
+                    label: model.localized(.sourceSize),
                     value: sourceFontBinding, in: 5 ... 28,
                     display: "\(Int(model.overlayStyle.sourceFontSize.rounded()))pt"
                 )
             }
+        } label: {
+            Text(model.localized(.overlay))
         }
     }
 
@@ -170,8 +183,8 @@ struct StatusBarPopoverView: View {
 
     private var footerSection: some View {
         HStack {
-            Button("Advanced Settings") { openAdvancedSettings() }.buttonStyle(.bordered)
-            Button("Quit") { quitApp() }.buttonStyle(.bordered)
+            Button(model.localized(.advancedSettings)) { openAdvancedSettings() }.buttonStyle(.bordered)
+            Button(model.localized(.quit)) { quitApp() }.buttonStyle(.bordered)
             Spacer()
             if let s = model.selectedSource {
                 Text(s.name).font(.caption).foregroundStyle(.secondary)

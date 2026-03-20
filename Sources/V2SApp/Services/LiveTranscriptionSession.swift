@@ -16,11 +16,15 @@ private struct SessionVADResult: Sendable {
     let containsSpeechOffset: Bool
 }
 
-private enum SessionVADError: LocalizedError {
+private enum SessionVADError: LocalizedError, AppLocalizableError {
     case unavailable
 
+    func localizedDescription(languageID: String) -> String {
+        AppLocalization.string(.sileroVadUnavailableWithoutOnnx, languageID: languageID)
+    }
+
     var errorDescription: String? {
-        "Silero VAD is unavailable because this build does not include the ONNX runtime dependency."
+        localizedDescription(languageID: "en")
     }
 }
 
@@ -58,7 +62,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         case speechAnalyzer
     }
 
-    enum SessionError: LocalizedError {
+    enum SessionError: LocalizedError, AppLocalizableError {
         case speechPermissionDenied
         case microphonePermissionDenied
         case audioCapturePermissionDenied
@@ -69,27 +73,31 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         case applicationNotProducingAudio(String)
         case failedToStartCapture(String)
 
-        var errorDescription: String? {
+        func localizedDescription(languageID: String) -> String {
             switch self {
             case .speechPermissionDenied:
-                return "Speech recognition permission was denied."
+                return AppLocalization.string(.speechPermissionDenied, languageID: languageID)
             case .microphonePermissionDenied:
-                return "Microphone permission was denied."
+                return AppLocalization.string(.microphonePermissionDenied, languageID: languageID)
             case .audioCapturePermissionDenied:
-                return "App audio capture permission was denied. Allow v2s to capture audio from other apps, then reopen the app."
+                return AppLocalization.string(.appAudioCapturePermissionDenied, languageID: languageID)
             case .unsupportedSpeechLocale(let localeIdentifier):
-                return "Speech recognition does not support \(localeIdentifier)."
+                return AppLocalization.string(.unsupportedSpeechLocaleFormat, languageID: languageID, localeIdentifier)
             case .unavailableSpeechRecognizer(let localeIdentifier):
-                return "Speech recognition is currently unavailable for \(localeIdentifier)."
+                return AppLocalization.string(.unavailableSpeechRecognizerFormat, languageID: languageID, localeIdentifier)
             case .missingMicrophoneDevice:
-                return "The selected microphone is no longer available."
+                return AppLocalization.string(.missingMicrophoneDevice, languageID: languageID)
             case .missingApplication(let appName):
-                return "The selected app, \(appName), is no longer available."
+                return AppLocalization.string(.missingApplicationFormat, languageID: languageID, appName)
             case .applicationNotProducingAudio(let appName):
-                return "\(appName) is not producing app audio yet. Start playback in the app, then try again."
+                return AppLocalization.string(.applicationNotProducingAudioFormat, languageID: languageID, appName)
             case .failedToStartCapture(let reason):
-                return reason
+                return AppLocalization.string(.failedToStartCaptureFormat, languageID: languageID, reason)
             }
+        }
+
+        var errorDescription: String? {
+            localizedDescription(languageID: "en")
         }
     }
 
@@ -117,6 +125,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var recognitionContextualStrings: [String] = []
     private var recognitionBackend: RecognitionBackend = .legacy
     private var activeLocaleIdentifier: String?
+    private var interfaceLanguageID = "en"
     private var modernAnalyzerTask: Task<Void, Never>?
     private var modernResultsTask: Task<Void, Never>?
     private var lastModernCommittedResultIdentity: String?
@@ -133,6 +142,14 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var transcriptHandler: (@MainActor (RecognizedSentence) -> Void)?
     private var partialHandler: (@MainActor (DraftSegment?) -> Void)?
     private var errorHandler: (@MainActor (String) -> Void)?
+
+    private func localized(_ key: AppTextKey, _ arguments: CVarArg...) -> String {
+        AppLocalization.formattedString(key, languageID: interfaceLanguageID, arguments: arguments)
+    }
+
+    private func localizedErrorDescription(_ error: Error) -> String {
+        AppLocalization.localizedErrorDescription(error, languageID: interfaceLanguageID)
+    }
 
     // MARK: Draft state (accessed only on captureQueue)
     private var modeConfig: ModeConfig = .balanced
@@ -169,6 +186,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     func start(
         source: InputSource,
         localeIdentifier: String,
+        interfaceLanguageID: String,
         modeConfig: ModeConfig = .balanced,
         contextualStrings: [String] = [],
         transcriptHandler: @escaping @MainActor (RecognizedSentence) -> Void,
@@ -180,6 +198,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         self.modeConfig = modeConfig
         self.recognitionContextualStrings = sanitizeContextualStrings(contextualStrings)
         self.activeLocaleIdentifier = localeIdentifier
+        self.interfaceLanguageID = interfaceLanguageID
         self.errorHandler = errorHandler
 
         try await requestRequiredPermissions(for: source)
@@ -297,7 +316,14 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         } catch {
             // VAD is optional — fall back to implicit ASR-based silence detection.
             vadEngine = nil
-            Task { await emitError("Silero VAD unavailable: \(error.localizedDescription). Falling back to ASR-based silence detection.") }
+            Task {
+                await emitError(
+                    localized(
+                        .sileroVadUnavailableFallbackFormat,
+                        localizedErrorDescription(error)
+                    )
+                )
+            }
         }
     }
 
@@ -458,7 +484,12 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
                 try self.configureSpeechRecognizer(localeIdentifier: localeIdentifier)
             } catch {
                 Task {
-                    await self.emitError("Speech recognition stopped: \(error.localizedDescription)")
+                    await self.emitError(
+                        self.localized(
+                            .speechRecognitionStoppedFormat,
+                            self.localizedErrorDescription(error)
+                        )
+                    )
                 }
             }
         }
@@ -525,11 +556,15 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let output = AVCaptureAudioDataOutput()
 
         guard session.canAddInput(input) else {
-            throw SessionError.failedToStartCapture("Could not add the selected microphone to the capture session.")
+            throw SessionError.failedToStartCapture(
+                localized(.couldNotAddSelectedMicrophoneToCaptureSession)
+            )
         }
 
         guard session.canAddOutput(output) else {
-            throw SessionError.failedToStartCapture("Could not add an audio output to the microphone capture session.")
+            throw SessionError.failedToStartCapture(
+                localized(.couldNotAddMicrophoneAudioOutput)
+            )
         }
 
         session.beginConfiguration()
@@ -549,6 +584,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let capture = ApplicationAudioCapture(
             appName: source.name,
             processObjectIDs: processObjectIDs,
+            readStreamFailureMessage: localized(.failedToReadCapturedAudioStreamFormat, source.name),
             queue: captureQueue,
             audioHandler: { [weak self] buffer in
                 self?.append(audioBuffer: buffer)
@@ -566,7 +602,9 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         } catch let error as ApplicationAudioCapture.CaptureError {
             throw mapApplicationCaptureError(error)
         } catch {
-            throw SessionError.failedToStartCapture("Failed to start application audio capture: \(error.localizedDescription)")
+            throw SessionError.failedToStartCapture(
+                localized(.failedToStageWithReasonFormat, "start application audio capture", localizedErrorDescription(error))
+            )
         }
     }
 
@@ -732,7 +770,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         if audioBuffer.format.matches(processingFormat) {
             guard let copiedBuffer = copyPCMBuffer(audioBuffer) else {
                 Task {
-                    await emitError("Failed to copy captured audio for speech preprocessing.")
+                    await emitError(localized(.failedToCopyCapturedAudioForSpeechPreprocessing))
                 }
                 return nil
             }
@@ -747,7 +785,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         guard let preprocessingConverter else {
             Task {
-                await emitError("Failed to prepare the speech-preprocessing audio converter.")
+                await emitError(localized(.failedToPrepareSpeechPreprocessingAudioConverter))
             }
             return nil
         }
@@ -756,8 +794,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             audioBuffer,
             using: preprocessingConverter,
             to: processingFormat,
-            allocationError: "Failed to allocate a speech-preprocessing audio buffer.",
-            failurePrefix: "Failed to preprocess captured audio"
+            allocationError: localized(.failedToAllocateSpeechPreprocessingAudioBuffer),
+            failurePrefix: localized(.failedToPreprocessCapturedAudio)
         )
     }
 
@@ -777,7 +815,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         guard let audioConverter else {
             Task {
-                await emitError("Failed to prepare the audio converter for speech recognition.")
+                await emitError(localized(.failedToPrepareAudioConverterForSpeechRecognition))
             }
             return nil
         }
@@ -786,8 +824,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             processingBuffer,
             using: audioConverter,
             to: nativeFormat,
-            allocationError: "Failed to allocate a speech-recognition audio buffer.",
-            failurePrefix: "Failed to convert captured audio for speech recognition"
+            allocationError: localized(.failedToAllocateSpeechRecognitionAudioBuffer),
+            failurePrefix: localized(.failedToConvertCapturedAudioForSpeechRecognition)
         )
     }
 
@@ -815,8 +853,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             processingBuffer,
             using: modernAudioConverter,
             to: analyzerInputFormat,
-            allocationError: "Failed to allocate a SpeechAnalyzer audio buffer.",
-            failurePrefix: "Failed to convert captured audio for SpeechAnalyzer"
+            allocationError: localized(.failedToAllocateSpeechAnalyzerAudioBuffer),
+            failurePrefix: localized(.failedToConvertCapturedAudioForSpeechAnalyzer)
         )
     }
 
@@ -1794,11 +1832,13 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         case .permissionDenied:
             return .audioCapturePermissionDenied
         case .missingOutputDevice:
-            return .failedToStartCapture("No output audio device is available for app capture.")
+            return .failedToStartCapture(localized(.noOutputAudioDeviceForAppCapture))
         case .tapFormatUnavailable:
-            return .failedToStartCapture("The selected app's audio format could not be prepared for capture.")
+            return .failedToStartCapture(localized(.selectedAppAudioFormatCouldNotBePrepared))
         case .failed(let stage, let status):
-            return .failedToStartCapture("Failed to \(stage): \(status.readableDescription)")
+            return .failedToStartCapture(
+                localized(.failedToStageWithReasonFormat, stage, status.readableDescription)
+            )
         }
     }
 }
@@ -1823,6 +1863,7 @@ private final class ApplicationAudioCapture {
 
     private let appName: String
     private let processObjectIDs: [AudioObjectID]
+    private let readStreamFailureMessage: String
     private let queue: DispatchQueue
     private let audioHandler: (AVAudioPCMBuffer) -> Void
     private let errorHandler: (String) -> Void
@@ -1836,12 +1877,14 @@ private final class ApplicationAudioCapture {
     init(
         appName: String,
         processObjectIDs: [AudioObjectID],
+        readStreamFailureMessage: String,
         queue: DispatchQueue,
         audioHandler: @escaping (AVAudioPCMBuffer) -> Void,
         errorHandler: @escaping (String) -> Void
     ) {
         self.appName = appName
         self.processObjectIDs = processObjectIDs
+        self.readStreamFailureMessage = readStreamFailureMessage
         self.queue = queue
         self.audioHandler = audioHandler
         self.errorHandler = errorHandler
@@ -1972,7 +2015,7 @@ private final class ApplicationAudioCapture {
             bufferListNoCopy: mutableAudioBufferList,
             deallocator: nil
         ) else {
-            errorHandler("Failed to read the captured audio stream for \(appName).")
+            errorHandler(readStreamFailureMessage)
             return
         }
 

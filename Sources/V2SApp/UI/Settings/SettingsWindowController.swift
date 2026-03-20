@@ -1,28 +1,42 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+    private let model: AppModel
     private let dockVisibilityController: DockVisibilityController
-    private lazy var subtitleModeInfoWindowController = SubtitleModeInfoWindowController()
+    private let quitApp: () -> Void
+    private var cancellables = Set<AnyCancellable>()
+    private lazy var subtitleModeInfoWindowController = SubtitleModeInfoWindowController(model: model)
 
-    init(model: AppModel, dockVisibilityController: DockVisibilityController) {
+    init(
+        model: AppModel,
+        dockVisibilityController: DockVisibilityController,
+        quitApp: @escaping () -> Void
+    ) {
+        self.model = model
         self.dockVisibilityController = dockVisibilityController
+        self.quitApp = quitApp
         let window = NSWindow()
         let hostingController = NSHostingController(
-            rootView: SettingsView(model: model, closeSettings: {}, openSubtitleModeInfo: {})
+            rootView: SettingsView(model: model, closeSettings: {}, quitApp: {}, openSubtitleModeInfo: {})
         )
         window.contentViewController = hostingController
-        window.title = "v2s Advanced Settings"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 760, height: 560))
         window.center()
         super.init(window: window)
         window.delegate = self
+        applyLocalizedTitle()
+        bindLocalizedTitle()
         hostingController.rootView = SettingsView(
             model: model,
             closeSettings: { [weak self] in
                 self?.closeForSessionStart()
+            },
+            quitApp: { [weak self] in
+                self?.quitApp()
             },
             openSubtitleModeInfo: { [weak self] in
                 self?.showSubtitleModeInfo()
@@ -50,6 +64,18 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         dockVisibilityController.setVisible(false, for: .settingsWindow)
     }
 
+    private func bindLocalizedTitle() {
+        model.$interfaceLanguageID
+            .sink { [weak self] _ in
+                self?.applyLocalizedTitle()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func applyLocalizedTitle() {
+        window?.title = model.localized(.advancedSettingsWindowTitle)
+    }
+
     private func showSubtitleModeInfo() {
         subtitleModeInfoWindowController.showWindow(nil)
         subtitleModeInfoWindowController.window?.makeKeyAndOrderFront(nil)
@@ -59,42 +85,59 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
 @MainActor
 private final class SubtitleModeInfoWindowController: NSWindowController {
-    init() {
+    private let model: AppModel
+    private var cancellables = Set<AnyCancellable>()
+
+    init(model: AppModel) {
+        self.model = model
         let window = NSWindow()
-        let hostingController = NSHostingController(rootView: SubtitleModeInfoView())
+        let hostingController = NSHostingController(rootView: SubtitleModeInfoView(model: model))
         window.contentViewController = hostingController
-        window.title = "Subtitle Modes"
         window.styleMask = [.titled, .closable, .miniaturizable]
         window.setContentSize(NSSize(width: 520, height: 420))
         window.center()
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        applyLocalizedTitle()
+        model.$interfaceLanguageID
+            .sink { [weak self] _ in
+                self?.applyLocalizedTitle()
+            }
+            .store(in: &cancellables)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
+
+    private func applyLocalizedTitle() {
+        window?.title = model.localized(.subtitleModesWindowTitle)
+    }
 }
 
 private struct SubtitleModeInfoView: View {
+    @ObservedObject var model: AppModel
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Choose the subtitle mode based on how much you value latency versus sentence completeness.")
+                Text(model.localized(.subtitleModeIntro))
                     .foregroundStyle(.secondary)
 
                 ForEach(SubtitleMode.allCases, id: \.self) { mode in
-                    SubtitleModeInfoCard(mode: mode)
+                    SubtitleModeInfoCard(model: model, mode: mode)
                 }
             }
             .padding(20)
         }
         .frame(minWidth: 520, minHeight: 420)
+        .environment(\.locale, model.interfaceLocale)
     }
 }
 
 private struct SubtitleModeInfoCard: View {
+    @ObservedObject var model: AppModel
     let mode: SubtitleMode
 
     var body: some View {
@@ -102,19 +145,34 @@ private struct SubtitleModeInfoCard: View {
 
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                Text(mode.detail)
+                Text(mode.detail(in: model.resolvedInterfaceLanguageID))
                     .foregroundStyle(.secondary)
 
-                Text(mode.longDescription)
+                Text(mode.longDescription(in: model.resolvedInterfaceLanguageID))
                     .fixedSize(horizontal: false, vertical: true)
 
                 Divider()
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Best for: \(mode.bestFor)")
-                    Text("Tradeoff: \(mode.tradeoff)")
                     Text(
-                        "Targets: first token \(config.firstTokenTargetMs) ms · source commit \(config.commitSourceTargetMs) ms · translation commit \(config.commitTranslationTargetMs) ms"
+                        model.localized(
+                            .bestForFormat,
+                            mode.bestFor(in: model.resolvedInterfaceLanguageID)
+                        )
+                    )
+                    Text(
+                        model.localized(
+                            .tradeoffFormat,
+                            mode.tradeoff(in: model.resolvedInterfaceLanguageID)
+                        )
+                    )
+                    Text(
+                        model.localized(
+                            .targetsFormat,
+                            config.firstTokenTargetMs,
+                            config.commitSourceTargetMs,
+                            config.commitTranslationTargetMs
+                        )
                     )
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -122,43 +180,8 @@ private struct SubtitleModeInfoCard: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } label: {
-            Text(mode.displayName)
+            Text(mode.displayName(in: model.resolvedInterfaceLanguageID))
                 .font(.headline)
-        }
-    }
-}
-
-private extension SubtitleMode {
-    var longDescription: String {
-        switch self {
-        case .balanced:
-            return "Balances response speed with readable sentence chunks. This is the default choice when you want stable subtitles without making the overlay feel slow."
-        case .follow:
-            return "Commits earlier and uses shorter chunks so subtitles stay closer to live speech. It reacts fastest, but longer thoughts may be split into more pieces."
-        case .reading:
-            return "Waits longer for fuller phrases and more complete translations. It reads more smoothly for lectures or dense content, but appears later on screen."
-        }
-    }
-
-    var bestFor: String {
-        switch self {
-        case .balanced:
-            return "most day-to-day calls, videos, and mixed usage"
-        case .follow:
-            return "live meetings, streams, and fast back-and-forth conversations"
-        case .reading:
-            return "lectures, courses, and content where complete sentences matter more"
-        }
-    }
-
-    var tradeoff: String {
-        switch self {
-        case .balanced:
-            return "not the absolute fastest or the most complete"
-        case .follow:
-            return "lower latency, but more fragmented subtitle chunks"
-        case .reading:
-            return "better readability, but higher delay"
         }
     }
 }

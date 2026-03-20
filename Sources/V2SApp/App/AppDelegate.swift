@@ -14,7 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let settingsWindowController = SettingsWindowController(
             model: appModel,
-            dockVisibilityController: dockVisibilityController
+            dockVisibilityController: dockVisibilityController,
+            quitApp: {
+                NSApp.terminate(nil)
+            }
         )
         let overlayWindowController = OverlayWindowController(model: appModel)
         let statusBarController = StatusBarController(

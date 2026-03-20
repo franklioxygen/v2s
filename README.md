@@ -12,7 +12,9 @@
   v2s turns microphone input or app audio into a clean two-line subtitle bar so you can follow speech in one language and read it in another without leaving the screen you are already using.
 </p>
 
-![Mar-20-2026 11-08-59](https://github.com/user-attachments/assets/b65167ee-ae7e-4e37-8316-ebd200ae89a7)
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/b65167ee-ae7e-4e37-8316-ebd200ae89a7" alt="Mar-20-2026 11-08-59">
+</p>
 
 
 ## Why v2s

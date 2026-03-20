@@ -21,6 +21,7 @@ final class AppModel: ObservableObject {
     private var displayedCaption: QueuedCaption?
     private var activeInputLanguageID: String?
     private var isBootstrapping = true
+    private var usesSystemInterfaceLanguage = true
     private var draftTranslationTask: Task<Void, Never>?
     private var draftClearTask: Task<Void, Never>?
     private var languageResourcePreparationTask: Task<Void, Never>?
@@ -33,10 +34,11 @@ final class AppModel: ObservableObject {
     // Revision tracking: captionID → (committedTranslation, committedAt, revisionCount)
     private var translationRevisions: [UUID: (text: String, committedAt: Date, count: Int)] = [:]
     private var recentRecognizedCaptionTexts: [(text: String, time: Date)] = []
+    private var statusDescriptor: StatusDescriptor = .ready
     @Published private(set) var applicationSources: [InputSource] = []
     @Published private(set) var microphoneSources: [InputSource] = []
     @Published private(set) var sessionState: SessionState = .idle
-    @Published private(set) var statusMessage = "Ready"
+    @Published private(set) var statusMessage = ""
     @Published private(set) var overlayState: OverlayPreviewState?
     @Published private(set) var languageResourceStatuses: [LanguageResourceStatus] = []
     @Published private(set) var translationHostConfiguration: TranslationSession.Configuration?
@@ -70,6 +72,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @Published var interfaceLanguageID: String {
+        didSet {
+            guard oldValue != interfaceLanguageID else { return }
+            usesSystemInterfaceLanguage = false
+            persistSettings()
+            relocalizeInterface(from: oldValue)
+        }
+    }
+
     @Published var overlayStyle: OverlayStyle {
         didSet {
             persistSettings()
@@ -99,6 +110,10 @@ final class AppModel: ObservableObject {
         self.selectedSourceID = settings.selectedSourceID
         self.inputLanguageID = settings.inputLanguageID
         self.outputLanguageID = settings.outputLanguageID
+        self.usesSystemInterfaceLanguage = settings.interfaceLanguageID == nil
+        self.interfaceLanguageID = LanguageCatalog.preferredInterfaceLanguageID(
+            storedIdentifier: settings.interfaceLanguageID
+        )
         let normalizedOverlayStyle = AppModel.normalizedOverlayStyle(settings.overlayStyle)
         self.overlayStyle = normalizedOverlayStyle
         self.subtitleMode = settings.subtitleMode
@@ -110,6 +125,7 @@ final class AppModel: ObservableObject {
         }
 
         isBootstrapping = false
+        applyStatusMessage()
         if normalizedOverlayStyle != settings.overlayStyle {
             persistSettings()
         }
@@ -134,18 +150,18 @@ final class AppModel: ObservableObject {
 
     var sessionButtonTitle: String {
         if sessionState == .running {
-            return "Stop"
+            return localized(.stop)
         }
 
         if isPreparingSelectedLanguageResources {
-            return "Wait"
+            return localized(.wait)
         }
 
         if hasBlockingLanguageResourceStatuses {
-            return "Please download language resource"
+            return localized(.pleaseDownloadLanguageResource)
         }
 
-        return "Start"
+        return localized(.start)
     }
 
     var showsSessionWaitIndicator: Bool {
@@ -163,7 +179,105 @@ final class AppModel: ObservableObject {
     }
 
     var sessionBadgeText: String {
-        sessionState.displayName
+        sessionState.displayName(in: resolvedInterfaceLanguageID)
+    }
+
+    var resolvedInterfaceLanguageID: String {
+        LanguageCatalog.preferredInterfaceLanguageID(storedIdentifier: interfaceLanguageID)
+    }
+
+    var interfaceLocale: Locale {
+        AppLocalization.locale(for: resolvedInterfaceLanguageID)
+    }
+
+    func localized(_ key: AppTextKey, _ arguments: CVarArg...) -> String {
+        AppLocalization.formattedString(key, languageID: resolvedInterfaceLanguageID, arguments: arguments)
+    }
+
+    private var listeningPlaceholderText: String {
+        localized(.listening)
+    }
+
+    private var captureStoppedText: String {
+        localized(.captureStopped)
+    }
+
+    private var unableToStartText: String {
+        localized(.unableToStart)
+    }
+
+    private var previewInputSource: InputSource {
+        InputSource(
+            id: InputSource.preview.id,
+            name: localized(.previewSource),
+            detail: InputSource.preview.detail,
+            category: InputSource.preview.category
+        )
+    }
+
+    private func localizedErrorDescription(_ error: Error) -> String {
+        AppLocalization.localizedErrorDescription(error, languageID: resolvedInterfaceLanguageID)
+    }
+
+    private func setStatus(_ descriptor: StatusDescriptor) {
+        statusDescriptor = descriptor
+        applyStatusMessage()
+    }
+
+    private func applyStatusMessage() {
+        switch statusDescriptor {
+        case .ready:
+            statusMessage = localized(.ready)
+        case .noInputSourcesDetected:
+            statusMessage = localized(.noSourcesDetected) + "."
+        case .running(let sourceName):
+            statusMessage = localized(.runningOnFormat, sourceName)
+        case .chooseInputSourceBeforeStarting:
+            statusMessage = localized(.chooseInputSourceBeforeStarting)
+        case .checkingLanguageResources:
+            statusMessage = localized(.checkingLanguageResources)
+        case .downloadLanguageResourcesInSystemSettings:
+            statusMessage = localized(.downloadRequiredLanguageResourcesSystemSettings)
+        case .preparing(let sourceName):
+            statusMessage = localized(.preparingSourceFormat, sourceName)
+        case .showingOverlayPreview:
+            statusMessage = localized(.showingOverlayPreview)
+        case .custom(let message):
+            statusMessage = message
+        }
+    }
+
+    private func relocalizeInterface(from oldLanguageID: String) {
+        applyStatusMessage()
+        relocalizeOverlaySentinelTexts(from: oldLanguageID)
+
+        if liveTranscriptionSession == nil,
+           sessionState != .error,
+           isOverlayVisible {
+            syncOverlayPreviewIfNeeded()
+        }
+
+        if languageResourcePreparationTask == nil, languageResourceStatuses.isEmpty == false {
+            scheduleSelectedLanguageResourcePreparation(openSystemSettingsIfNeeded: false)
+        }
+    }
+
+    private func relocalizeOverlaySentinelTexts(from oldLanguageID: String) {
+        guard var overlayState else { return }
+
+        let oldListening = AppLocalization.string(.listening, languageID: oldLanguageID)
+        let oldCaptureStopped = AppLocalization.string(.captureStopped, languageID: oldLanguageID)
+        let oldUnableToStart = AppLocalization.string(.unableToStart, languageID: oldLanguageID)
+
+        if overlayState.translatedText == oldListening {
+            overlayState.translatedText = listeningPlaceholderText
+        } else if overlayState.translatedText == oldCaptureStopped {
+            overlayState.translatedText = captureStoppedText
+        } else if overlayState.translatedText == oldUnableToStart {
+            overlayState.translatedText = unableToStartText
+        }
+
+        self.overlayState = overlayState
     }
 
     func refreshSources() {
@@ -178,9 +292,9 @@ final class AppModel: ObservableObject {
         }
 
         if sessionState == .running {
-            statusMessage = "Running on \(selectedSource?.name ?? "Selected Source")"
+            setStatus(.running(sourceName: selectedSource?.name ?? localized(.selectedSource)))
         } else {
-            statusMessage = allSources.isEmpty ? "No input sources detected." : "Ready"
+            setStatus(allSources.isEmpty ? .noInputSourcesDetected : .ready)
         }
     }
 
@@ -197,27 +311,27 @@ final class AppModel: ObservableObject {
     func startSession() async {
         guard let selectedSource else {
             sessionState = .error
-            statusMessage = "Choose an input source before starting."
+            setStatus(.chooseInputSourceBeforeStarting)
             return
         }
 
         resetLiveTextPipeline()
-        statusMessage = "Checking language resources..."
+        setStatus(.checkingLanguageResources)
         await awaitSelectedLanguageResourcePreparationIfNeeded()
         guard hasBlockingLanguageResourceStatuses == false else {
-            statusMessage = "Download the required language resources in macOS System Settings."
+            setStatus(.downloadLanguageResourcesInSystemSettings)
             return
         }
 
         activeInputLanguageID = inputLanguageID
         isOverlayVisible = true
         overlayState = OverlayPreviewState(
-            translatedText: Self.listeningPlaceholderText,
-            sourceText: "Waiting for audio from \(selectedSource.name)…",
+            translatedText: listeningPlaceholderText,
+            sourceText: localized(.waitingForAudioFromFormat, selectedSource.name),
             sourceName: selectedSource.name
         )
         overlayHistoryScrollOffset = 0
-        statusMessage = "Preparing \(selectedSource.name)…"
+        setStatus(.preparing(sourceName: selectedSource.name))
 
         let session = LiveTranscriptionSession()
         liveTranscriptionSession = session
@@ -229,6 +343,7 @@ final class AppModel: ObservableObject {
             try await session.start(
                 source: selectedSource,
                 localeIdentifier: speechLocaleIdentifier,
+                interfaceLanguageID: resolvedInterfaceLanguageID,
                 modeConfig: config,
                 contextualStrings: recognitionHints,
                 transcriptHandler: { [weak self] sentence in
@@ -239,9 +354,9 @@ final class AppModel: ObservableObject {
                 },
                 errorHandler: { [weak self] message in
                     self?.sessionState = .error
-                    self?.statusMessage = message
+                    self?.setStatus(.custom(message))
                     self?.overlayState = OverlayPreviewState(
-                        translatedText: "Capture stopped",
+                        translatedText: self?.captureStoppedText ?? "",
                         sourceText: message,
                         sourceName: selectedSource.name
                     )
@@ -249,15 +364,16 @@ final class AppModel: ObservableObject {
             )
 
             sessionState = .running
-            statusMessage = "Running on \(selectedSource.name)"
+            setStatus(.running(sourceName: selectedSource.name))
         } catch {
             resetLiveTextPipeline()
             liveTranscriptionSession = nil
             sessionState = .error
-            statusMessage = error.localizedDescription
+            let localizedError = localizedErrorDescription(error)
+            setStatus(.custom(localizedError))
             overlayState = OverlayPreviewState(
-                translatedText: "Unable to start",
-                sourceText: error.localizedDescription,
+                translatedText: unableToStartText,
+                sourceText: localizedError,
                 sourceName: selectedSource.name
             )
             overlayHistoryScrollOffset = 0
@@ -269,19 +385,19 @@ final class AppModel: ObservableObject {
         liveTranscriptionSession?.stop()
         liveTranscriptionSession = nil
         sessionState = .idle
-        statusMessage = allSources.isEmpty ? "No input sources detected." : "Ready"
+        setStatus(allSources.isEmpty ? .noInputSourcesDetected : .ready)
         isOverlayVisible = false
         overlayState = nil
     }
 
     func showOverlayPreview() {
-        let source = selectedSource ?? InputSource.preview
+        let source = selectedSource ?? previewInputSource
         overlayState = makePreviewState(for: source)
         overlayHistoryScrollOffset = 0
         isOverlayVisible = true
 
         if sessionState != .running {
-            statusMessage = "Showing overlay preview."
+            setStatus(.showingOverlayPreview)
         }
     }
 
@@ -329,6 +445,7 @@ final class AppModel: ObservableObject {
             selectedSourceID: selectedSourceID,
             inputLanguageID: inputLanguageID,
             outputLanguageID: outputLanguageID,
+            interfaceLanguageID: usesSystemInterfaceLanguage ? nil : interfaceLanguageID,
             overlayStyle: overlayStyle,
             subtitleMode: subtitleMode,
             glossary: glossary
@@ -356,7 +473,7 @@ final class AppModel: ObservableObject {
     }
 
     func languageName(for identifier: String) -> String {
-        LanguageCatalog.displayName(for: identifier)
+        LanguageCatalog.displayName(for: identifier, in: resolvedInterfaceLanguageID)
     }
 
     @available(macOS 15.0, *)
@@ -475,7 +592,7 @@ final class AppModel: ObservableObject {
             return nil
         }
 
-        let title = "Speech · \(languageName(for: languageID))"
+        let title = localized(.speechTitleFormat, languageName(for: languageID))
         let statusID = "speech:\(languageID)"
         let requestedLocale = Locale(identifier: LanguageCatalog.speechLocaleIdentifier(for: languageID))
 
@@ -485,7 +602,7 @@ final class AppModel: ObservableObject {
                     id: statusID,
                     kind: .speech,
                     title: title,
-                    detail: "Speech recognition is not available for this language on this macOS version.",
+                    detail: localized(.speechNotAvailableOnMacOS),
                     progress: nil,
                     isError: true
                 )
@@ -510,7 +627,7 @@ final class AppModel: ObservableObject {
                     id: statusID,
                     kind: .speech,
                     title: title,
-                    detail: error.localizedDescription,
+                    detail: localizedErrorDescription(error),
                     progress: nil,
                     isError: true
                 )
@@ -526,7 +643,7 @@ final class AppModel: ObservableObject {
         statusID: String,
         title: String
     ) async throws {
-        let detail = "Downloading on-device speech recognition resources..."
+        let detail = localized(.downloadingSpeechResources)
 
         while true {
             try Task.checkCancellation()
@@ -627,13 +744,15 @@ final class AppModel: ObservableObject {
         from sourceLanguageID: String,
         to targetLanguageID: String
     ) async -> LanguageResourceSystemSettingsDestination? {
-        let title = "Translation · \(languageName(for: sourceLanguageID)) → \(languageName(for: targetLanguageID))"
+        let title = localized(
+            .translationTitleFormat,
+            languageName(for: sourceLanguageID),
+            languageName(for: targetLanguageID)
+        )
         let statusID = "translation:\(sourceLanguageID)->\(targetLanguageID)"
-        let downloadingDetail = "Downloading on-device translation resources..."
-        let waitingDetail = "Waiting for translation resources to finish installing..."
-        let manualDownloadDetail = """
-        Automatic translation download did not complete. Open macOS System Settings > General > Language & Region > Translation Languages and download this translation language.
-        """
+        let downloadingDetail = localized(.downloadingTranslationResources)
+        let waitingDetail = localized(.waitingTranslationResourcesInstalling)
+        let manualDownloadDetail = localized(.manualTranslationDownloadDetail)
 
         while Task.isCancelled == false {
             let availabilityStatus = await translationAvailabilityStatus(
@@ -645,13 +764,13 @@ final class AppModel: ObservableObject {
             case .unsupported:
                 upsertLanguageResourceStatus(
                     LanguageResourceStatus(
-                        id: statusID,
-                        kind: .translation,
-                        title: title,
-                        detail: "Translation is not supported for this language pair on this macOS version.",
-                        progress: nil,
-                        isError: true
-                    )
+                    id: statusID,
+                    kind: .translation,
+                    title: title,
+                    detail: localized(.translationNotSupportedPairOnMacOS),
+                    progress: nil,
+                    isError: true
+                )
                 )
                 return nil
             case .supported, .installed:
@@ -695,13 +814,13 @@ final class AppModel: ObservableObject {
                     if let serviceError = error as? TranslationCoordinator.ServiceError {
                         upsertLanguageResourceStatus(
                             LanguageResourceStatus(
-                                id: statusID,
-                                kind: .translation,
-                                title: title,
-                                detail: serviceError.localizedDescription,
-                                progress: nil,
-                                isError: true
-                            )
+                            id: statusID,
+                            kind: .translation,
+                            title: title,
+                            detail: serviceError.localizedDescription(languageID: resolvedInterfaceLanguageID),
+                            progress: nil,
+                            isError: true
+                        )
                         )
                         return nil
                     }
@@ -753,7 +872,7 @@ final class AppModel: ObservableObject {
                             id: statusID,
                             kind: .translation,
                             title: title,
-                            detail: error.localizedDescription,
+                            detail: localizedErrorDescription(error),
                             progress: nil,
                             isError: true
                         )
@@ -1010,9 +1129,9 @@ final class AppModel: ObservableObject {
         guard let current = overlayState,
               displayedCaption != nil,
               !current.translatedText.isEmpty,
-              current.translatedText != Self.listeningPlaceholderText,
-              current.translatedText != "Capture stopped",
-              current.translatedText != "Unable to start" else { return }
+              current.translatedText != listeningPlaceholderText,
+              current.translatedText != captureStoppedText,
+              current.translatedText != unableToStartText else { return }
         appendOverlayHistoryEntry(
             translatedText: current.translatedText,
             sourceText: current.sourceText
@@ -1046,7 +1165,7 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let source = selectedSource ?? InputSource.preview
+        let source = selectedSource ?? previewInputSource
         overlayState = makePreviewState(for: source)
         overlayHistoryScrollOffset = 0
     }
@@ -1110,7 +1229,7 @@ final class AppModel: ObservableObject {
             sessionState = .running
         }
 
-        statusMessage = "Running on \(sourceName)"
+        setStatus(.running(sourceName: sourceName))
     }
 
     private func refreshCaptionTranslations() {
@@ -1501,7 +1620,7 @@ final class AppModel: ObservableObject {
         }
 
         switch normalizedTranslated {
-        case Self.listeningPlaceholderText, "Capture stopped", "Unable to start":
+        case listeningPlaceholderText, captureStoppedText, unableToStartText:
             return false
         default:
             return true
@@ -1509,7 +1628,7 @@ final class AppModel: ObservableObject {
     }
 
     private func dismissListeningPlaceholderIfNeeded() {
-        guard overlayState?.translatedText == Self.listeningPlaceholderText else {
+        guard overlayState?.translatedText == listeningPlaceholderText else {
             return
         }
 
@@ -1575,9 +1694,20 @@ final class AppModel: ObservableObject {
 
 }
 
+private enum StatusDescriptor {
+    case ready
+    case noInputSourcesDetected
+    case running(sourceName: String)
+    case chooseInputSourceBeforeStarting
+    case checkingLanguageResources
+    case downloadLanguageResourcesInSystemSettings
+    case preparing(sourceName: String)
+    case showingOverlayPreview
+    case custom(String)
+}
+
 private extension AppModel {
     static let overlayHistoryLimit = 120
-    static let listeningPlaceholderText = "Listening…"
     static let draftClearDelayNanoseconds: UInt64 = 150_000_000
 }
 
@@ -1587,17 +1717,21 @@ private struct QueuedCaption: Identifiable, Equatable {
     let sourceName: String
 }
 
-private enum LanguageResourcePreparationError: LocalizedError {
+private enum LanguageResourcePreparationError: LocalizedError, AppLocalizableError {
     case unsupportedSpeechLanguage
     case translationDownloadTimedOut
 
-    var errorDescription: String? {
+    func localizedDescription(languageID: String) -> String {
         switch self {
         case .unsupportedSpeechLanguage:
-            return "Speech recognition resources are not supported for this language on this macOS version."
+            return AppLocalization.string(.speechResourcesNotSupportedOnMacOS, languageID: languageID)
         case .translationDownloadTimedOut:
-            return "Automatic translation resource download timed out."
+            return AppLocalization.string(.translationResourceDownloadTimedOut, languageID: languageID)
         }
+    }
+
+    var errorDescription: String? {
+        localizedDescription(languageID: "en")
     }
 }
 
@@ -1655,17 +1789,26 @@ private final class TranslationCoordinator: ObservableObject {
         }
     }
 
-    enum ServiceError: LocalizedError {
+    enum ServiceError: LocalizedError, AppLocalizableError {
         case unavailableOnSystem
         case unsupportedPair(String, String)
 
-        var errorDescription: String? {
+        func localizedDescription(languageID: String) -> String {
             switch self {
             case .unavailableOnSystem:
-                return "Translation requires macOS 15 or newer."
+                return AppLocalization.string(.translationRequiresMacOS15OrNewer, languageID: languageID)
             case .unsupportedPair(let source, let target):
-                return "Translation is not supported from \(source) to \(target)."
+                return AppLocalization.string(
+                    .translationUnsupportedFromToFormat,
+                    languageID: languageID,
+                    source,
+                    target
+                )
             }
+        }
+
+        var errorDescription: String? {
+            localizedDescription(languageID: "en")
         }
     }
 

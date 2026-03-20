@@ -4,12 +4,12 @@ enum InputSourceCategory: String, CaseIterable, Codable {
     case application
     case microphone
 
-    var displayName: String {
+    func displayName(in languageID: String) -> String {
         switch self {
         case .application:
-            return "Application"
+            return AppLocalization.string(.application, languageID: languageID)
         case .microphone:
-            return "Microphone"
+            return AppLocalization.string(.microphone, languageID: languageID)
         }
     }
 }
@@ -22,7 +22,7 @@ struct InputSource: Identifiable, Hashable, Codable {
 
     static let preview = InputSource(
         id: "preview",
-        name: "Preview Source",
+        name: AppLocalization.string(.previewSource, languageID: "en"),
         detail: "preview",
         category: .microphone
     )

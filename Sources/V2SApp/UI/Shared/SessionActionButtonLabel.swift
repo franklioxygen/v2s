@@ -8,7 +8,7 @@ struct SessionActionButtonLabel: View {
         ZStack {
             HStack(spacing: 6) {
                 SessionWaitIndicatorGlyph()
-                Text("Start")
+                Text(title)
             }
             .hidden()
 
