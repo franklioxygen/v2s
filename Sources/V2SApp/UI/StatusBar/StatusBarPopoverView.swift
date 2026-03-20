@@ -3,7 +3,7 @@ import SwiftUI
 struct StatusBarPopoverView: View {
     @ObservedObject var model: AppModel
     let closePopover: () -> Void
-    let openSettings: () -> Void
+    let openAdvancedSettings: () -> Void
     let quitApp: () -> Void
 
     // All pickers use this one constant → identical width + right edges align.
@@ -111,6 +111,13 @@ struct StatusBarPopoverView: View {
                     .pickerStyle(.menu).labelsHidden()
                     .frame(width: Self.pickerW)
                 }
+                row(nil) {
+                    Button("Refresh Language Resources") {
+                        model.refreshLanguageResources()
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(width: Self.pickerW)
+                }
 
                 if model.languageResourceStatuses.isEmpty == false {
                     row(nil) {
@@ -137,7 +144,7 @@ struct StatusBarPopoverView: View {
                     Text("Controls Only")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Toggle("1 px White Text Outline", isOn: whiteTextOutlineBinding)
+                Toggle("Text Outline", isOn: whiteTextOutlineBinding)
                 sliderRow(
                     label: "Opacity",
                     value: overlayOpacityBinding, in: 0.0 ... 1.0,
@@ -161,7 +168,7 @@ struct StatusBarPopoverView: View {
 
     private var footerSection: some View {
         HStack {
-            Button("Open Settings") { openSettings() }.buttonStyle(.bordered)
+            Button("Advanced Settings") { openAdvancedSettings() }.buttonStyle(.bordered)
             Button("Quit") { quitApp() }.buttonStyle(.bordered)
             Spacer()
             if let s = model.selectedSource {

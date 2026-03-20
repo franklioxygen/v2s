@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import AppKit
 import Speech
 import SwiftUI
 import Translation
@@ -54,7 +55,7 @@ final class AppModel: ObservableObject {
         didSet {
             persistSettings()
             syncOverlayPreviewIfNeeded()
-            scheduleSelectedLanguageResourcePreparation()
+            scheduleSelectedLanguageResourcePreparation(openSystemSettingsIfNeeded: true)
         }
     }
 
@@ -62,7 +63,10 @@ final class AppModel: ObservableObject {
         didSet {
             persistSettings()
             syncOverlayPreviewIfNeeded()
-            scheduleSelectedLanguageResourcePreparation(refreshTranslations: liveTranscriptionSession != nil)
+            scheduleSelectedLanguageResourcePreparation(
+                refreshTranslations: liveTranscriptionSession != nil,
+                openSystemSettingsIfNeeded: true
+            )
         }
     }
 
@@ -133,11 +137,19 @@ final class AppModel: ObservableObject {
             return "Stop"
         }
 
-        return isSessionButtonDisabled ? "Wait" : "Start"
+        if languageResourcePreparationTask != nil {
+            return "Wait"
+        }
+
+        if hasBlockingLanguageResourceStatuses {
+            return "Please download language resource"
+        }
+
+        return "Start"
     }
 
     var showsSessionWaitIndicator: Bool {
-        sessionState != .running && isPreparingSelectedLanguageResources
+        sessionState != .running && languageResourcePreparationTask != nil
     }
 
     var isSessionButtonDisabled: Bool {
@@ -145,7 +157,9 @@ final class AppModel: ObservableObject {
             return false
         }
 
-        return selectedSource == nil || isPreparingSelectedLanguageResources
+        return selectedSource == nil
+            || languageResourcePreparationTask != nil
+            || hasBlockingLanguageResourceStatuses
     }
 
     var sessionBadgeText: String {
@@ -190,6 +204,10 @@ final class AppModel: ObservableObject {
         resetLiveTextPipeline()
         statusMessage = "Checking language resources..."
         await awaitSelectedLanguageResourcePreparationIfNeeded()
+        guard hasBlockingLanguageResourceStatuses == false else {
+            statusMessage = "Download the required language resources in macOS System Settings."
+            return
+        }
 
         activeInputLanguageID = inputLanguageID
         isOverlayVisible = true
@@ -346,7 +364,14 @@ final class AppModel: ObservableObject {
         await translationCoordinator.run(using: session)
     }
 
-    private func scheduleSelectedLanguageResourcePreparation(refreshTranslations: Bool = false) {
+    func refreshLanguageResources() {
+        scheduleSelectedLanguageResourcePreparation()
+    }
+
+    private func scheduleSelectedLanguageResourcePreparation(
+        refreshTranslations: Bool = false,
+        openSystemSettingsIfNeeded: Bool = false
+    ) {
         guard isBootstrapping == false else {
             return
         }
@@ -366,10 +391,13 @@ final class AppModel: ObservableObject {
 
             await self.prepareSelectedLanguageResources(
                 inputLanguageID: inputLanguageID,
-                outputLanguageID: outputLanguageID
+                outputLanguageID: outputLanguageID,
+                openSystemSettingsIfNeeded: openSystemSettingsIfNeeded
             )
 
-            guard Task.isCancelled == false, refreshTranslations else {
+            guard Task.isCancelled == false,
+                  refreshTranslations,
+                  self.hasBlockingLanguageResourceStatuses == false else {
                 return
             }
 
@@ -387,32 +415,47 @@ final class AppModel: ObservableObject {
 
     private var isPreparingSelectedLanguageResources: Bool {
         languageResourcePreparationTask != nil
-            || languageResourceStatuses.contains(where: { $0.isError == false })
+    }
+
+    private var hasBlockingLanguageResourceStatuses: Bool {
+        languageResourceStatuses.isEmpty == false
     }
 
     private func prepareSelectedLanguageResources(
         inputLanguageID: String,
-        outputLanguageID: String
+        outputLanguageID: String,
+        openSystemSettingsIfNeeded: Bool
     ) async {
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { [weak self] in
-                await self?.prepareSpeechRecognitionResourceIfNeeded(for: inputLanguageID)
-            }
+        var destinationsToOpen = Set<LanguageResourceSystemSettingsDestination>()
 
-            if inputLanguageID != outputLanguageID {
-                group.addTask { [weak self] in
-                    await self?.prepareTranslationResourceIfNeeded(
-                        from: inputLanguageID,
-                        to: outputLanguageID
-                    )
-                }
-            }
+        if let destination = await prepareSpeechRecognitionResourceIfNeeded(for: inputLanguageID) {
+            destinationsToOpen.insert(destination)
+        }
+
+        if inputLanguageID != outputLanguageID,
+           let destination = await prepareTranslationResourceIfNeeded(
+            from: inputLanguageID,
+            to: outputLanguageID
+           ) {
+            destinationsToOpen.insert(destination)
+        }
+
+        guard openSystemSettingsIfNeeded else {
+            return
+        }
+
+        if destinationsToOpen.contains(.translationLanguages) {
+            openSystemSettings(for: .translationLanguages)
+        } else if let destination = destinationsToOpen.first {
+            openSystemSettings(for: destination)
         }
     }
 
-    private func prepareSpeechRecognitionResourceIfNeeded(for languageID: String) async {
+    private func prepareSpeechRecognitionResourceIfNeeded(
+        for languageID: String
+    ) async -> LanguageResourceSystemSettingsDestination? {
         guard #available(macOS 26.0, *) else {
-            return
+            return nil
         }
 
         let title = "Speech · \(languageName(for: languageID))"
@@ -430,31 +473,51 @@ final class AppModel: ObservableObject {
                     isError: true
                 )
             )
-            return
+            return nil
         }
 
         let transcriber = makeSpeechTranscriber(locale: resolvedLocale)
 
-        do {
-            try await ensureSpeechAssetsReady(
-                for: [transcriber],
-                statusID: statusID,
-                title: title
-            )
+        switch await AssetInventory.status(forModules: [transcriber]) {
+        case .installed:
             removeLanguageResourceStatus(id: statusID)
-        } catch is CancellationError {
-            removeLanguageResourceStatus(id: statusID)
-        } catch {
+            return nil
+        case .unsupported:
             upsertLanguageResourceStatus(
                 LanguageResourceStatus(
                     id: statusID,
                     kind: .speech,
                     title: title,
-                    detail: error.localizedDescription,
+                    detail: LanguageResourcePreparationError.unsupportedSpeechLanguage.localizedDescription,
                     progress: nil,
                     isError: true
                 )
             )
+            return nil
+        case .supported, .downloading:
+            upsertLanguageResourceStatus(
+                LanguageResourceStatus(
+                    id: statusID,
+                    kind: .speech,
+                    title: title,
+                    detail: "Open macOS System Settings > Keyboard and download the \(languageName(for: languageID)) speech resource.",
+                    progress: nil,
+                    isError: false
+                )
+            )
+            return .keyboard
+        @unknown default:
+            upsertLanguageResourceStatus(
+                LanguageResourceStatus(
+                    id: statusID,
+                    kind: .speech,
+                    title: title,
+                    detail: "Open macOS System Settings > Keyboard and download the \(languageName(for: languageID)) speech resource.",
+                    progress: nil,
+                    isError: false
+                )
+            )
+            return .keyboard
         }
     }
 
@@ -561,126 +624,58 @@ final class AppModel: ObservableObject {
         try await request.downloadAndInstall()
     }
 
-    private func prepareTranslationResourceIfNeeded(from sourceLanguageID: String, to targetLanguageID: String) async {
+    private func prepareTranslationResourceIfNeeded(
+        from sourceLanguageID: String,
+        to targetLanguageID: String
+    ) async -> LanguageResourceSystemSettingsDestination? {
         let title = "Translation · \(languageName(for: sourceLanguageID)) → \(languageName(for: targetLanguageID))"
         let statusID = "translation:\(sourceLanguageID)->\(targetLanguageID)"
-        let downloadingDetail = "Downloading on-device translation resources..."
-        let waitingDetail = "Waiting for translation resources to finish installing..."
+        let availabilityStatus = await translationAvailabilityStatus(
+            from: sourceLanguageID,
+            to: targetLanguageID
+        )
 
-        while Task.isCancelled == false {
-            let availabilityStatus = await translationAvailabilityStatus(
-                from: sourceLanguageID,
-                to: targetLanguageID
+        switch availabilityStatus {
+        case .unsupported:
+            upsertLanguageResourceStatus(
+                LanguageResourceStatus(
+                    id: statusID,
+                    kind: .translation,
+                    title: title,
+                    detail: "Translation is not supported for this language pair on this macOS version.",
+                    progress: nil,
+                    isError: true
+                )
             )
-
-            switch availabilityStatus {
-            case .unsupported:
-                upsertLanguageResourceStatus(
-                    LanguageResourceStatus(
-                        id: statusID,
-                        kind: .translation,
-                        title: title,
-                        detail: "Translation is not supported for this language pair on this macOS version.",
-                        progress: nil,
-                        isError: true
-                    )
+            return nil
+        case .installed:
+            removeLanguageResourceStatus(id: statusID)
+            return nil
+        case .supported:
+            upsertLanguageResourceStatus(
+                LanguageResourceStatus(
+                    id: statusID,
+                    kind: .translation,
+                    title: title,
+                    detail: "Open macOS System Settings > General > Language & Region > Translation Languages to download this translation language.",
+                    progress: nil,
+                    isError: false
                 )
-                return
-            case .supported, .installed:
-                upsertLanguageResourceStatus(
-                    LanguageResourceStatus(
-                        id: statusID,
-                        kind: .translation,
-                        title: title,
-                        detail: availabilityStatus == .supported ? downloadingDetail : waitingDetail,
-                        progress: nil,
-                        isError: false
-                    )
+            )
+            return .translationLanguages
+        @unknown default:
+            upsertLanguageResourceStatus(
+                LanguageResourceStatus(
+                    id: statusID,
+                    kind: .translation,
+                    title: title,
+                    detail: "Open macOS System Settings > General > Language & Region > Translation Languages to download this translation language.",
+                    progress: nil,
+                    isError: false
                 )
-
-                do {
-                    try await translationCoordinator.prepareIfNeeded(from: sourceLanguageID, to: targetLanguageID)
-                    removeLanguageResourceStatus(id: statusID)
-                    return
-                } catch is CancellationError {
-                    removeLanguageResourceStatus(id: statusID)
-                    return
-                } catch {
-                    if let serviceError = error as? TranslationCoordinator.ServiceError {
-                        upsertLanguageResourceStatus(
-                            LanguageResourceStatus(
-                                id: statusID,
-                                kind: .translation,
-                                title: title,
-                                detail: serviceError.localizedDescription,
-                                progress: nil,
-                                isError: true
-                            )
-                        )
-                        return
-                    }
-
-                    let refreshedStatus = await translationAvailabilityStatus(
-                        from: sourceLanguageID,
-                        to: targetLanguageID
-                    )
-
-                    if refreshedStatus == .supported || refreshedStatus == .installed {
-                        upsertLanguageResourceStatus(
-                            LanguageResourceStatus(
-                                id: statusID,
-                                kind: .translation,
-                                title: title,
-                                detail: waitingDetail,
-                                progress: nil,
-                                isError: false
-                            )
-                        )
-
-                        do {
-                            try await Task.sleep(nanoseconds: 800_000_000)
-                        } catch {
-                            removeLanguageResourceStatus(id: statusID)
-                            return
-                        }
-
-                        continue
-                    }
-
-                    upsertLanguageResourceStatus(
-                        LanguageResourceStatus(
-                            id: statusID,
-                            kind: .translation,
-                            title: title,
-                            detail: error.localizedDescription,
-                            progress: nil,
-                            isError: true
-                        )
-                    )
-                    return
-                }
-            @unknown default:
-                upsertLanguageResourceStatus(
-                    LanguageResourceStatus(
-                        id: statusID,
-                        kind: .translation,
-                        title: title,
-                        detail: waitingDetail,
-                        progress: nil,
-                        isError: false
-                    )
-                )
-
-                do {
-                    try await Task.sleep(nanoseconds: 800_000_000)
-                } catch {
-                    removeLanguageResourceStatus(id: statusID)
-                    return
-                }
-            }
+            )
+            return .translationLanguages
         }
-
-        removeLanguageResourceStatus(id: statusID)
     }
 
     @available(macOS 26.0, *)
@@ -732,6 +727,17 @@ final class AppModel: ObservableObject {
 
     private func removeLanguageResourceStatus(id: String) {
         languageResourceStatuses.removeAll { $0.id == id }
+    }
+
+    private func openSystemSettings(for destination: LanguageResourceSystemSettingsDestination) {
+        guard let url = URL(string: destination.urlString) else {
+            return
+        }
+
+        if NSWorkspace.shared.open(url) == false,
+           let fallbackURL = URL(string: "x-apple.systempreferences:") {
+            _ = NSWorkspace.shared.open(fallbackURL)
+        }
     }
 
     // MARK: - Draft handler
@@ -1458,6 +1464,20 @@ private enum LanguageResourcePreparationError: LocalizedError {
         switch self {
         case .unsupportedSpeechLanguage:
             return "Speech recognition resources are not supported for this language on this macOS version."
+        }
+    }
+}
+
+private enum LanguageResourceSystemSettingsDestination: Hashable {
+    case keyboard
+    case translationLanguages
+
+    var urlString: String {
+        switch self {
+        case .keyboard:
+            return "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
+        case .translationLanguages:
+            return "x-apple.systempreferences:com.apple.Localization-Settings.extension"
         }
     }
 }

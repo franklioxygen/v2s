@@ -102,9 +102,9 @@ struct OverlayView: View {
         applyingPromotionTransition(
             to: captionPair(
                 translated: state.translatedText,
-                translatedColor: .white,
+                translatedColor: baseSubtitleColor,
                 source: state.sourceText,
-                sourceColor: Color.white.opacity(0.82)
+                sourceColor: subtitleColor(opacity: 0.82)
             ),
             key: promotionKey(
                 sourceText: state.sourceText,
@@ -117,9 +117,9 @@ struct OverlayView: View {
         captionText(
             attributedCaptionText(
                 text: text,
-                fillColor: color,
-                fontSize: model.overlayStyle.scaledTranslatedFontSize
+                fillColor: color
             ),
+            rawText: text,
             fontSize: model.overlayStyle.scaledTranslatedFontSize,
             weight: .semibold
         )
@@ -129,9 +129,9 @@ struct OverlayView: View {
         captionText(
             attributedCaptionText(
                 text: text,
-                fillColor: color,
-                fontSize: model.overlayStyle.scaledSourceFontSize
+                fillColor: color
             ),
+            rawText: text,
             fontSize: model.overlayStyle.scaledSourceFontSize,
             weight: .regular
         )
@@ -150,7 +150,7 @@ struct OverlayView: View {
                     if let draftTranslated = state.draftTranslatedText, !draftTranslated.isEmpty {
                         translatedText(
                             draftTranslated,
-                            color: Color.white.opacity(0.55)
+                            color: subtitleColor(opacity: 0.55)
                         )
                     } else if model.shouldReserveDraftTranslationSlot {
                         Text(" ")
@@ -169,9 +169,9 @@ struct OverlayView: View {
                     captionText(
                         draftSourceAttributedText(
                             stable: stable,
-                            mutable: mutable,
-                            fontSize: model.overlayStyle.scaledSourceFontSize
+                            mutable: mutable
                         ),
+                        rawText: draftText,
                         fontSize: model.overlayStyle.scaledSourceFontSize,
                         weight: .regular
                     )
@@ -206,9 +206,9 @@ struct OverlayView: View {
 
         return captionPair(
             translated: entry.translatedText,
-            translatedColor: Color.white.opacity(translatedOpacity),
+            translatedColor: subtitleColor(opacity: translatedOpacity),
             source: entry.sourceText,
-            sourceColor: Color.white.opacity(sourceOpacity)
+            sourceColor: subtitleColor(opacity: sourceOpacity)
         )
     }
 
@@ -364,66 +364,93 @@ struct OverlayView: View {
 
     private var backgroundView: some View {
         RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(Color.black.opacity(model.overlayStyle.backgroundOpacity))
+            .fill(baseBackgroundColor.opacity(model.overlayStyle.backgroundOpacity))
     }
 
     private func captionText(
         _ attributedText: AttributedString,
+        rawText: String,
         fontSize: Double,
         weight: Font.Weight
     ) -> some View {
-        Text(attributedText)
-            .font(.system(size: fontSize, weight: weight))
-            .multilineTextAlignment(.center)
-            .lineLimit(2)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity)
+        ZStack {
+            if model.overlayStyle.usesWhiteTextOutline, rawText.isEmpty == false {
+                outlineText(
+                    rawText,
+                    fontSize: fontSize,
+                    weight: weight
+                )
+            }
+
+            Text(attributedText)
+                .font(.system(size: fontSize, weight: weight))
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity)
+        }
     }
 
     private func attributedCaptionText(
         text: String,
-        fillColor: Color,
-        fontSize: Double
+        fillColor: Color
     ) -> AttributedString {
         var attributed = AttributedString(text)
         attributed.foregroundColor = fillColor
-        applyWhiteTextOutlineIfNeeded(to: &attributed, fontSize: fontSize)
         return attributed
     }
 
     private func draftSourceAttributedText(
         stable: String,
-        mutable: String,
-        fontSize: Double
+        mutable: String
     ) -> AttributedString {
         var attributed = AttributedString()
 
         if stable.isEmpty == false {
             var stablePart = AttributedString(stable)
-            stablePart.foregroundColor = Color.white.opacity(0.62)
+            stablePart.foregroundColor = subtitleColor(opacity: 0.62)
             attributed += stablePart
         }
 
         if mutable.isEmpty == false {
             var mutablePart = AttributedString(mutable)
-            mutablePart.foregroundColor = Color.white.opacity(0.48)
+            mutablePart.foregroundColor = subtitleColor(opacity: 0.48)
             attributed += mutablePart
         }
 
-        applyWhiteTextOutlineIfNeeded(to: &attributed, fontSize: fontSize)
         return attributed
     }
 
-    private func applyWhiteTextOutlineIfNeeded(
-        to attributed: inout AttributedString,
-        fontSize: Double
-    ) {
-        guard model.overlayStyle.usesWhiteTextOutline, fontSize > 0 else {
-            return
+    private func outlineText(
+        _ text: String,
+        fontSize: Double,
+        weight: Font.Weight
+    ) -> some View {
+        ZStack {
+            ForEach(Self.textOutlineOffsets.indices, id: \.self) { index in
+                let offset = Self.textOutlineOffsets[index]
+                Text(text)
+                    .font(.system(size: fontSize, weight: weight))
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity)
+                    .offset(x: offset.width, y: offset.height)
+            }
         }
+    }
 
-        attributed.strokeColor = .white
-        attributed.strokeWidth = -(100.0 / fontSize)
+    private var baseSubtitleColor: Color {
+        model.overlayStyle.subtitleColor.color
+    }
+
+    private var baseBackgroundColor: Color {
+        model.overlayStyle.backgroundColor.color
+    }
+
+    private func subtitleColor(opacity: Double) -> Color {
+        baseSubtitleColor.opacity(opacity)
     }
 
     @ViewBuilder
@@ -494,6 +521,16 @@ private extension OverlayView {
     )
     static let draftHeightJitterTolerance: CGFloat = 6.0
     static let captionPairSpacing: CGFloat = 4.0
+    static let textOutlineOffsets: [CGSize] = [
+        CGSize(width: -1, height: 0),
+        CGSize(width: 1, height: 0),
+        CGSize(width: 0, height: -1),
+        CGSize(width: 0, height: 1),
+        CGSize(width: -1, height: -1),
+        CGSize(width: -1, height: 1),
+        CGSize(width: 1, height: -1),
+        CGSize(width: 1, height: 1)
+    ]
 }
 
 private struct OverlayFlowAnimationState: Equatable {

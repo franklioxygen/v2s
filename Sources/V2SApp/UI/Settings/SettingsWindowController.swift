@@ -13,7 +13,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             rootView: SettingsView(model: model, closeSettings: {}, openSubtitleModeInfo: {})
         )
         window.contentViewController = hostingController
-        window.title = "v2s Settings"
+        window.title = "v2s Advanced Settings"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 760, height: 560))
         window.center()

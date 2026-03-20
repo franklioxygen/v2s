@@ -1,4 +1,58 @@
+import AppKit
 import Foundation
+import SwiftUI
+
+struct OverlayColor: Codable, Equatable {
+    var red: Double
+    var green: Double
+    var blue: Double
+    var alpha: Double
+
+    static let defaultSubtitle = OverlayColor(
+        red: 1.0,
+        green: 1.0,
+        blue: 1.0,
+        alpha: 1.0
+    )
+    static let defaultBackground = OverlayColor(
+        red: 0.0,
+        green: 0.0,
+        blue: 0.0,
+        alpha: 1.0
+    )
+
+    init(
+        red: Double,
+        green: Double,
+        blue: Double,
+        alpha: Double = 1.0
+    ) {
+        self.red = red
+        self.green = green
+        self.blue = blue
+        self.alpha = alpha
+    }
+
+    init(color: Color) {
+        let srgbColor = NSColor(color).usingColorSpace(.sRGB) ?? .white
+        self.init(
+            red: Double(srgbColor.redComponent),
+            green: Double(srgbColor.greenComponent),
+            blue: Double(srgbColor.blueComponent),
+            alpha: Double(srgbColor.alphaComponent)
+        )
+    }
+
+    var color: Color {
+        Color(
+            .sRGB,
+            red: red,
+            green: green,
+            blue: blue,
+            opacity: alpha
+        )
+    }
+}
 
 struct OverlayStyle: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
@@ -8,6 +62,8 @@ struct OverlayStyle: Codable, Equatable {
         case minWidth
         case maxWidth
         case backgroundOpacity
+        case subtitleColor
+        case backgroundColor
         case usesWhiteTextOutline
         case translatedFontSize
         case sourceFontSize
@@ -26,6 +82,8 @@ struct OverlayStyle: Codable, Equatable {
     var minWidth: Double
     var maxWidth: Double
     var backgroundOpacity: Double
+    var subtitleColor: OverlayColor
+    var backgroundColor: OverlayColor
     var usesWhiteTextOutline: Bool
     var translatedFontSize: Double
     var sourceFontSize: Double
@@ -44,6 +102,8 @@ struct OverlayStyle: Codable, Equatable {
         minWidth: 720,
         maxWidth: 1440,
         backgroundOpacity: 0.32,
+        subtitleColor: .defaultSubtitle,
+        backgroundColor: .defaultBackground,
         usesWhiteTextOutline: false,
         translatedFontSize: 24,
         sourceFontSize: 18,
@@ -59,6 +119,8 @@ struct OverlayStyle: Codable, Equatable {
         minWidth: Double,
         maxWidth: Double,
         backgroundOpacity: Double,
+        subtitleColor: OverlayColor,
+        backgroundColor: OverlayColor,
         usesWhiteTextOutline: Bool,
         translatedFontSize: Double,
         sourceFontSize: Double,
@@ -72,6 +134,8 @@ struct OverlayStyle: Codable, Equatable {
         self.minWidth = minWidth
         self.maxWidth = maxWidth
         self.backgroundOpacity = backgroundOpacity
+        self.subtitleColor = subtitleColor
+        self.backgroundColor = backgroundColor
         self.usesWhiteTextOutline = usesWhiteTextOutline
         self.translatedFontSize = translatedFontSize
         self.sourceFontSize = sourceFontSize
@@ -89,6 +153,10 @@ struct OverlayStyle: Codable, Equatable {
         minWidth           = try c.decode(Double.self, forKey: .minWidth)
         maxWidth           = try c.decode(Double.self, forKey: .maxWidth)
         backgroundOpacity  = try c.decode(Double.self, forKey: .backgroundOpacity)
+        subtitleColor      = try c.decodeIfPresent(OverlayColor.self, forKey: .subtitleColor)
+            ?? .defaultSubtitle
+        backgroundColor    = try c.decodeIfPresent(OverlayColor.self, forKey: .backgroundColor)
+            ?? .defaultBackground
         let legacyWhiteOutline = try legacy.decodeIfPresent(Bool.self, forKey: .usesHighContrastBorder)
         usesWhiteTextOutline = try c.decodeIfPresent(Bool.self, forKey: .usesWhiteTextOutline)
             ?? legacyWhiteOutline

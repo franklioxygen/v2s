@@ -108,6 +108,11 @@ struct SettingsView: View {
                 .labelsHidden()
             }
 
+            Button("Refresh Language Resources") {
+                model.refreshLanguageResources()
+            }
+            .buttonStyle(.bordered)
+
             if model.languageResourceStatuses.isEmpty == false {
                 LanguageResourceStatusListView(statuses: model.languageResourceStatuses)
                     .padding(.top, 4)
@@ -158,7 +163,32 @@ struct SettingsView: View {
                 Spacer()
             }
 
-            Toggle("1 px White Text Outline", isOn: whiteTextOutlineBinding)
+            Toggle("Text Outline", isOn: whiteTextOutlineBinding)
+
+            ColorPicker(
+                "Subtitle Color",
+                selection: subtitleColorBinding,
+                supportsOpacity: false
+            )
+
+            ColorPicker(
+                "Background Color",
+                selection: backgroundColorBinding,
+                supportsOpacity: false
+            )
+
+            HStack {
+                Button("Reset Colors") {
+                    model.updateOverlayStyle { style in
+                        style.subtitleColor = .defaultSubtitle
+                        style.backgroundColor = .defaultBackground
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(colorsUseDefaultValues)
+
+                Spacer()
+            }
 
             LabeledSlider(
                 title: "Top Inset",
@@ -237,6 +267,28 @@ struct SettingsView: View {
         overlayBinding(\.backgroundOpacity)
     }
 
+    private var subtitleColorBinding: Binding<Color> {
+        Binding(
+            get: { model.overlayStyle.subtitleColor.color },
+            set: { newColor in
+                model.updateOverlayStyle { style in
+                    style.subtitleColor = OverlayColor(color: newColor)
+                }
+            }
+        )
+    }
+
+    private var backgroundColorBinding: Binding<Color> {
+        Binding(
+            get: { model.overlayStyle.backgroundColor.color },
+            set: { newColor in
+                model.updateOverlayStyle { style in
+                    style.backgroundColor = OverlayColor(color: newColor)
+                }
+            }
+        )
+    }
+
     private var whiteTextOutlineBinding: Binding<Bool> {
         overlayBinding(\.usesWhiteTextOutline)
     }
@@ -247,6 +299,11 @@ struct SettingsView: View {
 
     private var sourceFontBinding: Binding<Double> {
         overlayBinding(\.sourceFontSize)
+    }
+
+    private var colorsUseDefaultValues: Bool {
+        model.overlayStyle.subtitleColor == .defaultSubtitle
+            && model.overlayStyle.backgroundColor == .defaultBackground
     }
 
     private func overlayBinding<Value>(_ keyPath: WritableKeyPath<OverlayStyle, Value>) -> Binding<Value> {
@@ -301,10 +358,6 @@ struct LanguageResourceStatusListView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
-                        ProgressView()
-                            .progressViewStyle(.linear)
-                            .controlSize(.small)
-                            .frame(maxWidth: .infinity)
                         Text(status.detail)
                             .font(.caption)
                             .foregroundStyle(.secondary)

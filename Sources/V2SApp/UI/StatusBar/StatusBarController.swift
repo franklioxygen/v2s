@@ -5,7 +5,7 @@ import SwiftUI
 @MainActor
 final class StatusBarController: NSObject, NSPopoverDelegate {
     private let model: AppModel
-    private let openSettings: () -> Void
+    private let openAdvancedSettings: () -> Void
     private let quitApp: () -> Void
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
@@ -15,11 +15,11 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     init(
         model: AppModel,
-        openSettings: @escaping () -> Void,
+        openAdvancedSettings: @escaping () -> Void,
         quitApp: @escaping () -> Void
     ) {
         self.model = model
-        self.openSettings = openSettings
+        self.openAdvancedSettings = openAdvancedSettings
         self.quitApp = quitApp
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
@@ -51,9 +51,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
                 closePopover: { [weak self] in
                     self?.popover.performClose(nil)
                 },
-                openSettings: { [weak self] in
+                openAdvancedSettings: { [weak self] in
                     self?.popover.performClose(nil)
-                    self?.openSettings()
+                    self?.openAdvancedSettings()
                 },
                 quitApp: { [weak self] in
                     self?.popover.performClose(nil)
