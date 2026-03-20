@@ -36,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.statusBarController?.statusItemScreenRect
         }
 
+        settingsWindowController.showSettings()
+
         sourceRefreshTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.appModel.refreshSources()
