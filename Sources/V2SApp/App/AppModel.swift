@@ -34,6 +34,7 @@ final class AppModel: ObservableObject {
     // Revision tracking: captionID → (committedTranslation, committedAt, revisionCount)
     private var translationRevisions: [UUID: (text: String, committedAt: Date, count: Int)] = [:]
     private var recentRecognizedCaptionTexts: [(text: String, time: Date)] = []
+    private var finalizedDraftPromotionIDs: [(id: UUID, time: Date)] = []
     private var statusDescriptor: StatusDescriptor = .ready
     @Published private(set) var applicationSources: [InputSource] = []
     @Published private(set) var microphoneSources: [InputSource] = []
@@ -993,8 +994,15 @@ final class AppModel: ObservableObject {
 
     private func handlePartialDraft(_ draft: DraftSegment?) {
         guard liveTranscriptionSession != nil else { return }
+        if let draft, isFinalizedDraftPromotionID(draft.segmentId) {
+            return
+        }
+
         let draftText = sanitizedDisplayText(draft?.sourceText ?? "")
         if draftText.isEmpty {
+            if isDraftPromotionPending() {
+                return
+            }
             scheduleDraftClear()
             return
         }
@@ -1002,6 +1010,7 @@ final class AppModel: ObservableObject {
         cancelPendingDraftClear()
         overlayState?.draftSourceText = draftText
         overlayState?.draftStablePrefixLength = min(draft?.stablePrefixLength ?? 0, draftText.count)
+        overlayState?.draftPromotionID = draft?.segmentId
 
         dismissListeningPlaceholderIfNeeded()
 
@@ -1055,6 +1064,7 @@ final class AppModel: ObservableObject {
         overlayState?.draftSourceText = nil
         overlayState?.draftStablePrefixLength = 0
         overlayState?.draftTranslatedText = nil
+        overlayState?.draftPromotionID = nil
         lastDraftStablePrefix = ""
         lastDraftTranslationSource = ""
         draftTranslationTask?.cancel()
@@ -1114,10 +1124,10 @@ final class AppModel: ObservableObject {
             translatedText: current.translatedText,
             sourceText: current.sourceText
         )
+        clearDraftOverlay()
         overlayState?.translatedText = ""
         overlayState?.sourceText = ""
-        overlayState?.draftSourceText = nil
-        overlayState?.draftTranslatedText = nil
+        overlayState?.committedPromotionID = nil
         displayedCaption = nil
         displayedCaptionLastVisualUpdateAt = Date.distantPast
         displayedCaptionLastVisualUpdateWasLateTranslation = false
@@ -1141,6 +1151,7 @@ final class AppModel: ObservableObject {
     private func updateCommittedOverlay(
         translatedText: String,
         sourceText: String,
+        promotionID: UUID? = nil,
         bumpEpoch: Bool = false,
         lateTranslation: Bool = false
     ) {
@@ -1150,6 +1161,9 @@ final class AppModel: ObservableObject {
 
         overlayState?.translatedText = translatedText
         overlayState?.sourceText = sourceText
+        if let promotionID {
+            overlayState?.committedPromotionID = promotionID
+        }
         displayedCaptionLastVisualUpdateAt = Date()
         displayedCaptionLastVisualUpdateWasLateTranslation = lateTranslation
     }
@@ -1195,12 +1209,17 @@ final class AppModel: ObservableObject {
             return
         }
 
+        if let promotionID = sentence.promotionSegmentID {
+            markDraftPromotionFinalized(promotionID)
+        }
+
         guard shouldEnqueueRecognizedSentence(sourceText) else {
             return
         }
 
         let caption = QueuedCaption(
             id: UUID(),
+            promotionID: sentence.promotionSegmentID ?? UUID(),
             sourceText: sourceText,
             sourceName: sourceName
         )
@@ -1289,6 +1308,7 @@ final class AppModel: ObservableObject {
         readyCaptionTranslations.removeAll()
         translationRevisions.removeAll()
         recentRecognizedCaptionTexts.removeAll()
+        finalizedDraftPromotionIDs.removeAll()
         displayedCaption = nil
         activeInputLanguageID = nil
         overlayHistoryScrollOffset = 0
@@ -1320,8 +1340,8 @@ final class AppModel: ObservableObject {
         while Task.isCancelled == false {
             guard liveTranscriptionSession != nil else { break }
             guard let caption = pendingCaptions.first else {
-                // Queue is empty — fade out the last caption instead of leaving it on screen.
-                clearOverlayText()
+                // Keep the most recent committed caption in the primary white slot
+                // until a newer caption arrives and replaces it.
                 break
             }
 
@@ -1347,11 +1367,11 @@ final class AppModel: ObservableObject {
             updateCommittedOverlay(
                 translatedText: caption.sourceText,
                 sourceText: caption.sourceText,
+                promotionID: caption.promotionID,
                 bumpEpoch: true
             )
             overlayState?.sourceName = caption.sourceName
-            overlayState?.draftSourceText = nil
-            overlayState?.draftTranslatedText = nil
+            clearDraftOverlay()
 
             // Wait up to 1.5 s for translation; fall back to source text
             let finalText = await waitForTranslatedCaption(id: caption.id, timeout: 1.5)
@@ -1430,6 +1450,41 @@ final class AppModel: ObservableObject {
         let now = Date()
         recentRecognizedCaptionTexts.removeAll { now.timeIntervalSince($0.time) > 6.0 }
         recentRecognizedCaptionTexts.append((text: normalizedCaptionText(text), time: now))
+    }
+
+    private func markDraftPromotionFinalized(_ id: UUID) {
+        let now = Date()
+        pruneFinalizedDraftPromotionIDs(now: now)
+        finalizedDraftPromotionIDs.removeAll { $0.id == id }
+        finalizedDraftPromotionIDs.append((id: id, time: now))
+    }
+
+    private func isFinalizedDraftPromotionID(_ id: UUID) -> Bool {
+        let now = Date()
+        pruneFinalizedDraftPromotionIDs(now: now)
+        return finalizedDraftPromotionIDs.contains { $0.id == id }
+    }
+
+    private func pruneFinalizedDraftPromotionIDs(now: Date) {
+        finalizedDraftPromotionIDs.removeAll { now.timeIntervalSince($0.time) > 12.0 }
+
+        if finalizedDraftPromotionIDs.count > Self.finalizedDraftPromotionLimit {
+            finalizedDraftPromotionIDs.removeFirst(
+                finalizedDraftPromotionIDs.count - Self.finalizedDraftPromotionLimit
+            )
+        }
+    }
+
+    private func isDraftPromotionPending() -> Bool {
+        guard let draftPromotionID = overlayState?.draftPromotionID else {
+            return false
+        }
+
+        if displayedCaption?.promotionID == draftPromotionID {
+            return true
+        }
+
+        return pendingCaptions.contains { $0.promotionID == draftPromotionID }
     }
 
     private func waitForTranslatedCaption(id: UUID, timeout: Double = 1.5) async -> String? {
@@ -1709,10 +1764,12 @@ private enum StatusDescriptor {
 private extension AppModel {
     static let overlayHistoryLimit = 120
     static let draftClearDelayNanoseconds: UInt64 = 150_000_000
+    static let finalizedDraftPromotionLimit = 32
 }
 
 private struct QueuedCaption: Identifiable, Equatable {
     let id: UUID
+    let promotionID: UUID
     let sourceText: String
     let sourceName: String
 }
@@ -1771,19 +1828,37 @@ private final class TranslationCoordinator: ObservableObject {
     }
 
     private enum PendingOperation {
-        case prepare(id: UUID, pair: LanguagePair, continuation: CheckedContinuation<Void, Error>)
-        case translate(id: UUID, pair: LanguagePair, text: String, continuation: CheckedContinuation<String, Error>)
+        case prepare(
+            id: UUID,
+            generation: Int,
+            pair: LanguagePair,
+            continuation: CheckedContinuation<Void, Error>
+        )
+        case translate(
+            id: UUID,
+            generation: Int,
+            pair: LanguagePair,
+            text: String,
+            continuation: CheckedContinuation<String, Error>
+        )
 
         var id: UUID {
             switch self {
-            case .prepare(let id, _, _), .translate(let id, _, _, _):
+            case .prepare(let id, _, _, _), .translate(let id, _, _, _, _):
                 return id
+            }
+        }
+
+        var generation: Int {
+            switch self {
+            case .prepare(_, let generation, _, _), .translate(_, let generation, _, _, _):
+                return generation
             }
         }
 
         var pair: LanguagePair {
             switch self {
-            case .prepare(_, let pair, _), .translate(_, let pair, _, _):
+            case .prepare(_, _, let pair, _), .translate(_, _, let pair, _, _):
                 return pair
             }
         }
@@ -1825,6 +1900,7 @@ private final class TranslationCoordinator: ObservableObject {
     private var activeRunnerID: UUID?
     private var activeOperationID: UUID?
     private var cancelledOperationIDs: Set<UUID> = []
+    private var generation: Int = 0
 
     func prepareIfNeeded(
         from sourceIdentifier: String,
@@ -1835,7 +1911,11 @@ private final class TranslationCoordinator: ObservableObject {
         }
 
         let pair = LanguagePair(source: sourceIdentifier, target: targetIdentifier)
+        let requestGeneration = generation
         let status = try await availabilityStatus(for: pair)
+        guard requestGeneration == generation else {
+            throw CancellationError()
+        }
 
         guard status != .installed else {
             return
@@ -1847,6 +1927,7 @@ private final class TranslationCoordinator: ObservableObject {
                 enqueue(
                     .prepare(
                         id: operationID,
+                        generation: requestGeneration,
                         pair: pair,
                         continuation: continuation
                     )
@@ -1870,7 +1951,11 @@ private final class TranslationCoordinator: ObservableObject {
         }
 
         let pair = LanguagePair(source: sourceIdentifier, target: targetIdentifier)
+        let requestGeneration = generation
         _ = try await availabilityStatus(for: pair)
+        guard requestGeneration == generation else {
+            throw CancellationError()
+        }
 
         let operationID = UUID()
         return try await withTaskCancellationHandler {
@@ -1878,6 +1963,7 @@ private final class TranslationCoordinator: ObservableObject {
                 enqueue(
                     .translate(
                         id: operationID,
+                        generation: requestGeneration,
                         pair: pair,
                         text: trimmedText,
                         continuation: continuation
@@ -1916,10 +2002,16 @@ private final class TranslationCoordinator: ObservableObject {
             return
         }
 
+        let runnerGeneration = generation
+
         defer {
             if activeRunnerID == runnerID {
                 activeRunnerID = nil
             }
+        }
+
+        guard runnerGeneration == generation else {
+            return
         }
 
         guard let anchoredPair = currentPair else {
@@ -1927,14 +2019,18 @@ private final class TranslationCoordinator: ObservableObject {
         }
 
         while Task.isCancelled == false {
-            guard let operation = await nextOperation(for: anchoredPair) else {
+            guard runnerGeneration == generation else {
+                return
+            }
+
+            guard let operation = await nextOperation(for: anchoredPair, generation: runnerGeneration) else {
                 return
             }
 
             activeOperationID = operation.id
 
             switch operation {
-            case .prepare(let id, _, let continuation):
+            case .prepare(let id, _, _, let continuation):
                 do {
                     try await session.prepareTranslation()
                     finishOperation(id: id, continuation: continuation)
@@ -1942,7 +2038,7 @@ private final class TranslationCoordinator: ObservableObject {
                     finishOperation(id: id, continuation: continuation, error: error)
                 }
 
-            case .translate(let id, _, let text, let continuation):
+            case .translate(let id, _, _, let text, let continuation):
                 do {
                     let response = try await session.translate(text)
                     let translatedText = response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1959,11 +2055,18 @@ private final class TranslationCoordinator: ObservableObject {
     }
 
     func reset() {
+        generation &+= 1
+
+        cancelledOperationIDs.removeAll()
+        if let activeOperationID {
+            cancelledOperationIDs.insert(activeOperationID)
+        }
+
         for operation in pendingOperations {
             switch operation {
-            case .prepare(_, _, let continuation):
+            case .prepare(_, _, _, let continuation):
                 continuation.resume(throwing: CancellationError())
-            case .translate(_, _, _, let continuation):
+            case .translate(_, _, _, _, let continuation):
                 continuation.resume(throwing: CancellationError())
             }
         }
@@ -1971,7 +2074,6 @@ private final class TranslationCoordinator: ObservableObject {
         pendingOperations.removeAll()
         activeRunnerID = nil
         activeOperationID = nil
-        cancelledOperationIDs.removeAll()
         currentPair = nil
         configuration = nil
     }
@@ -2004,9 +2106,9 @@ private final class TranslationCoordinator: ObservableObject {
 
         for operation in cancelled {
             switch operation {
-            case .prepare(_, _, let continuation):
+            case .prepare(_, _, _, let continuation):
                 continuation.resume(throwing: CancellationError())
-            case .translate(_, _, _, let continuation):
+            case .translate(_, _, _, _, let continuation):
                 continuation.resume(throwing: CancellationError())
             }
         }
@@ -2016,9 +2118,9 @@ private final class TranslationCoordinator: ObservableObject {
         if let index = pendingOperations.firstIndex(where: { $0.id == id }) {
             let operation = pendingOperations.remove(at: index)
             switch operation {
-            case .prepare(_, _, let continuation):
+            case .prepare(_, _, _, let continuation):
                 continuation.resume(throwing: CancellationError())
-            case .translate(_, _, _, let continuation):
+            case .translate(_, _, _, _, let continuation):
                 continuation.resume(throwing: CancellationError())
             }
             return
@@ -2030,9 +2132,15 @@ private final class TranslationCoordinator: ObservableObject {
     }
 
     @available(macOS 15.0, *)
-    private func nextOperation(for pair: LanguagePair) async -> PendingOperation? {
+    private func nextOperation(for pair: LanguagePair, generation: Int) async -> PendingOperation? {
         while Task.isCancelled == false {
-            if let index = pendingOperations.firstIndex(where: { $0.pair == pair }) {
+            guard generation == self.generation else {
+                return nil
+            }
+
+            if let index = pendingOperations.firstIndex(where: {
+                $0.pair == pair && $0.generation == generation
+            }) {
                 return pendingOperations.remove(at: index)
             }
 

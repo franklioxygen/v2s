@@ -49,9 +49,20 @@ private final class SessionVADEngine {
 
 struct RecognizedSentence: Equatable, Sendable {
     let text: String
+    let promotionSegmentID: UUID?
+
+    init(text: String, promotionSegmentID: UUID? = nil) {
+        self.text = text
+        self.promotionSegmentID = promotionSegmentID
+    }
 }
 
 final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
+    private struct CommittedEmission {
+        let text: String
+        let promotionSegmentID: UUID?
+    }
+
     private struct AudioLevelStats {
         let peak: Float
         let rms: Float
@@ -1012,9 +1023,33 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func emitRecognizedText(_ text: String) {
-        for sentenceText in splitRecognizedSentences(in: text) {
-            emitRecognizedSentence(RecognizedSentence(text: sentenceText))
+    private func emitRecognizedText(_ text: String, promotionSegmentID: UUID? = nil) {
+        let sentenceTexts = splitRecognizedSentences(in: text)
+
+        for (index, sentenceText) in sentenceTexts.enumerated() {
+            emitRecognizedSentence(
+                RecognizedSentence(
+                    text: sentenceText,
+                    promotionSegmentID: index == 0 ? promotionSegmentID : nil
+                )
+            )
+        }
+    }
+
+    @MainActor
+    private func emitCommittedSequence(
+        _ emissions: [CommittedEmission],
+        clearDraftAfter: Bool = false
+    ) {
+        for emission in emissions {
+            emitRecognizedText(
+                emission.text,
+                promotionSegmentID: emission.promotionSegmentID
+            )
+        }
+
+        if clearDraftAfter {
+            emitPartialDraft(nil)
         }
     }
 
@@ -1176,6 +1211,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let transcription = result.bestTranscription
         let segments = transcription.segments
         let formattedText = transcription.formattedString as NSString
+        var committedEmissions: [CommittedEmission] = []
 
         // Always save the latest transcript so the silence timer can commit it
         latestSegments = segments
@@ -1248,9 +1284,15 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             let sentenceText = formattedText.substring(with: commitRange)
                 .replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            let committedDraftID = currentDraftId
 
             if sentenceText.isEmpty == false {
-                Task { await emitRecognizedText(sentenceText) }
+                committedEmissions.append(
+                    CommittedEmission(
+                        text: sentenceText,
+                        promotionSegmentID: committedDraftID
+                    )
+                )
             }
 
             sentenceStartIndex = commitEndIndex + 1
@@ -1261,6 +1303,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             // stop iterating to avoid referencing segments beyond the committed range.
             if commitEndIndex >= segments.count - 1 { break }
         }
+
+        let shouldClearDraftAfterCommit = committedSegmentCount >= segments.count
 
         // Emit draft update for the uncommitted tail
         if committedSegmentCount < segments.count {
@@ -1274,6 +1318,16 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             scheduleSilenceCommit()
         } else {
             cancelSilenceTimer()
+        }
+
+        if committedEmissions.isEmpty == false {
+            Task { [committedEmissions, shouldClearDraftAfterCommit] in
+                await emitCommittedSequence(
+                    committedEmissions,
+                    clearDraftAfter: shouldClearDraftAfterCommit
+                )
+            }
+        } else if shouldClearDraftAfterCommit {
             Task { await emitPartialDraft(nil) }
         }
 
@@ -1372,12 +1426,20 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             cancelSilenceTimer()
             cancelVADSilenceTimer()
             resetModernTranscriptionState()
+            let committedDraftID = currentDraftId
             resetDraftState()
 
             if text.isEmpty == false {
                 Task {
-                    await emitRecognizedText(text)
-                    await emitPartialDraft(nil)
+                    await emitCommittedSequence(
+                        [
+                            CommittedEmission(
+                                text: text,
+                                promotionSegmentID: committedDraftID
+                            )
+                        ],
+                        clearDraftAfter: true
+                    )
                 }
             } else {
                 Task { await emitPartialDraft(nil) }
@@ -1612,10 +1674,18 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             let text = split.committedRawText.trimmingCharacters(in: .whitespacesAndNewlines)
             modernCommittedPrefixText += split.committedRawText
             latestModernText = split.remainingRawText
+            let committedDraftID = currentDraftId
             resetDraftState()
             Task {
-                await emitRecognizedText(text)
-                await emitPartialDraft(nil)
+                await emitCommittedSequence(
+                    [
+                        CommittedEmission(
+                            text: text,
+                            promotionSegmentID: committedDraftID
+                        )
+                    ],
+                    clearDraftAfter: true
+                )
             }
             return
         }
@@ -1636,14 +1706,25 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let sentenceText = (formattedText.substring(with: currentRange) as String)
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if sentenceText.isEmpty == false {
-            Task { await emitRecognizedText(sentenceText) }
-        }
+        let committedDraftID = currentDraftId
 
         committedSegmentCount = segments.count
         resetDraftState()
-        Task { await emitPartialDraft(nil) }
+        if sentenceText.isEmpty == false {
+            Task {
+                await emitCommittedSequence(
+                    [
+                        CommittedEmission(
+                            text: sentenceText,
+                            promotionSegmentID: committedDraftID
+                        )
+                    ],
+                    clearDraftAfter: true
+                )
+            }
+        } else {
+            Task { await emitPartialDraft(nil) }
+        }
     }
 
     private func requiredCommitDelayMs(

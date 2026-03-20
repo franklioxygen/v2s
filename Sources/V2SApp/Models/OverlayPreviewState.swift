@@ -23,12 +23,14 @@ struct OverlayPreviewState: Equatable {
     var draftStablePrefixLength: Int = 0
     /// Incremental translation of the current draft text (updates as stable prefix grows).
     var draftTranslatedText: String? = nil
+    var draftPromotionID: UUID? = nil
 
     // MARK: History layer — committed captions the user can scroll back through
     var history: [OverlayHistoryEntry] = []
 
     // MARK: Caption epoch — increments on each new committed sentence (drives slide-in transition)
     var captionEpoch: Int = 0
+    var committedPromotionID: UUID? = nil
 
     /// When true, the committed layer should appear instantly (no fade-in) because
     /// a draft translation was already visible and is being directly replaced.

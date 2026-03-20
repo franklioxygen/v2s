@@ -46,15 +46,10 @@ struct OverlayView: View {
                             )
                         }
 
-                        if hasCommittedCaption(state) {
-                            committedLayer(state)
-                        }
-
-                        draftLayer(state)
+                        liveLayers(state)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                     .mask(continuousFlowMask)
-                    .animation(Self.captionFlowAnimation, value: flowAnimationState(for: state))
                     .onPreferenceChange(DraftSlotHeightPreferenceKey.self) { height in
                         guard height > 0 else { return }
                         let snappedHeight = ceil(height)
@@ -98,6 +93,17 @@ struct OverlayView: View {
 
     // MARK: - Continuous flow
 
+    private func liveLayers(_ state: OverlayPreviewState) -> some View {
+        VStack(alignment: .center, spacing: 10) {
+            if hasCommittedCaption(state) {
+                committedLayer(state)
+            }
+
+            draftLayer(state)
+        }
+        .animation(Self.captionFlowAnimation, value: flowAnimationState(for: state))
+    }
+
     private func committedLayer(_ state: OverlayPreviewState) -> some View {
         applyingPromotionTransition(
             to: captionPair(
@@ -107,6 +113,7 @@ struct OverlayView: View {
                 sourceColor: subtitleColor(opacity: 0.82)
             ),
             key: promotionKey(
+                promotionID: state.committedPromotionID,
                 sourceText: state.sourceText,
                 translatedText: state.translatedText
             )
@@ -178,6 +185,7 @@ struct OverlayView: View {
                 }
                 .background(draftSlotHeightReader),
                     key: promotionKey(
+                        promotionID: state.draftPromotionID,
                         sourceText: draftText,
                         translatedText: state.draftTranslatedText ?? draftText
                     )
@@ -251,7 +259,8 @@ struct OverlayView: View {
             captionEpoch: state.captionEpoch,
             translatedText: state.translatedText,
             sourceText: state.sourceText,
-            historyIDs: state.history.map(\.id)
+            committedPromotionID: state.committedPromotionID,
+            draftPromotionID: state.draftPromotionID
         )
     }
 
@@ -284,7 +293,15 @@ struct OverlayView: View {
         }
     }
 
-    private func promotionKey(sourceText: String, translatedText: String) -> String? {
+    private func promotionKey(
+        promotionID: UUID?,
+        sourceText: String,
+        translatedText: String
+    ) -> String? {
+        if let promotionID {
+            return "live-caption:\(promotionID.uuidString)"
+        }
+
         let normalizedSource = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         if normalizedSource.isEmpty == false {
             return "live-caption:\(normalizedSource)"
@@ -537,7 +554,8 @@ private struct OverlayFlowAnimationState: Equatable {
     let captionEpoch: Int
     let translatedText: String
     let sourceText: String
-    let historyIDs: [UUID]
+    let committedPromotionID: UUID?
+    let draftPromotionID: UUID?
 }
 
 private struct DraftSlotHeightPreferenceKey: PreferenceKey {
