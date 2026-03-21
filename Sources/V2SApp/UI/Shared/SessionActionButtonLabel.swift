@@ -5,44 +5,32 @@ struct SessionActionButtonLabel: View {
     let showsActivity: Bool
 
     var body: some View {
-        ZStack {
-            HStack(spacing: 6) {
-                SessionWaitIndicatorGlyph()
-                Text(title)
+        HStack(spacing: 6) {
+            if showsActivity {
+                SessionWaitIndicator()
+                    .transition(.identity)
+            } else {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .accessibilityHidden(true)
+                    .transition(.identity)
             }
-            .hidden()
-
-            HStack(spacing: 6) {
-                if showsActivity {
-                    SessionWaitIndicator()
-                }
-
-                Text(title)
-            }
+            Text(title)
         }
     }
 }
 
-private struct SessionWaitIndicatorGlyph: View {
+private struct SessionWaitIndicator: View {
+    @State private var rotation: Double = 0
+
     var body: some View {
         Image(systemName: "arrow.triangle.2.circlepath")
             .font(.system(size: 11, weight: .semibold))
-            .accessibilityHidden(true)
-    }
-}
-
-private struct SessionWaitIndicator: View {
-    @State private var isAnimating = false
-
-    var body: some View {
-        SessionWaitIndicatorGlyph()
-            .rotationEffect(.degrees(isAnimating ? 360 : 0))
-            .animation(.linear(duration: 0.9).repeatForever(autoreverses: false), value: isAnimating)
+            .rotationEffect(.degrees(rotation))
             .onAppear {
-                isAnimating = true
-            }
-            .onDisappear {
-                isAnimating = false
+                withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
+                    rotation = 360
+                }
             }
             .accessibilityHidden(true)
     }
