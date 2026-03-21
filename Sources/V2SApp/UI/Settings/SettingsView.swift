@@ -203,6 +203,8 @@ struct SettingsView: View {
 
             Toggle(model.localized(.textOutline), isOn: whiteTextOutlineBinding)
 
+            Toggle(model.localized(.attachToSource), isOn: attachToSourceBinding)
+
             ColorPicker(
                 model.localized(.subtitleColor),
                 selection: subtitleColorBinding,
@@ -338,6 +340,10 @@ struct SettingsView: View {
 
     private var whiteTextOutlineBinding: Binding<Bool> {
         overlayBinding(\.usesWhiteTextOutline)
+    }
+
+    private var attachToSourceBinding: Binding<Bool> {
+        overlayBinding(\.attachToSource)
     }
 
     private var translatedFontBinding: Binding<Double> {

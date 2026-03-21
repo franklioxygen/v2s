@@ -29,6 +29,7 @@ final class OverlayWindowController {
     private var resizeDragStartHeight: Double?
     private var resizeDragStartTopLeft: NSPoint?
     private var mouseTrackingTimer: Timer?
+    private var workspaceNotificationCancellable: AnyCancellable?
 
     // MARK: - Genie Animation State
     var trayIconRectProvider: (() -> NSRect?)?
@@ -185,6 +186,16 @@ final class OverlayWindowController {
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
             .sink { [weak self] _ in self?.scheduleWindowSync() }
             .store(in: &cancellables)
+
+        workspaceNotificationCancellable = NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.didActivateApplicationNotification)
+            .sink { [weak self] _ in self?.updateAttachToSourceLevels() }
+
+        model.$overlayStyle
+            .map(\.attachToSource)
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.updateAttachToSourceLevels() }
+            .store(in: &cancellables)
     }
 
     /// Pre-capture a snapshot of the overlay while content is still rendered.
@@ -208,6 +219,7 @@ final class OverlayWindowController {
             // Transition: hidden → visible
             panelsShown = true
             if geniePhase == .hiding { cancelGenieAnimation() }
+            updateAttachToSourceLevels()
             positionPanels()
             animateGenieShow()
         } else if !shouldShow && panelsShown {
@@ -219,6 +231,7 @@ final class OverlayWindowController {
             animateGenieHide()
         } else if shouldShow && geniePhase == .idle {
             // Already visible, just update layout
+            updateAttachToSourceLevels()
             positionPanels()
             orderFrontAllPanels()
             startMouseTrackingIfNeeded()
@@ -745,6 +758,42 @@ final class OverlayWindowController {
         }
 
         return sqrt((dx * dx) + (dy * dy))
+    }
+
+    // MARK: - Attach to Source
+
+    private func updateAttachToSourceLevels() {
+        let useHighLevel = !model.overlayStyle.attachToSource || isSourceAppFrontmost()
+        let contentLevel: NSWindow.Level = useHighLevel ? .statusBar : .normal
+        let controlLevel = NSWindow.Level(rawValue: contentLevel.rawValue + 1)
+
+        let allContentPanels: [OverlayPanel] = [panel, controlsChromePanel]
+        let allControlPanels: [OverlayPanel] = [scrollbarPanel, moveButtonPanel, closeButtonPanel, resizeButtonPanel]
+
+        for p in allContentPanels {
+            p.level = contentLevel
+            p.isFloatingPanel = useHighLevel
+        }
+        for p in allControlPanels {
+            p.level = controlLevel
+            p.isFloatingPanel = useHighLevel
+        }
+
+        if useHighLevel && panelsShown {
+            orderFrontAllPanels()
+        }
+    }
+
+    private func isSourceAppFrontmost() -> Bool {
+        guard let source = model.selectedSource,
+              source.category == .application else {
+            return false
+        }
+        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return false }
+        if let bundleID = frontmost.bundleIdentifier, bundleID == source.detail {
+            return true
+        }
+        return false
     }
 
     private func currentScreen() -> NSScreen? {

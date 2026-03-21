@@ -70,6 +70,7 @@ struct OverlayStyle: Codable, Equatable {
         case clickThrough
         case translatedFirst
         case overlayScaleFactor
+        case attachToSource
     }
 
     private enum LegacyCodingKeys: String, CodingKey {
@@ -91,6 +92,7 @@ struct OverlayStyle: Codable, Equatable {
     // Retained for backwards compatibility with persisted settings.
     var translatedFirst: Bool
     var overlayScaleFactor: Double
+    var attachToSource: Bool
 
     var scaledTranslatedFontSize: Double { translatedFontSize * overlayScaleFactor }
     var scaledSourceFontSize: Double { sourceFontSize * overlayScaleFactor }
@@ -109,7 +111,8 @@ struct OverlayStyle: Codable, Equatable {
         sourceFontSize: 18,
         clickThrough: true,
         translatedFirst: true,
-        overlayScaleFactor: 1.0
+        overlayScaleFactor: 1.0,
+        attachToSource: false
     )
 
     init(
@@ -126,7 +129,8 @@ struct OverlayStyle: Codable, Equatable {
         sourceFontSize: Double,
         clickThrough: Bool,
         translatedFirst: Bool,
-        overlayScaleFactor: Double = 1.0
+        overlayScaleFactor: Double = 1.0,
+        attachToSource: Bool = false
     ) {
         self.targetDisplayID = targetDisplayID
         self.topInset = topInset
@@ -142,6 +146,7 @@ struct OverlayStyle: Codable, Equatable {
         self.clickThrough = clickThrough
         self.translatedFirst = translatedFirst
         self.overlayScaleFactor = overlayScaleFactor
+        self.attachToSource = attachToSource
     }
 
     init(from decoder: Decoder) throws {
@@ -166,5 +171,6 @@ struct OverlayStyle: Codable, Equatable {
         clickThrough       = try c.decode(Bool.self,   forKey: .clickThrough)
         translatedFirst    = try c.decodeIfPresent(Bool.self, forKey: .translatedFirst) ?? true
         overlayScaleFactor = try c.decodeIfPresent(Double.self, forKey: .overlayScaleFactor) ?? 1.0
+        attachToSource = try c.decodeIfPresent(Bool.self, forKey: .attachToSource) ?? false
     }
 }
