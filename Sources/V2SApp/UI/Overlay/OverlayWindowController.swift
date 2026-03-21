@@ -30,6 +30,8 @@ final class OverlayWindowController {
     private var resizeDragStartTopLeft: NSPoint?
     private var mouseTrackingTimer: Timer?
     private var workspaceNotificationCancellable: AnyCancellable?
+    private var sourceWindowTrackingTimer: Timer?
+    private var lastSourceWindowFrame: NSRect?
 
     // MARK: - Genie Animation State
     var trayIconRectProvider: (() -> NSRect?)?
@@ -120,6 +122,7 @@ final class OverlayWindowController {
 
     deinit {
         mouseTrackingTimer?.invalidate()
+        sourceWindowTrackingTimer?.invalidate()
     }
 
     private func configurePanels() {
@@ -227,12 +230,13 @@ final class OverlayWindowController {
             panelsShown = false
             if geniePhase == .showing { cancelGenieAnimation() }
             stopMouseTracking()
+            stopSourceWindowTracking()
             interactionState.updatePassThroughBubble(nil)
             animateGenieHide()
         } else if shouldShow && geniePhase == .idle {
             // Already visible, just update layout
             updateAttachToSourceLevels()
-            positionPanels()
+            positionPanels(animated: true)
             orderFrontAllPanels()
             startMouseTrackingIfNeeded()
             updatePassThroughBubble()
@@ -248,6 +252,7 @@ final class OverlayWindowController {
         guard let trayRect = trayIconRectProvider?() else {
             // No tray rect available – show instantly
             geniePhase = .idle
+            updateAttachToSourceLevels()
             orderFrontAllPanels()
             startMouseTrackingIfNeeded()
             updatePassThroughBubble()
@@ -294,6 +299,7 @@ final class OverlayWindowController {
                 guard let self, self.geniePhase == .showing else { return }
                 self.resetLayerTransform()
                 self.geniePhase = .idle
+                self.updateAttachToSourceLevels()
                 self.positionPanels()
                 self.orderFrontAllPanels()
                 self.fadeInControlPanels()
@@ -500,39 +506,70 @@ final class OverlayWindowController {
         resizeButtonPanel.orderOut(nil)
     }
 
-    private func positionPanels() {
+    private func positionPanels(animated: Bool = false) {
         guard let screen = currentScreen() else { return }
 
         let visibleFrame = screen.visibleFrame
         let style = model.overlayStyle
-        let width = resolvedPanelWidth(in: visibleFrame, style: style)
-        let height = resolvedPanelHeight(in: visibleFrame)
 
-        let originX: Double
-        let originY: Double
+        let overlayFrame: NSRect
 
-        if let topLeft = userDefinedTopLeft {
-            // Keep the top edge anchored where the user dragged it
-            originX = topLeft.x
-            originY = topLeft.y - height
+        // When attached to a source app, lock width & horizontal position to the source window
+        if style.attachToSource, let sourceFrame = sourceAppWindowFrame() {
+            let width = sourceFrame.width
+            let height = resolvedPanelHeight(in: visibleFrame)
+
+            let originX = sourceFrame.minX
+            let originY: Double
+
+            if let topLeft = userDefinedTopLeft {
+                originY = topLeft.y - height
+            } else {
+                originY = visibleFrame.maxY - style.topInset - height
+            }
+
+            overlayFrame = NSRect(x: originX, y: originY, width: width, height: height)
         } else {
-            originX = visibleFrame.midX - (width / 2)
-            originY = visibleFrame.maxY - style.topInset - height
+            let width = resolvedPanelWidth(in: visibleFrame, style: style)
+            let height = resolvedPanelHeight(in: visibleFrame)
+
+            let originX: Double
+            let originY: Double
+
+            if let topLeft = userDefinedTopLeft {
+                originX = topLeft.x
+                originY = topLeft.y - height
+            } else {
+                originX = visibleFrame.midX - (width / 2)
+                originY = visibleFrame.maxY - style.topInset - height
+            }
+
+            overlayFrame = NSRect(x: originX, y: originY, width: width, height: height)
         }
 
-        let overlayFrame = NSRect(x: originX, y: originY, width: width, height: height)
-        panel.setFrame(overlayFrame, display: true)
-
         let chromeFrame = controlsChromeFrame(relativeTo: overlayFrame)
-        controlsChromePanel.setFrame(chromeFrame, display: true)
-
         let scrollbarFrame = historyScrollbarFrame(relativeTo: overlayFrame)
-        scrollbarPanel.setFrame(scrollbarFrame, display: true)
-
         let buttonFrames = controlButtonFrames(relativeTo: chromeFrame)
-        moveButtonPanel.setFrame(buttonFrames[0], display: true)
-        closeButtonPanel.setFrame(buttonFrames[1], display: true)
-        resizeButtonPanel.setFrame(buttonFrames[2], display: true)
+
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                panel.animator().setFrame(overlayFrame, display: true)
+                controlsChromePanel.animator().setFrame(chromeFrame, display: true)
+                scrollbarPanel.animator().setFrame(scrollbarFrame, display: true)
+                moveButtonPanel.animator().setFrame(buttonFrames[0], display: true)
+                closeButtonPanel.animator().setFrame(buttonFrames[1], display: true)
+                resizeButtonPanel.animator().setFrame(buttonFrames[2], display: true)
+            }
+        } else {
+            panel.setFrame(overlayFrame, display: true)
+            controlsChromePanel.setFrame(chromeFrame, display: true)
+            scrollbarPanel.setFrame(scrollbarFrame, display: true)
+            moveButtonPanel.setFrame(buttonFrames[0], display: true)
+            closeButtonPanel.setFrame(buttonFrames[1], display: true)
+            resizeButtonPanel.setFrame(buttonFrames[2], display: true)
+        }
     }
 
     private func resolvedPanelWidth(in visibleFrame: NSRect, style: OverlayStyle) -> Double {
@@ -611,10 +648,18 @@ final class OverlayWindowController {
     private func updateControlDrag(with translation: CGSize) {
         guard let dragStartTopLeft else { return }
 
-        userDefinedTopLeft = NSPoint(
-            x: dragStartTopLeft.x + translation.width,
-            y: dragStartTopLeft.y + translation.height
-        )
+        if model.overlayStyle.attachToSource {
+            // Vertical movement only when attached to source
+            userDefinedTopLeft = NSPoint(
+                x: dragStartTopLeft.x,
+                y: dragStartTopLeft.y + translation.height
+            )
+        } else {
+            userDefinedTopLeft = NSPoint(
+                x: dragStartTopLeft.x + translation.width,
+                y: dragStartTopLeft.y + translation.height
+            )
+        }
         positionPanels()
     }
 
@@ -640,25 +685,31 @@ final class OverlayWindowController {
         guard visibleFrame.width > 0 else { return }
 
         let style = model.overlayStyle
-        let rightEdgeX = resizeDragStartTopLeft.x + resizeDragStartWidth
-        let maximumWidth = min(style.maxWidth, rightEdgeX - visibleFrame.minX)
-        let newWidth = min(max(resizeDragStartWidth - translation.width, style.minWidth), maximumWidth)
         let minimumHeight = Self.minimumOverlayHeight
         let maximumHeight = max(
             minimumHeight,
             min(resizeDragStartTopLeft.y - visibleFrame.minY, visibleFrame.height * 0.5)
         )
         let newHeight = min(max(resizeDragStartHeight - translation.height, minimumHeight), maximumHeight)
-        let newWidthRatio = newWidth / visibleFrame.width
-        let newLeftX = rightEdgeX - newWidth
-        let newTopY = resizeDragStartTopLeft.y
 
-        liveResizeWidth = newWidth
-        model.updateOverlayStyle { style in
-            style.widthRatio = newWidthRatio
+        if style.attachToSource {
+            // Height-only resize when attached to source; width is locked to source window
+            userDefinedTopLeft = NSPoint(x: resizeDragStartTopLeft.x, y: resizeDragStartTopLeft.y)
+            userDefinedHeight = newHeight
+        } else {
+            let rightEdgeX = resizeDragStartTopLeft.x + resizeDragStartWidth
+            let maximumWidth = min(style.maxWidth, rightEdgeX - visibleFrame.minX)
+            let newWidth = min(max(resizeDragStartWidth - translation.width, style.minWidth), maximumWidth)
+            let newWidthRatio = newWidth / visibleFrame.width
+            let newLeftX = rightEdgeX - newWidth
+
+            liveResizeWidth = newWidth
+            model.updateOverlayStyle { style in
+                style.widthRatio = newWidthRatio
+            }
+            userDefinedTopLeft = NSPoint(x: newLeftX, y: resizeDragStartTopLeft.y)
+            userDefinedHeight = newHeight
         }
-        userDefinedTopLeft = NSPoint(x: newLeftX, y: newTopY)
-        userDefinedHeight = newHeight
         positionPanels()
     }
 
@@ -782,6 +833,12 @@ final class OverlayWindowController {
         if useHighLevel && panelsShown {
             orderFrontAllPanels()
         }
+
+        if model.overlayStyle.attachToSource && panelsShown {
+            startSourceWindowTracking()
+        } else {
+            stopSourceWindowTracking()
+        }
     }
 
     private func isSourceAppFrontmost() -> Bool {
@@ -794,6 +851,95 @@ final class OverlayWindowController {
             return true
         }
         return false
+    }
+
+    /// Returns the frame of the source application's main on-screen window
+    /// in Cocoa screen coordinates (origin at bottom-left).
+    /// Picks the largest window by area to avoid matching tooltips, popovers,
+    /// and other transient accessory windows.
+    private func sourceAppWindowFrame() -> NSRect? {
+        guard let source = model.selectedSource,
+              source.category == .application else {
+            return nil
+        }
+
+        // Find the running application matching the source
+        let runningApp = NSWorkspace.shared.runningApplications.first { app in
+            app.bundleIdentifier == source.detail
+        }
+        guard let pid = runningApp?.processIdentifier else { return nil }
+
+        // Query the window list for windows belonging to this PID
+        guard let windowInfoList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return nil
+        }
+
+        let primaryScreenHeight = NSScreen.screens.first?.frame.height ?? 0
+
+        var bestFrame: NSRect?
+        var bestArea: CGFloat = 0
+
+        for info in windowInfoList {
+            guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t,
+                  ownerPID == pid,
+                  let boundsDict = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let layer = info[kCGWindowLayer as String] as? Int,
+                  layer == 0 else {
+                continue
+            }
+
+            let cgW = boundsDict["Width"] ?? 0
+            let cgH = boundsDict["Height"] ?? 0
+
+            // Skip tiny windows (tooltips, status items, etc.)
+            guard cgW > 1, cgH > 1 else { continue }
+
+            let area = cgW * cgH
+            guard area > bestArea else { continue }
+
+            let cgX = boundsDict["X"] ?? 0
+            let cgY = boundsDict["Y"] ?? 0
+
+            // Convert from CG coordinates (top-left origin) to Cocoa coordinates (bottom-left origin)
+            let cocoaY = primaryScreenHeight - cgY - cgH
+            bestFrame = NSRect(x: cgX, y: cocoaY, width: cgW, height: cgH)
+            bestArea = area
+        }
+
+        return bestFrame
+    }
+
+    private func startSourceWindowTracking() {
+        guard sourceWindowTrackingTimer == nil else { return }
+        lastSourceWindowFrame = sourceAppWindowFrame()
+
+        let timer = Timer(timeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.pollSourceWindowFrame()
+            }
+        }
+        sourceWindowTrackingTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopSourceWindowTracking() {
+        sourceWindowTrackingTimer?.invalidate()
+        sourceWindowTrackingTimer = nil
+        lastSourceWindowFrame = nil
+    }
+
+    private func pollSourceWindowFrame() {
+        guard model.overlayStyle.attachToSource, panelsShown else {
+            stopSourceWindowTracking()
+            return
+        }
+
+        let newFrame = sourceAppWindowFrame()
+        guard newFrame != lastSourceWindowFrame else { return }
+        lastSourceWindowFrame = newFrame
+        positionPanels(animated: true)
     }
 
     private func currentScreen() -> NSScreen? {

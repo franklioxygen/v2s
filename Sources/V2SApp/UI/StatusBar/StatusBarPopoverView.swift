@@ -158,7 +158,9 @@ struct StatusBarPopoverView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Toggle(model.localized(.textOutline), isOn: whiteTextOutlineBinding)
+                    .toggleStyle(.switch)
                 Toggle(model.localized(.attachToSource), isOn: attachToSourceBinding)
+                    .toggleStyle(.switch)
                 sliderRow(
                     label: model.localized(.opacity),
                     value: overlayOpacityBinding, in: 0.0 ... 1.0,
