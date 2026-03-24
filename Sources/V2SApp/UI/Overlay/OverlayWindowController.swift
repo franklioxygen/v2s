@@ -33,6 +33,7 @@ final class OverlayWindowController {
     private var workspaceNotificationCancellable: AnyCancellable?
     private var sourceWindowTrackingTimer: Timer?
     private var lastSourceWindowFrame: NSRect?
+    private var attachToSourceRefreshTask: Task<Void, Never>?
 
     // MARK: - Genie Animation State
     var trayIconRectProvider: (() -> NSRect?)?
@@ -133,6 +134,7 @@ final class OverlayWindowController {
     deinit {
         mouseTrackingTimer?.invalidate()
         sourceWindowTrackingTimer?.invalidate()
+        attachToSourceRefreshTask?.cancel()
     }
 
     private func configurePanels() {
@@ -202,12 +204,12 @@ final class OverlayWindowController {
 
         workspaceNotificationCancellable = NSWorkspace.shared.notificationCenter
             .publisher(for: NSWorkspace.didActivateApplicationNotification)
-            .sink { [weak self] _ in self?.updateAttachToSourceLevels() }
+            .sink { [weak self] _ in self?.scheduleAttachToSourceRefresh() }
 
         model.$overlayStyle
             .map(\.attachToSource)
             .removeDuplicates()
-            .sink { [weak self] _ in self?.updateAttachToSourceLevels() }
+            .sink { [weak self] _ in self?.scheduleAttachToSourceRefresh() }
             .store(in: &cancellables)
     }
 
@@ -839,10 +841,40 @@ final class OverlayWindowController {
 
     // MARK: - Attach to Source
 
+    private func scheduleAttachToSourceRefresh() {
+        attachToSourceRefreshTask?.cancel()
+        attachToSourceRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            refreshAttachToSourcePresentation(animated: geniePhase == .idle)
+
+            do {
+                try await Task.sleep(nanoseconds: Self.attachToSourceRefreshDelayNanoseconds)
+            } catch {
+                return
+            }
+
+            guard !Task.isCancelled else { return }
+            refreshAttachToSourcePresentation(animated: geniePhase == .idle)
+        }
+    }
+
+    private func refreshAttachToSourcePresentation(animated: Bool) {
+        updateAttachToSourceLevels()
+
+        guard panelsShown else {
+            return
+        }
+
+        positionPanels(animated: animated)
+    }
+
     private func updateAttachToSourceLevels() {
         let useHighLevel = !model.overlayStyle.attachToSource || isSourceAppFrontmost()
-        let contentLevel: NSWindow.Level = useHighLevel ? .statusBar : .floating
-        let controlLevel = NSWindow.Level(rawValue: contentLevel.rawValue + 1)
+        let contentLevel: NSWindow.Level = useHighLevel ? .statusBar : .normal
+        let controlLevel: NSWindow.Level = useHighLevel
+            ? NSWindow.Level(rawValue: contentLevel.rawValue + 1)
+            : .normal
 
         let allContentPanels: [OverlayPanel] = [panel, controlsChromePanel]
         let allControlPanels: [OverlayPanel] = [scrollbarPanel, moveButtonPanel, closeButtonPanel, resizeButtonPanel]
@@ -856,10 +888,35 @@ final class OverlayWindowController {
             p.isFloatingPanel = useHighLevel
         }
 
+        if useHighLevel, panelsShown {
+            orderFrontAllPanels()
+        } else if panelsShown {
+            orderPanelsBelowFrontmostApplication()
+        }
+
         if model.overlayStyle.attachToSource && panelsShown {
             startSourceWindowTracking()
         } else {
             stopSourceWindowTracking()
+        }
+    }
+
+    private func orderPanelsBelowFrontmostApplication() {
+        guard let frontmostWindowNumber = frontmostApplicationWindowNumber() else {
+            return
+        }
+
+        let orderedPanels: [NSWindow] = [
+            panel,
+            controlsChromePanel,
+            scrollbarPanel,
+            moveButtonPanel,
+            closeButtonPanel,
+            resizeButtonPanel
+        ]
+
+        for orderedPanel in orderedPanels {
+            orderedPanel.order(.below, relativeTo: frontmostWindowNumber)
         }
     }
 
@@ -933,6 +990,35 @@ final class OverlayWindowController {
         return bestFrame
     }
 
+    private func frontmostApplicationWindowNumber() -> Int? {
+        guard let frontmostApplication = NSWorkspace.shared.frontmostApplication else {
+            return nil
+        }
+
+        let frontmostPID = frontmostApplication.processIdentifier
+        guard let windowInfoList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return nil
+        }
+
+        for info in windowInfoList {
+            guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t,
+                  ownerPID == frontmostPID,
+                  let layer = info[kCGWindowLayer as String] as? Int,
+                  layer == 0,
+                  let alpha = info[kCGWindowAlpha as String] as? Double,
+                  alpha > 0,
+                  let windowNumber = info[kCGWindowNumber as String] as? Int else {
+                continue
+            }
+
+            return windowNumber
+        }
+
+        return nil
+    }
+
     private func startSourceWindowTracking() {
         guard sourceWindowTrackingTimer == nil else { return }
         lastSourceWindowFrame = sourceAppWindowFrame()
@@ -965,6 +1051,12 @@ final class OverlayWindowController {
     }
 
     private func currentScreen() -> NSScreen? {
+        if model.overlayStyle.attachToSource,
+           let sourceFrame = sourceAppWindowFrame(),
+           let sourceScreen = screen(containing: sourceFrame) {
+            return sourceScreen
+        }
+
         if let targetDisplayID = model.overlayStyle.targetDisplayID,
            let matchedScreen = NSScreen.screens.first(where: { $0.displayIDString == targetDisplayID }) {
             return matchedScreen
@@ -975,6 +1067,12 @@ final class OverlayWindowController {
         return NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) })
             ?? NSScreen.main
             ?? NSScreen.screens.first
+    }
+
+    private func screen(containing frame: NSRect) -> NSScreen? {
+        NSScreen.screens.max { lhs, rhs in
+            lhs.frame.intersection(frame).area < rhs.frame.intersection(frame).area
+        }
     }
 }
 
@@ -987,6 +1085,7 @@ private final class OverlayPanel: NSPanel {
 
 private extension OverlayWindowController {
     static let minimumOverlayHeight: Double = 105
+    static let attachToSourceRefreshDelayNanoseconds: UInt64 = 120_000_000
     static let passThroughBubbleDiameter: CGFloat = 118
     static let scrollbarRevealDistance: CGFloat = 42
     static let panelCollectionBehavior: NSWindow.CollectionBehavior = [
@@ -999,6 +1098,16 @@ private extension OverlayWindowController {
         width: OverlayControlsLayout.controlSize,
         height: OverlayControlsLayout.controlSize
     )
+}
+
+private extension NSRect {
+    var area: CGFloat {
+        guard isNull == false, isEmpty == false else {
+            return 0
+        }
+
+        return width * height
+    }
 }
 
 private extension NSScreen {
