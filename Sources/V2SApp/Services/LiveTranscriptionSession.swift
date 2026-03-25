@@ -358,7 +358,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         let transcriber = SpeechTranscriber(
             locale: resolvedLocale,
-            transcriptionOptions: [.etiquetteReplacements],
+            transcriptionOptions: [],
             reportingOptions: [.volatileResults, .fastResults],
             attributeOptions: [.audioTimeRange, .transcriptionConfidence]
         )

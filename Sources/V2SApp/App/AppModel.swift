@@ -980,7 +980,7 @@ final class AppModel: ObservableObject {
     private func makeSpeechTranscriber(locale: Locale) -> SpeechTranscriber {
         SpeechTranscriber(
             locale: locale,
-            transcriptionOptions: [.etiquetteReplacements],
+            transcriptionOptions: [],
             reportingOptions: [.volatileResults, .fastResults],
             attributeOptions: [.audioTimeRange, .transcriptionConfidence]
         )
