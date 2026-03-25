@@ -16,7 +16,13 @@
   <a href="README.md">English Doc</a>
 </p>
 
-![Mar-20-2026 11-08-59](https://github.com/user-attachments/assets/b65167ee-ae7e-4e37-8316-ebd200ae89a7)
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/b65167ee-ae7e-4e37-8316-ebd200ae89a7" alt="Mar-20-2026 11-08-59">
+</p>
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/449039ee-c329-426e-a55b-ab6660c56ca7" alt="Screenshot 2026-03-25 at 1 10 39 PM" width="500">
+</p>
 
 ## 功能特性
 
