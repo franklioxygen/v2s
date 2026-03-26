@@ -587,6 +587,14 @@ final class AppModel: ObservableObject {
         }
     }
 
+#if V2S_LEGACY_SPEECH_ONLY
+    private func prepareSpeechRecognitionResourceIfNeeded(
+        for languageID: String
+    ) async -> LanguageResourceSystemSettingsDestination? {
+        _ = languageID
+        return nil
+    }
+#else
     private func prepareSpeechRecognitionResourceIfNeeded(
         for languageID: String
     ) async -> LanguageResourceSystemSettingsDestination? {
@@ -756,6 +764,7 @@ final class AppModel: ObservableObject {
 
         try await request.downloadAndInstall()
     }
+#endif
 
     private func prepareTranslationResourceIfNeeded(
         from sourceLanguageID: String,
@@ -976,6 +985,7 @@ final class AppModel: ObservableObject {
         }
     }
 
+#if !V2S_LEGACY_SPEECH_ONLY
     @available(macOS 26.0, *)
     private func makeSpeechTranscriber(locale: Locale) -> SpeechTranscriber {
         SpeechTranscriber(
@@ -985,6 +995,7 @@ final class AppModel: ObservableObject {
             attributeOptions: [.audioTimeRange, .transcriptionConfidence]
         )
     }
+#endif
 
     private func normalizedProgressValue(_ fractionCompleted: Double) -> Double? {
         guard fractionCompleted.isFinite, fractionCompleted >= 0 else {

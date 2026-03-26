@@ -52,6 +52,8 @@
 5. Choose your input and subtitle languages.
 6. Click **Start**.
 
+If macOS says the app cannot be verified, **right-click** `v2s.app` → **Open** → **Open**, or allow it under **System Settings → Privacy & Security**.
+
 v2s will ask for permissions on first use:
 
 - **Speech Recognition** — to transcribe audio into text.
@@ -60,9 +62,13 @@ v2s will ask for permissions on first use:
 
 ## Requirements
 
-- Translation requires macOS 26 or newer
+- **Runtime:** macOS **15** or newer (see deployment target in the Xcode project).
+- **Translation:** Apple’s Translation APIs used by v2s require **macOS 26** or newer for full functionality; on older systems, translation-related features may be limited or unavailable.
+- **Speech:** On macOS 26+, the app can use Apple’s newer streaming speech APIs when built with a **macOS 26 SDK** (see *Building from Source*). On earlier macOS versions, transcription uses the classic on-device speech stack (`SFSpeechRecognizer`).
 
 ## Building from Source
+
+Install the full **Xcode** app from the Mac App Store (Command Line Tools alone are not enough). Open the project once to finish additional components if prompted.
 
 ```bash
 git clone https://github.com/franklioxygen/v2s.git
@@ -70,11 +76,32 @@ cd v2s
 open v2s.xcodeproj
 ```
 
-Or from the terminal:
+Select the **v2s** scheme and **My Mac**, then **Product → Run** or **Archive** as needed.
+
+**Default compile mode (Xcode 16 / macOS 15 SDK):** the target defines **`V2S_LEGACY_SPEECH_ONLY`**, which omits APIs that only exist in the macOS 26 SDK so the app builds on older toolchains. Speech recognition then uses the **legacy** path at runtime, which matches how the app already behaves when newer APIs are unavailable.
+
+**Enabling macOS 26 speech APIs:** install **Xcode with the macOS 26 SDK**, then in **Build Settings → Swift Compiler – Custom Flags → Active Compilation Conditions** remove **`V2S_LEGACY_SPEECH_ONLY`** from both Debug and Release (keep **`DEBUG`** in Debug).
+
+Terminal examples:
 
 ```bash
-xcodebuild -project v2s.xcodeproj -scheme v2s -configuration Debug build
+# Debug
+xcodebuild -project v2s.xcodeproj -scheme v2s -configuration Debug \
+  -destination 'platform=macOS' build
+
+# Release (install the .app from the reported DerivedData path, or use -derivedDataPath)
+xcodebuild -project v2s.xcodeproj -scheme v2s -configuration Release \
+  -destination 'platform=macOS' -derivedDataPath ./.build/release build
+open ./.build/release/Build/Products/Release/v2s.app
 ```
+
+To ship a zip like the GitHub releases:
+
+```bash
+ditto -c -k --keepParent ./.build/release/Build/Products/Release/v2s.app ./dist/v2s.app.zip
+```
+
+For automated version bumps, Git tags, and GitHub releases, see **`scripts/release.sh`**.
 
 ## License
 
