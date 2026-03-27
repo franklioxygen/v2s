@@ -9,6 +9,8 @@ struct OverlayView: View {
     @State private var passThroughRevealProgress: Double = 0.0
     @State private var lastDraftSlotHeight: CGFloat = 0.0
     @State private var lastLiveLayersHeight: CGFloat = 0.0
+    @State private var lastCommittedSlotHeight: CGFloat = 0.0
+    @State private var measuredHistoryEntryHeights: [UUID: CGFloat] = [:]
 
     var body: some View {
         ZStack {
@@ -32,14 +34,12 @@ struct OverlayView: View {
         Group {
             if let state = model.overlayState {
                 GeometryReader { proxy in
-                    let visibleHistoryCount = historyVisibleCount(for: proxy.size.height, state: state)
-                    let visibleHistoryEntries = historyVisibleEntries(
-                        from: state.history,
-                        visibleCount: visibleHistoryCount
-                    )
+                    let availableHistoryHeight = availableHistoryHeight(for: proxy.size.height, state: state)
+                    let visibleHistoryEntries = historyVisibleEntries(from: state.history, availableHeight: availableHistoryHeight)
+                    let visibleHistoryCount = visibleHistoryEntries.count
 
                     ZStack(alignment: .bottom) {
-                        VStack(alignment: .center, spacing: 10) {
+                        VStack(alignment: .center, spacing: Self.liveStackSpacing) {
                             ForEach(Array(visibleHistoryEntries.enumerated()), id: \.element.id) { index, entry in
                                 historyEntry(
                                     entry,
@@ -75,11 +75,25 @@ struct OverlayView: View {
                         guard height > 0 else { return }
                         lastLiveLayersHeight = ceil(height)
                     }
+                    .onPreferenceChange(CommittedSlotHeightPreferenceKey.self) { height in
+                        guard height > 0 else { return }
+                        lastCommittedSlotHeight = ceil(height)
+                    }
+                    .onPreferenceChange(HistoryEntryHeightsPreferenceKey.self) { heights in
+                        guard heights.isEmpty == false else { return }
+                        for (id, height) in heights where height > 0 {
+                            measuredHistoryEntryHeights[id] = ceil(height)
+                        }
+                    }
                     .onAppear {
                         model.updateOverlayHistoryVisibleCount(visibleHistoryCount)
                     }
                     .onChange(of: visibleHistoryCount) { _, newCount in
                         model.updateOverlayHistoryVisibleCount(newCount)
+                    }
+                    .onChange(of: state.history.map(\.id)) { _, ids in
+                        let validIDs = Set(ids)
+                        measuredHistoryEntryHeights = measuredHistoryEntryHeights.filter { validIDs.contains($0.key) }
                     }
                     .onChange(of: state.history.count) { _, _ in
                         model.updateOverlayHistoryVisibleCount(visibleHistoryCount)
@@ -88,6 +102,8 @@ struct OverlayView: View {
                         if newState != .running {
                             lastDraftSlotHeight = 0
                             lastLiveLayersHeight = 0
+                            lastCommittedSlotHeight = 0
+                            measuredHistoryEntryHeights = [:]
                         }
                     }
                 }
@@ -111,7 +127,7 @@ struct OverlayView: View {
     // MARK: - Continuous flow
 
     private func liveLayers(_ state: OverlayPreviewState) -> some View {
-        VStack(alignment: .center, spacing: 10) {
+        VStack(alignment: .center, spacing: Self.liveStackSpacing) {
             if hasCommittedCaption(state) {
                 committedLayer(state)
             } else if shouldReserveCommittedSlot(for: state) {
@@ -130,7 +146,8 @@ struct OverlayView: View {
                 translatedColor: baseSubtitleColor,
                 source: state.sourceText,
                 sourceColor: subtitleColor(opacity: 0.82)
-            ),
+            )
+            .background(committedSlotHeightReader),
             key: promotionKey(
                 promotionID: state.committedPromotionID,
                 sourceText: state.sourceText,
@@ -183,7 +200,8 @@ struct OverlayView: View {
                                 Text(" ")
                                     .font(.system(size: model.overlayStyle.scaledTranslatedFontSize, weight: .semibold))
                                     .multilineTextAlignment(.center)
-                                    .lineLimit(2)
+                                    .lineLimit(nil)
+                                    .fixedSize(horizontal: false, vertical: true)
                                     .frame(maxWidth: .infinity)
                                     .hidden()
                                     .accessibilityHidden(true)
@@ -241,21 +259,34 @@ struct OverlayView: View {
             source: entry.sourceText,
             sourceColor: subtitleColor(opacity: sourceOpacity)
         )
+        .background(historyEntryHeightReader(for: entry.id))
     }
 
-    private func historyVisibleEntries(from history: [OverlayHistoryEntry], visibleCount: Int) -> [OverlayHistoryEntry] {
-        let clampedVisibleCount = max(0, visibleCount)
-        guard clampedVisibleCount > 0 else { return [] }
-        let maxOffset = max(0, history.count - clampedVisibleCount)
-        let offset = min(max(model.overlayHistoryScrollOffset, 0), maxOffset)
+    private func historyVisibleEntries(from history: [OverlayHistoryEntry], availableHeight: CGFloat) -> [OverlayHistoryEntry] {
+        guard availableHeight > 0 else { return [] }
+        let offset = min(max(model.overlayHistoryScrollOffset, 0), max(0, history.count - 1))
         let upperBound = max(0, history.count - offset)
-        let lowerBound = max(0, upperBound - clampedVisibleCount)
+        guard upperBound > 0 else { return [] }
+
+        var lowerBound = upperBound
+        var consumedHeight: CGFloat = 0
+
+        while lowerBound > 0 {
+            let entry = history[lowerBound - 1]
+            let nextHeight = historyEntryHeight(for: entry) + Self.liveStackSpacing
+            if lowerBound == upperBound || consumedHeight + nextHeight <= availableHeight {
+                consumedHeight += nextHeight
+                lowerBound -= 1
+            } else {
+                break
+            }
+        }
+
         return Array(history[lowerBound..<upperBound])
     }
 
-    private func historyVisibleCount(for height: CGFloat, state: OverlayPreviewState) -> Int {
-        let availableHeight = max(height - reservedFlowHeight(for: state), 0)
-        return max(0, Int((availableHeight / historyRowHeight).rounded(.down)))
+    private func availableHistoryHeight(for height: CGFloat, state: OverlayPreviewState) -> CGFloat {
+        max(height - reservedFlowHeight(for: state), 0)
     }
 
     private func reservedFlowHeight(for state: OverlayPreviewState) -> CGFloat {
@@ -293,22 +324,33 @@ struct OverlayView: View {
         )
     }
 
-    private var historyRowHeight: CGFloat {
+    private var estimatedCommittedSlotHeight: CGFloat {
         estimatedCaptionPairHeight(
             showsTranslated: showsTranslatedSubtitle,
             showsSource: showsOriginalSubtitle
         )
     }
 
-    private var committedRowHeight: CGFloat {
-        historyRowHeight
+    private var committedSlotHeight: CGFloat {
+        max(lastCommittedSlotHeight, estimatedCommittedSlotHeight)
+    }
+
+    private func historyEntryHeight(for entry: OverlayHistoryEntry) -> CGFloat {
+        max(measuredHistoryEntryHeights[entry.id] ?? 0, estimatedHistoryEntryHeight(for: entry))
+    }
+
+    private func estimatedHistoryEntryHeight(for entry: OverlayHistoryEntry) -> CGFloat {
+        estimatedCaptionPairHeight(
+            showsTranslated: showsTranslatedSubtitle,
+            showsSource: showsOriginalSubtitle && entry.sourceText.isEmpty == false
+        )
     }
 
     private func estimatedLiveLayersHeight(for state: OverlayPreviewState) -> CGFloat {
         var height = draftSlotHeight(for: state)
 
         if shouldReserveCommittedSlot(for: state) {
-            height += committedRowHeight + 10.0
+            height += committedSlotHeight + Self.liveStackSpacing
         }
 
         return height
@@ -338,7 +380,7 @@ struct OverlayView: View {
     private var committedSlotPlaceholder: some View {
         Color.clear
             .frame(maxWidth: .infinity)
-            .frame(height: committedRowHeight)
+            .frame(height: committedSlotHeight)
             .accessibilityHidden(true)
     }
 
@@ -346,6 +388,20 @@ struct OverlayView: View {
         GeometryReader { proxy in
             Color.clear
                 .preference(key: LiveLayersHeightPreferenceKey.self, value: proxy.size.height)
+        }
+    }
+
+    private var committedSlotHeightReader: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .preference(key: CommittedSlotHeightPreferenceKey.self, value: proxy.size.height)
+        }
+    }
+
+    private func historyEntryHeightReader(for id: UUID) -> some View {
+        GeometryReader { proxy in
+            Color.clear
+                .preference(key: HistoryEntryHeightsPreferenceKey.self, value: [id: proxy.size.height])
         }
     }
 
@@ -505,7 +561,7 @@ struct OverlayView: View {
             Text(attributedText)
                 .font(.system(size: fontSize, weight: weight))
                 .multilineTextAlignment(.center)
-                .lineLimit(2)
+                .lineLimit(nil)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity)
         }
@@ -553,7 +609,7 @@ struct OverlayView: View {
                     .font(.system(size: fontSize, weight: weight))
                     .foregroundStyle(.white)
                     .multilineTextAlignment(.center)
-                    .lineLimit(2)
+                    .lineLimit(nil)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity)
                     .offset(x: offset.width, y: offset.height)
@@ -639,6 +695,7 @@ private extension OverlayView {
         dampingFraction: 0.88,
         blendDuration: 0.08
     )
+    static let liveStackSpacing: CGFloat = 10.0
     static let draftBottomInset: CGFloat = 3.0
     static let draftHeightJitterTolerance: CGFloat = 6.0
     static let captionPairSpacing: CGFloat = 4.0
@@ -682,6 +739,22 @@ private struct LiveLayersHeightPreferenceKey: PreferenceKey {
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
+    }
+}
+
+private struct CommittedSlotHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0.0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct HistoryEntryHeightsPreferenceKey: PreferenceKey {
+    static var defaultValue: [UUID: CGFloat] = [:]
+
+    static func reduce(value: inout [UUID: CGFloat], nextValue: () -> [UUID: CGFloat]) {
+        value.merge(nextValue()) { _, new in new }
     }
 }
 

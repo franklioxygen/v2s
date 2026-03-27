@@ -1412,7 +1412,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
     @available(macOS 26.0, *)
     private func processModernRecognitionResult(_ result: SpeechTranscriber.Result) {
-        lastRecognitionResultTime = Date()
+        let now = Date()
+        lastRecognitionResultTime = now
         let fullText = normalizedTranscriberText(result.text)
         let pendingRawText = pendingModernText(from: fullText)
         let text = pendingRawText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1454,22 +1455,53 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             return
         }
 
+        observeDraftText(text, at: now)
         latestModernText = pendingRawText
+        if let split = committableModernText(in: pendingRawText),
+           split.remainingRawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           String(text.suffix(1)).containsSentenceTerminator,
+           canFastCommitModernBoundary(at: now) {
+            let committedText = split.committedRawText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard committedText.isEmpty == false else {
+                latestModernText = ""
+                Task { await emitPartialDraft(nil) }
+                return
+            }
+
+            cancelSilenceTimer()
+            cancelVADSilenceTimer()
+            modernCommittedPrefixText += split.committedRawText
+            latestModernText = split.remainingRawText
+            let committedDraftID = currentDraftId
+            resetDraftState()
+            Task {
+                await emitCommittedSequence(
+                    [
+                        CommittedEmission(
+                            text: committedText,
+                            promotionSegmentID: committedDraftID
+                        )
+                    ],
+                    clearDraftAfter: true
+                )
+            }
+            return
+        }
+
         emitDraftUpdate(from: result, text: text)
         scheduleSilenceCommit()
     }
 
-    @available(macOS 26.0, *)
-    private func emitDraftUpdate(from result: SpeechTranscriber.Result, text: String) {
-        let now = Date()
-
+    private func observeDraftText(_ text: String, at now: Date) {
         if text != lastDraftText {
             lastDraftText = text
             lastDraftTextChangeTime = now
             draftChangeHistory.append((text: text, time: now))
         }
         draftChangeHistory.removeAll { now.timeIntervalSince($0.time) > 0.4 }
+    }
 
+    private func currentDraftStability(at now: Date) -> (silenceMs: Int, stabilityScore: Float) {
         let silenceMs = Int(now.timeIntervalSince(lastDraftTextChangeTime) * 1000)
         let recentChanges = draftChangeHistory.count
         let stabilityScore: Float
@@ -1478,6 +1510,21 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         case 2:    stabilityScore = 0.7
         default:   stabilityScore = max(0.1, 0.5 - Float(recentChanges - 2) * 0.15)
         }
+
+        return (silenceMs, stabilityScore)
+    }
+
+    private func canFastCommitModernBoundary(at now: Date) -> Bool {
+        Int(now.timeIntervalSince(lastDraftTextChangeTime) * 1000) >= modernBoundaryCommitStabilityDelayMs
+    }
+
+    @available(macOS 26.0, *)
+    private func emitDraftUpdate(from result: SpeechTranscriber.Result, text: String) {
+        let now = Date()
+        observeDraftText(text, at: now)
+        let draftStability = currentDraftStability(at: now)
+        let silenceMs = draftStability.silenceMs
+        let stabilityScore = draftStability.stabilityScore
 
         let boundaryScore: Float = String(text.suffix(1)).containsSentenceTerminator ? 0.9 : 0.45
         let lengthFitScore = draftLengthFitScore(for: text)
@@ -1599,6 +1646,12 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     /// Follow ≈ 600 ms · Balanced ≈ 630 ms · Reading ≈ 690 ms.
     private var silenceCommitDeadlineMs: Int {
         max(600, modeConfig.minSilenceCommitMs + 350)
+    }
+
+    /// Require a short stable window before promoting a punctuation-ended partial.
+    /// This keeps the fast path responsive without freezing a still-revisable boundary.
+    private var modernBoundaryCommitStabilityDelayMs: Int {
+        max(160, min(modeConfig.minSilenceCommitMs, 240))
     }
 
     private var vadSilenceCommitDeadlineMs: Int {
@@ -1812,24 +1865,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             return
         }
 
-        // Track text changes for stability scoring
-        if text != lastDraftText {
-            lastDraftText = text
-            lastDraftTextChangeTime = now
-            draftChangeHistory.append((text: text, time: now))
-        }
-        draftChangeHistory.removeAll { now.timeIntervalSince($0.time) > 0.4 }
-
-        let silenceMs = Int(now.timeIntervalSince(lastDraftTextChangeTime) * 1000)
-
-        // Stability score: fewer changes in 400 ms → higher score
-        let recentChanges = draftChangeHistory.count
-        let stabilityScore: Float
-        switch recentChanges {
-        case 0, 1: stabilityScore = 1.0
-        case 2:    stabilityScore = 0.7
-        default:   stabilityScore = max(0.1, 0.5 - Float(recentChanges - 2) * 0.15)
-        }
+        observeDraftText(text, at: now)
+        let draftStability = currentDraftStability(at: now)
+        let silenceMs = draftStability.silenceMs
+        let stabilityScore = draftStability.stabilityScore
 
         // Boundary score: sentence-terminating punctuation scores highest
         let lastSeg = allSegments[lastIdx]

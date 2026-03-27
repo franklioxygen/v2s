@@ -1896,7 +1896,7 @@ final class AppModel: ObservableObject {
 
     // MARK: - Display duration (strategy §10)
 
-    /// max(min_hold, reading_time, audio_span × sync_factor), clamped to [1.2, 4.5] s
+    /// max(min_hold, reading_time, audio_span × sync_factor), clamped to [1.2, adaptive_max] s
     private func computeDisplayDuration(sourceText: String, translatedText: String) -> Double {
         let displayText: String
         if showsTranslatedSubtitle {
@@ -1927,7 +1927,26 @@ final class AppModel: ObservableObject {
         default:      minHold = 2.0
         }
 
-        return min(max(minHold, readingTime), 4.5)
+        let maxHold: Double
+        if showsTranslatedSubtitle {
+            if isCJK {
+                switch charCount {
+                case ..<24:  maxHold = 4.5
+                case ..<36:  maxHold = 5.4
+                default:     maxHold = 6.2
+                }
+            } else {
+                switch charCount {
+                case ..<48:  maxHold = 4.5
+                case ..<72:  maxHold = 5.4
+                default:     maxHold = 6.2
+                }
+            }
+        } else {
+            maxHold = 4.5
+        }
+
+        return min(max(minHold, readingTime), maxHold)
     }
 
     private func sampleText(for languageID: String) -> String {
