@@ -5,12 +5,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_PATH="$ROOT_DIR/v2s.xcodeproj"
 PROJECT_FILE="$PROJECT_PATH/project.pbxproj"
+VERSION_SOURCE_FILE="$ROOT_DIR/Sources/V2SApp/App/AppModel.swift"
 SCHEME="v2s"
 APP_NAME="v2s"
 DERIVED_DATA_PATH="$ROOT_DIR/.build/release"
 DIST_DIR="$ROOT_DIR/dist"
 APP_ENTITLEMENTS_PATH="${APP_ENTITLEMENTS_PATH:-}"
 PROJECT_FILE_BACKUP=""
+VERSION_SOURCE_FILE_BACKUP=""
 ROLLBACK_ON_EXIT=0
 
 cleanup() {
@@ -20,6 +22,12 @@ cleanup() {
     mv "$PROJECT_FILE_BACKUP" "$PROJECT_FILE"
   elif [[ -n "$PROJECT_FILE_BACKUP" && -f "$PROJECT_FILE_BACKUP" ]]; then
     rm -f "$PROJECT_FILE_BACKUP"
+  fi
+
+  if [[ $ROLLBACK_ON_EXIT -eq 1 && -n "$VERSION_SOURCE_FILE_BACKUP" && -f "$VERSION_SOURCE_FILE_BACKUP" ]]; then
+    mv "$VERSION_SOURCE_FILE_BACKUP" "$VERSION_SOURCE_FILE"
+  elif [[ -n "$VERSION_SOURCE_FILE_BACKUP" && -f "$VERSION_SOURCE_FILE_BACKUP" ]]; then
+    rm -f "$VERSION_SOURCE_FILE_BACKUP"
   fi
 
   exit "$exit_code"
@@ -148,6 +156,8 @@ apply_version_bump() {
 
   perl -0pi -e "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = ${version};/g" "$PROJECT_FILE"
   perl -0pi -e "s/CURRENT_PROJECT_VERSION = [^;]+;/CURRENT_PROJECT_VERSION = ${build_number};/g" "$PROJECT_FILE"
+  perl -0pi -e 's/static let marketingVersion = "[^"]+"/static let marketingVersion = "'"${version}"'"/g' "$VERSION_SOURCE_FILE"
+  perl -0pi -e 's/static let buildNumber = "[^"]+"/static let buildNumber = "'"${build_number}"'"/g' "$VERSION_SOURCE_FILE"
 }
 
 build_release_app() {
@@ -220,6 +230,7 @@ main() {
   require_cmd xcodebuild
 
   [[ -f "$PROJECT_FILE" ]] || fail "Xcode project file not found: ${PROJECT_FILE}"
+  [[ -f "$VERSION_SOURCE_FILE" ]] || fail "Version source file not found: ${VERSION_SOURCE_FILE}"
   [[ -z "$notes_file" || -f "$notes_file" ]] || fail "Release notes file not found: ${notes_file}"
 
   gh auth status >/dev/null 2>&1 || fail "GitHub CLI is not authenticated. Run 'gh auth login' first."
@@ -252,7 +263,9 @@ main() {
   printf 'Releasing %s (build %s -> %s)\n' "$next_version" "$current_build" "$next_build"
 
   PROJECT_FILE_BACKUP="${PROJECT_FILE}.release.bak"
+  VERSION_SOURCE_FILE_BACKUP="${VERSION_SOURCE_FILE}.release.bak"
   cp "$PROJECT_FILE" "$PROJECT_FILE_BACKUP"
+  cp "$VERSION_SOURCE_FILE" "$VERSION_SOURCE_FILE_BACKUP"
   ROLLBACK_ON_EXIT=1
 
   apply_version_bump "$next_version" "$next_build"
@@ -260,7 +273,7 @@ main() {
   release_asset="$(package_release "$next_version")"
   checksum_asset="${release_asset%.app.zip}.sha256"
 
-  git -C "$ROOT_DIR" add "$PROJECT_FILE"
+  git -C "$ROOT_DIR" add "$PROJECT_FILE" "$VERSION_SOURCE_FILE"
   git -C "$ROOT_DIR" commit -m "chore(release): ${tag}"
   git -C "$ROOT_DIR" tag -a "$tag" -m "$tag"
   git -C "$ROOT_DIR" push origin HEAD

@@ -204,6 +204,12 @@ struct SettingsView: View {
                         LanguageResourceStatusListView(statuses: model.languageResourceStatuses)
                     }
                 }
+                VersionLink(
+                    versionText: model.appVersionDisplayText,
+                    repositoryURL: model.appRepositoryURL,
+                    font: .caption.monospacedDigit()
+                )
+                    .frame(maxWidth: .infinity, alignment: .center)
             }
             .padding(20)
         }

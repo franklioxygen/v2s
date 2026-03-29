@@ -5,6 +5,12 @@ import Speech
 import SwiftUI
 import Translation
 
+private enum AppBuildInfo {
+    static let marketingVersion = "0.3.20"
+    static let buildNumber = "23"
+    static let repositoryURLString = "https://github.com/franklioxygen/v2s"
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     private let settingsStore: SettingsStore
@@ -199,6 +205,14 @@ final class AppModel: ObservableObject {
 
     var interfaceLocale: Locale {
         AppLocalization.locale(for: resolvedInterfaceLanguageID)
+    }
+
+    var appVersionDisplayText: String {
+        "v\(AppBuildInfo.marketingVersion)"
+    }
+
+    var appRepositoryURL: URL {
+        URL(string: AppBuildInfo.repositoryURLString)!
     }
 
     var showsOriginalSubtitle: Bool {

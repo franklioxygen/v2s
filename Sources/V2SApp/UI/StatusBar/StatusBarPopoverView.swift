@@ -48,11 +48,18 @@ struct StatusBarPopoverView: View {
                         .lineLimit(1)
                 }
                 Spacer()
-                Text(model.sessionBadgeText)
-                    .font(.caption2.weight(.medium))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(.fill.tertiary, in: Capsule())
+                VStack(alignment: .trailing, spacing: 4) {
+                    VersionLink(
+                        versionText: model.appVersionDisplayText,
+                        repositoryURL: model.appRepositoryURL,
+                        font: .caption2.monospacedDigit()
+                    )
+                    Text(model.sessionBadgeText)
+                        .font(.caption2.weight(.medium))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(.fill.tertiary, in: Capsule())
+                }
             }
             Button {
                 model.toggleSession()
@@ -326,5 +333,25 @@ struct StatusBarPopoverView: View {
             get: { model.overlayStyle.sourceFontSize },
             set: { v in model.updateOverlayStyle { $0.sourceFontSize = v } }
         )
+    }
+}
+
+struct VersionLink: View {
+    @Environment(\.openURL) private var openURL
+
+    let versionText: String
+    let repositoryURL: URL
+    let font: Font
+
+    var body: some View {
+        Button {
+            openURL(repositoryURL)
+        } label: {
+            Text(verbatim: versionText)
+                .font(font)
+                .foregroundStyle(.tertiary)
+        }
+        .buttonStyle(.plain)
+        .help(repositoryURL.absoluteString)
     }
 }
