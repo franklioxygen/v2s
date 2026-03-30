@@ -40,6 +40,8 @@
 		A0000000000000000000007B /* SileroVADEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000007C /* SileroVADEngine.swift */; };
 		A0000000000000000000007D /* onnxruntime in Frameworks */ = {isa = PBXBuildFile; productRef = A0000000000000000000007F /* onnxruntime */; };
 		A00000000000000000000080 /* silero_vad.onnx in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000081 /* silero_vad.onnx */; };
+		A00000000000000000000086 /* UpdaterService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000085 /* UpdaterService.swift */; };
+		A00000000000000000000089 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000088 /* Sparkle */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -77,6 +79,7 @@
 		A0000000000000000000007A /* TranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptView.swift; sourceTree = "<group>"; };
 		A0000000000000000000007C /* SileroVADEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SileroVADEngine.swift; sourceTree = "<group>"; };
 		A00000000000000000000081 /* silero_vad.onnx */ = {isa = PBXFileReference; lastKnownFileType = file; path = silero_vad.onnx; sourceTree = "<group>"; };
+		A00000000000000000000085 /* UpdaterService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdaterService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -85,6 +88,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A0000000000000000000007D /* onnxruntime in Frameworks */,
+				A00000000000000000000089 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -184,6 +188,7 @@
 				A0000000000000000000007C /* SileroVADEngine.swift */,
 				A0000000000000000000003A /* SourceCatalogService.swift */,
 				A00000000000000000000047 /* SpeedMonitor.swift */,
+				A00000000000000000000085 /* UpdaterService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -261,6 +266,7 @@
 			name = v2s;
 			packageProductDependencies = (
 				A0000000000000000000007F /* onnxruntime */,
+				A00000000000000000000088 /* Sparkle */,
 			);
 			productName = v2s;
 			productReference = A0000000000000000000000A /* v2s.app */;
@@ -292,6 +298,7 @@
 			mainGroup = A00000000000000000000002;
 			packageReferences = (
 				A0000000000000000000007E /* XCRemoteSwiftPackageReference "onnxruntime-swift-package-manager" */,
+				A00000000000000000000087 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			productRefGroup = A00000000000000000000003 /* Products */;
 			projectDirPath = "";
@@ -309,6 +316,14 @@
 			requirement = {
 				kind = upToNextMajorVersion;
 				minimumVersion = 1.24.0;
+			};
+		};
+		A00000000000000000000087 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.6.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -360,6 +375,7 @@
 				A0000000000000000000005F /* StatusBarController.swift in Sources */,
 				A00000000000000000000060 /* StatusBarPopoverView.swift in Sources */,
 				A00000000000000000000061 /* LiveTranscriptionSession.swift in Sources */,
+				A00000000000000000000086 /* UpdaterService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -478,6 +494,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A0000000000000000000007E /* XCRemoteSwiftPackageReference "onnxruntime-swift-package-manager" */;
 			productName = onnxruntime;
+		};
+		A00000000000000000000088 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A00000000000000000000087 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

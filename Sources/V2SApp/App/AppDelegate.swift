@@ -3,6 +3,7 @@ import AppKit
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let appModel = AppModel()
+    private let updaterService = UpdaterService()
     private let dockVisibilityController = DockVisibilityController()
     private var statusBarController: StatusBarController?
     private var settingsWindowController: SettingsWindowController?
@@ -14,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let settingsWindowController = SettingsWindowController(
             model: appModel,
+            updaterService: updaterService,
             dockVisibilityController: dockVisibilityController,
             quitApp: {
                 NSApp.terminate(nil)

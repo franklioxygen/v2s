@@ -12,6 +12,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     init(
         model: AppModel,
+        updaterService: UpdaterService,
         dockVisibilityController: DockVisibilityController,
         quitApp: @escaping () -> Void
     ) {
@@ -20,7 +21,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         self.quitApp = quitApp
         let window = NSWindow()
         let hostingController = NSHostingController(
-            rootView: SettingsView(model: model, closeSettings: {}, quitApp: {}, openSubtitleModeInfo: {})
+            rootView: SettingsView(model: model, updaterService: updaterService, closeSettings: {}, quitApp: {}, openSubtitleModeInfo: {})
         )
         window.contentViewController = hostingController
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -32,6 +33,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         bindLocalizedTitle()
         hostingController.rootView = SettingsView(
             model: model,
+            updaterService: updaterService,
             closeSettings: { [weak self] in
                 self?.closeForSessionStart()
             },

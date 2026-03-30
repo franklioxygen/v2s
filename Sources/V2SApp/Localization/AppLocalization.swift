@@ -147,6 +147,9 @@ enum AppTextKey: String {
     case copy
     case transcriptWindowTitle
     case summarizationRequiresMacOS26
+    case updates
+    case checkForUpdatesAutomatically
+    case checkForUpdates
 }
 
 enum AppLocalization {
@@ -347,6 +350,9 @@ enum AppLocalization {
             "copy": "Copy",
             "transcriptWindowTitle": "Transcript",
             "summarizationRequiresMacOS26": "Summarization requires macOS 26 or newer.",
+            "updates": "Updates",
+            "checkForUpdatesAutomatically": "Check for Updates Automatically",
+            "checkForUpdates": "Check for Updates",
         ],
         "zh-Hans": [
             "start": "开始",
@@ -491,6 +497,9 @@ enum AppLocalization {
             "copy": "复制",
             "transcriptWindowTitle": "字幕记录",
             "summarizationRequiresMacOS26": "摘要功能需要 macOS 26 或更高版本。",
+            "updates": "更新",
+            "checkForUpdatesAutomatically": "自动检查更新",
+            "checkForUpdates": "检查更新",
         ],
         "es": [
             "start": "Iniciar",
@@ -635,6 +644,9 @@ enum AppLocalization {
             "copy": "Copiar",
             "transcriptWindowTitle": "Transcripción",
             "summarizationRequiresMacOS26": "El resumen requiere macOS 26 o posterior.",
+            "updates": "Actualizaciones",
+            "checkForUpdatesAutomatically": "Buscar actualizaciones automáticamente",
+            "checkForUpdates": "Buscar actualizaciones",
         ],
         "de": [
             "start": "Starten",
@@ -779,6 +791,9 @@ enum AppLocalization {
             "copy": "Kopieren",
             "transcriptWindowTitle": "Transkript",
             "summarizationRequiresMacOS26": "Zusammenfassung erfordert macOS 26 oder neuer.",
+            "updates": "Updates",
+            "checkForUpdatesAutomatically": "Automatisch nach Updates suchen",
+            "checkForUpdates": "Nach Updates suchen",
         ],
         "ja": [
             "start": "開始",
@@ -923,6 +938,9 @@ enum AppLocalization {
             "copy": "コピー",
             "transcriptWindowTitle": "トランスクリプト",
             "summarizationRequiresMacOS26": "要約機能には macOS 26 以降が必要です。",
+            "updates": "アップデート",
+            "checkForUpdatesAutomatically": "アップデートを自動的に確認",
+            "checkForUpdates": "アップデートを確認",
         ],
         "fr": [
             "start": "Démarrer",
@@ -1067,6 +1085,9 @@ enum AppLocalization {
             "copy": "Copier",
             "transcriptWindowTitle": "Transcription",
             "summarizationRequiresMacOS26": "Le résumé nécessite macOS 26 ou une version ultérieure.",
+            "updates": "Mises à jour",
+            "checkForUpdatesAutomatically": "Rechercher les mises à jour automatiquement",
+            "checkForUpdates": "Rechercher les mises à jour",
         ],
         "ko": [
             "start": "시작",
@@ -1211,6 +1232,9 @@ enum AppLocalization {
             "copy": "복사",
             "transcriptWindowTitle": "기록",
             "summarizationRequiresMacOS26": "요약 기능은 macOS 26 이상이 필요합니다.",
+            "updates": "업데이트",
+            "checkForUpdatesAutomatically": "자동으로 업데이트 확인",
+            "checkForUpdates": "업데이트 확인",
         ],
         "ar": [
             "start": "ابدأ",
@@ -1355,6 +1379,9 @@ enum AppLocalization {
             "copy": "نسخ",
             "transcriptWindowTitle": "النص المكتوب",
             "summarizationRequiresMacOS26": "التلخيص يتطلب macOS 26 أو أحدث.",
+            "updates": "التحديثات",
+            "checkForUpdatesAutomatically": "التحقق من التحديثات تلقائيًا",
+            "checkForUpdates": "التحقق من التحديثات",
         ],
         "pt": [
             "start": "Iniciar",
@@ -1499,6 +1526,9 @@ enum AppLocalization {
             "copy": "Copiar",
             "transcriptWindowTitle": "Transcrição",
             "summarizationRequiresMacOS26": "O resumo requer macOS 26 ou posterior.",
+            "updates": "Atualizações",
+            "checkForUpdatesAutomatically": "Verificar atualizações automaticamente",
+            "checkForUpdates": "Verificar atualizações",
         ],
         "ru": [
             "start": "Запустить",
@@ -1643,6 +1673,9 @@ enum AppLocalization {
             "copy": "Копировать",
             "transcriptWindowTitle": "Транскрипция",
             "summarizationRequiresMacOS26": "Для создания резюме требуется macOS 26 или новее.",
+            "updates": "Обновления",
+            "checkForUpdatesAutomatically": "Автоматически проверять обновления",
+            "checkForUpdates": "Проверить обновления",
         ],
     ]
 }

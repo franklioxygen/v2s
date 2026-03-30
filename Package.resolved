@@ -1,5 +1,5 @@
 {
-  "originHash" : "fad59b34e5fd4711dd1d01803c9616df41641c74e61b5266651861ebe01901c1",
+  "originHash" : "a9d2ad091fd558f9ca33a7f8c89dc1d2146e9fad3a2e60baae454550466adcf7",
   "pins" : [
     {
       "identity" : "onnxruntime-swift-package-manager",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "b7fb7f7dea8a2469e6335d95a61b8f36d0dc83b2",
         "version" : "1.24.2"
+      }
+    },
+    {
+      "identity" : "sparkle",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sparkle-project/Sparkle",
+      "state" : {
+        "revision" : "066e75a8b3e99962685d6a90cdd5293ebffd9261",
+        "version" : "2.9.1"
       }
     }
   ],

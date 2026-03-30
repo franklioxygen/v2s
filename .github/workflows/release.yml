@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build release app
+        run: |
+          xcodebuild \
+            -project v2s.xcodeproj \
+            -scheme v2s \
+            -configuration Release \
+            -derivedDataPath .build/release \
+            build
+
+      - name: Package app
+        id: package
+        run: |
+          APP_PATH=".build/release/Build/Products/Release/v2s.app"
+          ZIP_PATH="dist/v2s-${{ steps.version.outputs.version }}.app.zip"
+          CHECKSUM_PATH="dist/v2s-${{ steps.version.outputs.version }}.sha256"
+
+          mkdir -p dist
+          ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
+          (cd dist && shasum -a 256 "$(basename "$ZIP_PATH")" > "$(basename "$CHECKSUM_PATH")")
+
+          echo "zip=$ZIP_PATH" >> "$GITHUB_OUTPUT"
+          echo "checksum=$CHECKSUM_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Generate appcast
+        run: |
+          # Find Sparkle bin directory from SPM build artifacts
+          SPARKLE_BIN=""
+          for candidate in \
+            "$(find .build -name generate_appcast -type f 2>/dev/null | head -1)"; do
+            if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+              SPARKLE_BIN="$(dirname "$candidate")"
+              break
+            fi
+          done
+
+          if [ -z "$SPARKLE_BIN" ]; then
+            echo "::error::Could not find generate_appcast in .build artifacts"
+            exit 1
+          fi
+
+          echo "Sparkle bin: $SPARKLE_BIN"
+
+          # Write EdDSA private key to a temporary file
+          KEY_FILE="$(mktemp)"
+          echo "${{ secrets.SPARKLE_PRIVATE_KEY }}" > "$KEY_FILE"
+
+          # Download previous appcast if it exists, so generate_appcast can append
+          curl -fsSL \
+            "https://github.com/${{ github.repository }}/releases/latest/download/appcast.xml" \
+            -o dist/appcast.xml 2>/dev/null || true
+
+          "$SPARKLE_BIN/generate_appcast" \
+            --ed-key-file "$KEY_FILE" \
+            --download-url-prefix "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/" \
+            --link "https://github.com/${{ github.repository }}" \
+            dist/
+
+          rm -f "$KEY_FILE"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            "${{ steps.package.outputs.zip }}" \
+            "${{ steps.package.outputs.checksum }}" \
+            dist/appcast.xml \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes \
+            --verify-tag

@@ -20,6 +20,10 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSMinimumSystemVersion</key>
     <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>SUFeedURL</key>
+	<string>https://github.com/franklioxygen/v2s/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>c9L/6qNsTDZVevxERjyM4gwJ1n7nXjc7tMdjdQB4uvQ=</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAudioCaptureUsageDescription</key>

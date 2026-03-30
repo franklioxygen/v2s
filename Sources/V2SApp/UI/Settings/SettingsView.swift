@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var updaterService: UpdaterService
     let closeSettings: () -> Void
     let quitApp: () -> Void
     let openSubtitleModeInfo: () -> Void
@@ -202,6 +203,25 @@ struct SettingsView: View {
 
                     if !model.languageResourceStatuses.isEmpty {
                         LanguageResourceStatusListView(statuses: model.languageResourceStatuses)
+                    }
+                }
+                settingsCard {
+                    sectionHeader(model.localized(.updates), icon: "arrow.triangle.2.circlepath")
+                    settingsRow(model.localized(.checkForUpdatesAutomatically)) {
+                        Toggle("", isOn: $updaterService.automaticallyChecksForUpdates)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+                    HStack {
+                        Spacer()
+                        Button {
+                            updaterService.checkForUpdates()
+                        } label: {
+                            Label(model.localized(.checkForUpdates), systemImage: "arrow.clockwise")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
                     }
                 }
                 VersionLink(

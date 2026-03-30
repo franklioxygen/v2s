@@ -6,11 +6,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_PATH="$ROOT_DIR/v2s.xcodeproj"
 PROJECT_FILE="$PROJECT_PATH/project.pbxproj"
 VERSION_SOURCE_FILE="$ROOT_DIR/Sources/V2SApp/App/AppModel.swift"
-SCHEME="v2s"
-APP_NAME="v2s"
-DERIVED_DATA_PATH="$ROOT_DIR/.build/release"
-DIST_DIR="$ROOT_DIR/dist"
-APP_ENTITLEMENTS_PATH="${APP_ENTITLEMENTS_PATH:-}"
 PROJECT_FILE_BACKUP=""
 VERSION_SOURCE_FILE_BACKUP=""
 ROLLBACK_ON_EXIT=0
@@ -37,22 +32,18 @@ trap cleanup EXIT
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/release.sh [patch|minor|major|x.y.z] [--notes-file FILE]
+Usage: ./scripts/release.sh [patch|minor|major|x.y.z]
 
 Examples:
   ./scripts/release.sh
   ./scripts/release.sh minor
-  ./scripts/release.sh 1.2.0 --notes-file /absolute/path/to/release-notes.md
+  ./scripts/release.sh 1.2.0
 
 The script will:
   1. Require a clean git worktree on the default branch.
   2. Bump MARKETING_VERSION and CURRENT_PROJECT_VERSION in the Xcode project.
-  3. Build a Release app.
-  4. Package dist/v2s-<version>.app.zip with a checksum.
-  5. Commit the version bump, create/push tag v<version>, and publish a GitHub release.
-
-Optional environment:
-  APP_ENTITLEMENTS_PATH        Path to a custom entitlements plist for the app signature.
+  3. Commit the version bump, create and push tag v<version>.
+  4. GitHub Actions will handle the build, packaging, and release creation.
 EOF
 }
 
@@ -63,13 +54,6 @@ fail() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"
-}
-
-trim() {
-  local value="$1"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  printf '%s' "$value"
 }
 
 extract_setting() {
@@ -160,52 +144,14 @@ apply_version_bump() {
   perl -0pi -e 's/static let buildNumber = "[^"]+"/static let buildNumber = "'"${build_number}"'"/g' "$VERSION_SOURCE_FILE"
 }
 
-build_release_app() {
-  rm -rf "$DERIVED_DATA_PATH"
-
-  xcodebuild \
-    -project "$PROJECT_PATH" \
-    -scheme "$SCHEME" \
-    -configuration Release \
-    -derivedDataPath "$DERIVED_DATA_PATH" \
-    build
-}
-
-package_release() {
-  local version="$1"
-  local app_path="$DERIVED_DATA_PATH/Build/Products/Release/${APP_NAME}.app"
-  local zip_path="$DIST_DIR/${APP_NAME}-${version}.app.zip"
-  local checksum_path="$DIST_DIR/${APP_NAME}-${version}.sha256"
-
-  [[ -d "$app_path" ]] || fail "Expected app bundle not found at ${app_path}"
-
-  mkdir -p "$DIST_DIR"
-  rm -f "$zip_path" "$checksum_path"
-
-  ditto -c -k --keepParent "$app_path" "$zip_path"
-
-  (
-    cd "$DIST_DIR"
-    shasum -a 256 "$(basename "$zip_path")" > "$(basename "$checksum_path")"
-  )
-
-  printf '%s\n' "$zip_path"
-}
-
 main() {
   local bump="patch"
-  local notes_file=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -h|--help)
         usage
         exit 0
-        ;;
-      --notes-file)
-        [[ $# -ge 2 ]] || fail "--notes-file requires a file path."
-        notes_file="$2"
-        shift 2
         ;;
       patch|minor|major)
         bump="$1"
@@ -223,17 +169,10 @@ main() {
   done
 
   require_cmd git
-  require_cmd gh
   require_cmd perl
-  require_cmd ditto
-  require_cmd shasum
-  require_cmd xcodebuild
 
   [[ -f "$PROJECT_FILE" ]] || fail "Xcode project file not found: ${PROJECT_FILE}"
   [[ -f "$VERSION_SOURCE_FILE" ]] || fail "Version source file not found: ${VERSION_SOURCE_FILE}"
-  [[ -z "$notes_file" || -f "$notes_file" ]] || fail "Release notes file not found: ${notes_file}"
-
-  gh auth status >/dev/null 2>&1 || fail "GitHub CLI is not authenticated. Run 'gh auth login' first."
 
   assert_clean_worktree
   assert_default_branch
@@ -243,8 +182,6 @@ main() {
   local next_version
   local next_build
   local tag
-  local release_asset
-  local checksum_asset
 
   current_version="$(extract_setting "MARKETING_VERSION")"
   current_build="$(extract_setting "CURRENT_PROJECT_VERSION")"
@@ -269,9 +206,6 @@ main() {
   ROLLBACK_ON_EXIT=1
 
   apply_version_bump "$next_version" "$next_build"
-  build_release_app
-  release_asset="$(package_release "$next_version")"
-  checksum_asset="${release_asset%.app.zip}.sha256"
 
   git -C "$ROOT_DIR" add "$PROJECT_FILE" "$VERSION_SOURCE_FILE"
   git -C "$ROOT_DIR" commit -m "chore(release): ${tag}"
@@ -280,14 +214,7 @@ main() {
   git -C "$ROOT_DIR" push origin "$tag"
   ROLLBACK_ON_EXIT=0
 
-  if [[ -n "$notes_file" ]]; then
-    gh release create "$tag" "$release_asset" "$checksum_asset" --title "$tag" --notes-file "$notes_file" --verify-tag
-  else
-    gh release create "$tag" "$release_asset" "$checksum_asset" --title "$tag" --generate-notes --verify-tag
-  fi
-
-  printf 'Published %s\n' "$tag"
-  printf 'Asset: %s\n' "$release_asset"
+  printf 'Pushed %s — GitHub Actions will build and publish the release.\n' "$tag"
 }
 
 main "$@"
