@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var updaterService: UpdaterService
+    @ObservedObject var launchAtLoginService: LaunchAtLoginService
     let closeSettings: () -> Void
     let quitApp: () -> Void
     let openSubtitleModeInfo: () -> Void
@@ -207,10 +208,39 @@ struct SettingsView: View {
                 }
                 settingsCard {
                     sectionHeader(model.localized(.updates), icon: "arrow.triangle.2.circlepath")
+                    settingsRow(model.localized(.openAtLogin)) {
+                        Toggle("", isOn: launchAtLoginBinding)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+                    Divider()
                     settingsRow(model.localized(.checkForUpdatesAutomatically)) {
                         Toggle("", isOn: $updaterService.automaticallyChecksForUpdates)
                             .toggleStyle(.switch)
                             .labelsHidden()
+                    }
+                    if launchAtLoginService.requiresApproval {
+                        Text(model.localized(.enableAtLoginInSystemSettings))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack {
+                            Spacer()
+                            Button {
+                                launchAtLoginService.openLoginItems()
+                            } label: {
+                                Label(model.localized(.openLoginItems), systemImage: "gearshape")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                    if let updateErrorMessage = launchAtLoginService.updateErrorMessage {
+                        Text(model.localized(.launchAtLoginUpdateFailedFormat, updateErrorMessage))
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     HStack {
                         Spacer()
@@ -456,6 +486,13 @@ struct SettingsView: View {
         Binding(
             get: { model.interfaceLanguageID },
             set: { model.interfaceLanguageID = $0 }
+        )
+    }
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { launchAtLoginService.launchesAtLogin },
+            set: { launchAtLoginService.setLaunchesAtLogin($0) }
         )
     }
 

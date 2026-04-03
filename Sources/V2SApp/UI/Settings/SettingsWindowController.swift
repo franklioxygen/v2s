@@ -5,6 +5,7 @@ import SwiftUI
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let model: AppModel
+    private let launchAtLoginService: LaunchAtLoginService
     private let dockVisibilityController: DockVisibilityController
     private let quitApp: () -> Void
     private var cancellables = Set<AnyCancellable>()
@@ -13,15 +14,24 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     init(
         model: AppModel,
         updaterService: UpdaterService,
+        launchAtLoginService: LaunchAtLoginService,
         dockVisibilityController: DockVisibilityController,
         quitApp: @escaping () -> Void
     ) {
         self.model = model
+        self.launchAtLoginService = launchAtLoginService
         self.dockVisibilityController = dockVisibilityController
         self.quitApp = quitApp
         let window = NSWindow()
         let hostingController = NSHostingController(
-            rootView: SettingsView(model: model, updaterService: updaterService, closeSettings: {}, quitApp: {}, openSubtitleModeInfo: {})
+            rootView: SettingsView(
+                model: model,
+                updaterService: updaterService,
+                launchAtLoginService: launchAtLoginService,
+                closeSettings: {},
+                quitApp: {},
+                openSubtitleModeInfo: {}
+            )
         )
         window.contentViewController = hostingController
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -34,6 +44,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         hostingController.rootView = SettingsView(
             model: model,
             updaterService: updaterService,
+            launchAtLoginService: launchAtLoginService,
             closeSettings: { [weak self] in
                 self?.closeForSessionStart()
             },
@@ -52,6 +63,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func showSettings() {
+        launchAtLoginService.refreshStatus()
         dockVisibilityController.setVisible(true, for: .settingsWindow)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
