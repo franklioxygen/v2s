@@ -41,6 +41,7 @@ final class AppModel: ObservableObject {
     // Revision tracking: captionID → (committedTranslation, committedAt, revisionCount)
     private var translationRevisions: [UUID: (text: String, committedAt: Date, count: Int)] = [:]
     private var recentRecognizedCaptionTexts: [RecentRecognizedCaption] = []
+    private var recentArchivedCaption: RecentArchivedCaption?
     private var finalizedDraftPromotionIDs: [(id: UUID, time: Date)] = []
     private var statusDescriptor: StatusDescriptor = .ready
     @Published private(set) var applicationSources: [InputSource] = []
@@ -1191,7 +1192,10 @@ final class AppModel: ObservableObject {
                   liveTranscriptionSession != nil,
                   generation == draftTranslationGeneration else { return }
             if let translated {
-                overlayState?.draftTranslatedText = glossaryService.apply(to: translated, glossary: glossary)
+                let resolvedTranslation = glossaryService.apply(to: translated, glossary: glossary)
+                if shouldTreatAsMissingTranslation(resolvedTranslation, sourceText: text) == false {
+                    overlayState?.draftTranslatedText = resolvedTranslation
+                }
             }
         }
     }
@@ -1201,6 +1205,10 @@ final class AppModel: ObservableObject {
     /// Archives the current committed caption, then clears the live overlay text.
     private func clearOverlayText() {
         if let currentCaption = currentCommittedCaptionHistoryPayload() {
+            rememberArchivedCaption(
+                sourceText: currentCaption.sourceText,
+                promotionID: displayedCaption?.promotionID
+            )
             appendOverlayHistoryEntry(
                 translatedText: currentCaption.translatedText,
                 sourceText: currentCaption.sourceText
@@ -1220,6 +1228,10 @@ final class AppModel: ObservableObject {
     /// the next sentence replaces it.
     private func capturePreviousCaption() {
         guard let currentCaption = currentCommittedCaptionHistoryPayload() else { return }
+        rememberArchivedCaption(
+            sourceText: currentCaption.sourceText,
+            promotionID: displayedCaption?.promotionID
+        )
         appendOverlayHistoryEntry(
             translatedText: currentCaption.translatedText,
             sourceText: currentCaption.sourceText
@@ -1312,34 +1324,54 @@ final class AppModel: ObservableObject {
     // MARK: - Caption queue
 
     private func enqueueRecognizedSentence(_ sentence: RecognizedSentence, sourceName: String) {
-        let promotedDraftTranslation = promotedDraftTranslationSnapshot(for: sentence.promotionSegmentID)
-
-        if let promotionID = sentence.promotionSegmentID {
-            markDraftPromotionFinalized(promotionID)
-        }
-
         let sourceText = sanitizedDisplayText(sentence.text)
         guard sourceText.isEmpty == false else {
             return
         }
 
-        cancelCommittedCaptionArchive()
+        if let promotionID = sentence.promotionSegmentID {
+            guard isFinalizedDraftPromotionID(promotionID) == false else {
+                return
+            }
 
-        guard shouldEnqueueRecognizedSentence(sourceText) else {
-            return
+            let promotedDraftTranslation = promotedDraftTranslationSnapshot(for: sentence.promotionSegmentID)
+            markDraftPromotionFinalized(promotionID)
+            cancelCommittedCaptionArchive()
+
+            guard shouldEnqueueRecognizedSentence(sourceText, promotionID: promotionID) else {
+                return
+            }
+
+            let caption = QueuedCaption(
+                id: UUID(),
+                promotionID: promotionID,
+                sourceText: sourceText,
+                sourceName: sourceName,
+                promotedDraftTranslation: promotedDraftTranslation
+            )
+
+            rememberRecognizedSentence(sourceText)
+            pendingCaptions.append(caption)
+            translateCaption(caption)
+        } else {
+            cancelCommittedCaptionArchive()
+
+            guard shouldEnqueueRecognizedSentence(sourceText) else {
+                return
+            }
+
+            let caption = QueuedCaption(
+                id: UUID(),
+                promotionID: UUID(),
+                sourceText: sourceText,
+                sourceName: sourceName,
+                promotedDraftTranslation: nil
+            )
+
+            rememberRecognizedSentence(sourceText)
+            pendingCaptions.append(caption)
+            translateCaption(caption)
         }
-
-        let caption = QueuedCaption(
-            id: UUID(),
-            promotionID: sentence.promotionSegmentID ?? UUID(),
-            sourceText: sourceText,
-            sourceName: sourceName,
-            promotedDraftTranslation: promotedDraftTranslation
-        )
-
-        rememberRecognizedSentence(sourceText)
-        pendingCaptions.append(caption)
-        translateCaption(caption)
 
         // Keep the currently displayed caption plus up to two fresh arrivals.
         // This avoids losing the first sentence when a single ASR result is split
@@ -1388,10 +1420,15 @@ final class AppModel: ObservableObject {
                     return
                 }
 
+                let translationExpected = currentSourceLanguageID != outputLanguageID
+                let resolvedTranslation = translationExpected
+                    ? (translatedText ?? "")
+                    : displayedCaption.sourceText
+
                 updateCommittedOverlay(
-                    translatedText: translatedText,
+                    translatedText: resolvedTranslation,
                     sourceText: displayedCaption.sourceText,
-                    lateTranslation: translatedText != displayedCaption.sourceText
+                    lateTranslation: translationExpected && resolvedTranslation.isEmpty == false
                 )
             }
         }
@@ -1435,6 +1472,7 @@ final class AppModel: ObservableObject {
         readyCaptionTranslations.removeAll()
         translationRevisions.removeAll()
         recentRecognizedCaptionTexts.removeAll()
+        recentArchivedCaption = nil
         finalizedDraftPromotionIDs.removeAll()
         displayedCaption = nil
         activeInputLanguageID = nil
@@ -1513,23 +1551,29 @@ final class AppModel: ObservableObject {
             overlayState?.sourceName = caption.sourceName
             clearDraftOverlay()
 
-            let finalText: String
+            let finalTranslation: String?
             if let earlyTranslation {
-                finalText = earlyTranslation
+                finalTranslation = earlyTranslation
             } else {
                 // Dynamic wait: base 3s + 1s per 30 chars, capped at 15s
                 let captionCharCount = caption.sourceText.count
                 let waitTimeout = min(max(3.0, 3.0 + Double(captionCharCount / 30) * 1.0), 15.0)
-                finalText = await waitForTranslatedCaption(id: caption.id, timeout: waitTimeout)
-                    ?? caption.sourceText
+                finalTranslation = await waitForTranslatedCaption(id: caption.id, timeout: waitTimeout)
             }
 
             guard liveTranscriptionSession != nil else { break }
 
-            // Track whether translation actually worked.
-            // If it failed (returned source text), the session may be stuck.
-            let translationFailed = translationExpected && finalText == caption.sourceText
-                && !caption.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let resolvedTranslation = resolvedCommittedTranslationText(
+                finalTranslation: finalTranslation,
+                initialTranslation: initialTranslation,
+                translationExpected: translationExpected,
+                sourceText: caption.sourceText
+            )
+
+            // If nothing translated for a translation-expected caption, the session may be stuck.
+            let translationFailed = translationExpected
+                && resolvedTranslation.isEmpty
+                && initialTranslation == nil
 
             if translationFailed {
                 translationCoordinator.consecutiveTimeouts += 1
@@ -1547,15 +1591,19 @@ final class AppModel: ObservableObject {
             }
 
             updateCommittedOverlay(
-                translatedText: finalText,
+                translatedText: resolvedTranslation,
                 sourceText: caption.sourceText,
-                lateTranslation: finalText != caption.sourceText
+                lateTranslation: translationExpected && resolvedTranslation.isEmpty == false
             )
-            translationRevisions[caption.id] = (text: finalText, committedAt: Date(), count: 0)
+            if resolvedTranslation.isEmpty == false {
+                translationRevisions[caption.id] = (text: resolvedTranslation, committedAt: Date(), count: 0)
+            } else {
+                translationRevisions.removeValue(forKey: caption.id)
+            }
 
             let holdDuration = computeDisplayDuration(
                 sourceText: caption.sourceText,
-                translatedText: finalText
+                translatedText: resolvedTranslation
             )
 
             do {
@@ -1598,7 +1646,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func shouldEnqueueRecognizedSentence(_ text: String) -> Bool {
+    private func shouldEnqueueRecognizedSentence(_ text: String, promotionID: UUID? = nil) -> Bool {
         let now = Date()
         let comparable = comparableCaptionText(text)
         recentRecognizedCaptionTexts.removeAll { now.timeIntervalSince($0.time) > 6.0 }
@@ -1616,6 +1664,14 @@ final class AppModel: ObservableObject {
             return false
         }
 
+        if shouldSuppressArchivedCaptionReplay(
+            comparableText: comparable,
+            promotionID: promotionID,
+            now: now
+        ) {
+            return false
+        }
+
         return recentRecognizedCaptionTexts.contains(where: { $0.comparableText == comparable }) == false
     }
 
@@ -1628,6 +1684,20 @@ final class AppModel: ObservableObject {
                 comparableText: comparableCaptionText(text),
                 time: now
             )
+        )
+    }
+
+    private func rememberArchivedCaption(sourceText: String, promotionID: UUID?) {
+        let comparable = comparableCaptionText(sourceText)
+        guard comparable.isEmpty == false else {
+            recentArchivedCaption = nil
+            return
+        }
+
+        recentArchivedCaption = RecentArchivedCaption(
+            comparableText: comparable,
+            time: Date(),
+            promotionID: promotionID
         )
     }
 
@@ -1676,6 +1746,44 @@ final class AppModel: ObservableObject {
         return pendingCaptions.contains { $0.promotionID == draftPromotionID }
     }
 
+    private func shouldSuppressArchivedCaptionReplay(
+        comparableText: String,
+        promotionID: UUID?,
+        now: Date
+    ) -> Bool {
+        guard comparableText.isEmpty == false,
+              displayedCaption == nil,
+              pendingCaptions.isEmpty,
+              hasActiveDraftOverlay == false,
+              overlayState?.draftPromotionID == nil,
+              let recentArchivedCaption,
+              now.timeIntervalSince(recentArchivedCaption.time) <= Self.archivedCaptionReplaySuppressionWindow else {
+            return false
+        }
+
+        if let promotionID,
+           recentArchivedCaption.promotionID == promotionID {
+            return true
+        }
+
+        if recentArchivedCaption.comparableText == comparableText {
+            return true
+        }
+
+        let maxLength = max(recentArchivedCaption.comparableText.count, comparableText.count)
+        guard maxLength >= Self.archivedCaptionNearDuplicateMinimumLength else {
+            return false
+        }
+
+        let distanceRatio = levenshteinDistanceRatio(
+            recentArchivedCaption.comparableText,
+            comparableText
+        )
+
+        // Suppress only very close revisions of the just-archived sentence.
+        return distanceRatio <= Self.archivedCaptionReplaySimilarityThreshold
+    }
+
     private func waitForTranslatedCaption(id: UUID, timeout: Double = 1.5) async -> String? {
         let deadline = Date().addingTimeInterval(timeout)
 
@@ -1716,12 +1824,16 @@ final class AppModel: ObservableObject {
                 return
             }
 
-            readyCaptionTranslations[caption.id] = translatedText
+            if let translatedText {
+                readyCaptionTranslations[caption.id] = translatedText
+            } else {
+                readyCaptionTranslations.removeValue(forKey: caption.id)
+            }
             captionTranslationTasks[caption.id] = nil
         }
     }
 
-    private func translatedText(for caption: QueuedCaption) async -> String {
+    private func translatedText(for caption: QueuedCaption) async -> String? {
         let sourceLanguageID = currentSourceLanguageID
         let targetLanguageID = outputLanguageID
 
@@ -1735,7 +1847,7 @@ final class AppModel: ObservableObject {
         let dynamicTimeout = min(max(3.0, 3.0 + Double(charCount / 30) * 1.0), 15.0)
         let timeoutNanoseconds = UInt64(dynamicTimeout * 1_000_000_000)
 
-        let raw = await withTaskGroup(of: String.self, returning: String.self) { group in
+        let raw = await withTaskGroup(of: String?.self, returning: String?.self) { group in
             group.addTask {
                 do {
                     return try await self.translationCoordinator.translate(
@@ -1744,23 +1856,64 @@ final class AppModel: ObservableObject {
                         to: targetLanguageID
                     )
                 } catch {
-                    return caption.sourceText
+                    return nil
                 }
             }
 
             group.addTask {
                 try? await Task.sleep(nanoseconds: timeoutNanoseconds)
-                return caption.sourceText
+                return nil
             }
 
-            let resolvedText = await group.next() ?? caption.sourceText
+            let resolvedText = await group.next() ?? nil
             group.cancelAll()
             return resolvedText
         }
 
+        guard let raw else {
+            return nil
+        }
+
         // Apply user glossary on top of raw translation
         let currentGlossary = glossary
-        return glossaryService.apply(to: raw, glossary: currentGlossary)
+        let translated = sanitizedDisplayText(glossaryService.apply(to: raw, glossary: currentGlossary))
+        guard translated.isEmpty == false,
+              shouldTreatAsMissingTranslation(translated, sourceText: caption.sourceText) == false else {
+            return nil
+        }
+        return translated
+    }
+
+    private func resolvedCommittedTranslationText(
+        finalTranslation: String?,
+        initialTranslation: String?,
+        translationExpected: Bool,
+        sourceText: String
+    ) -> String {
+        guard translationExpected else {
+            return sourceText
+        }
+
+        if let finalTranslation, finalTranslation.isEmpty == false {
+            return finalTranslation
+        }
+
+        if let initialTranslation, initialTranslation.isEmpty == false {
+            return initialTranslation
+        }
+
+        return ""
+    }
+
+    private func shouldTreatAsMissingTranslation(_ translatedText: String, sourceText: String) -> Bool {
+        let comparableSource = comparableCaptionText(sourceText)
+        let comparableTranslation = comparableCaptionText(translatedText)
+        guard comparableSource.isEmpty == false,
+              comparableSource == comparableTranslation else {
+            return false
+        }
+
+        return comparableSource.count >= Self.sameLanguageTranslationSuppressionMinimumLength
     }
 
     /// Checks whether a candidate revised translation is a "light edit" (Levenshtein ratio ≤ 0.18)
@@ -1865,7 +2018,7 @@ final class AppModel: ObservableObject {
     private func currentCommittedCaptionHistoryPayload() -> (translatedText: String, sourceText: String)? {
         guard let current = overlayState,
               displayedCaption != nil,
-              current.translatedText.isEmpty == false,
+              current.translatedText.isEmpty == false || current.sourceText.isEmpty == false,
               current.translatedText != listeningPlaceholderText,
               current.translatedText != captureStoppedText,
               current.translatedText != unableToStartText else {
@@ -2042,6 +2195,10 @@ private extension AppModel {
     static let overlayHistoryLimit = 120
     static let draftClearDelayNanoseconds: UInt64 = 150_000_000
     static let committedCaptionIdleArchiveDelay: TimeInterval = 0.9
+    static let archivedCaptionReplaySuppressionWindow: TimeInterval = 1.8
+    static let archivedCaptionReplaySimilarityThreshold = 0.18
+    static let archivedCaptionNearDuplicateMinimumLength = 8
+    static let sameLanguageTranslationSuppressionMinimumLength = 8
     static let finalizedDraftPromotionLimit = 32
     static let captionComparisonTrimCharacterSet = CharacterSet.whitespacesAndNewlines
         .union(.punctuationCharacters)
@@ -2052,6 +2209,12 @@ private struct RecentRecognizedCaption {
     let rawText: String
     let comparableText: String
     let time: Date
+}
+
+private struct RecentArchivedCaption {
+    let comparableText: String
+    let time: Date
+    let promotionID: UUID?
 }
 
 private struct QueuedCaption: Identifiable, Equatable {

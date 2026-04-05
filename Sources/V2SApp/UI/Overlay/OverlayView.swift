@@ -188,10 +188,14 @@ struct OverlayView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if let draftText = state.draftSourceText, !draftText.isEmpty {
+                let visibleDraftTranslatedText = displayedDraftTranslatedText(
+                    for: state,
+                    draftText: draftText
+                )
                 applyingPromotionTransition(
                     to: VStack(spacing: 2) {
                         if showsTranslatedSubtitle {
-                            if let draftTranslated = state.draftTranslatedText, !draftTranslated.isEmpty {
+                            if let draftTranslated = visibleDraftTranslatedText {
                                 translatedText(
                                     draftTranslated,
                                     color: subtitleColor(opacity: 0.55)
@@ -228,7 +232,7 @@ struct OverlayView: View {
                     key: promotionKey(
                         promotionID: state.draftPromotionID,
                         sourceText: draftText,
-                        translatedText: state.draftTranslatedText ?? draftText
+                        translatedText: visibleDraftTranslatedText ?? draftText
                     )
                 )
                 .frame(maxWidth: .infinity, alignment: .top)
@@ -368,6 +372,22 @@ struct OverlayView: View {
             : 0
         let sourceHeight = showsOriginalSubtitle ? sourceLineHeight : 0
         return translatedHeight + sourceHeight
+    }
+
+    private func displayedDraftTranslatedText(
+        for state: OverlayPreviewState,
+        draftText: String
+    ) -> String? {
+        if model.shouldReserveDraftTranslationSlot && showsOriginalSubtitle == false {
+            return draftText
+        }
+
+        guard let draftTranslated = state.draftTranslatedText,
+              draftTranslated.isEmpty == false else {
+            return nil
+        }
+
+        return draftTranslated
     }
 
     private var draftSlotHeightReader: some View {
