@@ -42,6 +42,9 @@
 		A00000000000000000000080 /* silero_vad.onnx in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000081 /* silero_vad.onnx */; };
 		A00000000000000000000086 /* UpdaterService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000085 /* UpdaterService.swift */; };
 		A00000000000000000000089 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000088 /* Sparkle */; };
+		A0000000000000000000008A /* SileroVADHysteresis.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000008B /* SileroVADHysteresis.swift */; };
+		A0000000000000000000008C /* QuickSettingsControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000008D /* QuickSettingsControls.swift */; };
+		A0000000000000000000008E /* PopoverOutsideClickMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000008F /* PopoverOutsideClickMonitor.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -80,6 +83,9 @@
 		A0000000000000000000007C /* SileroVADEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SileroVADEngine.swift; sourceTree = "<group>"; };
 		A00000000000000000000081 /* silero_vad.onnx */ = {isa = PBXFileReference; lastKnownFileType = file; path = silero_vad.onnx; sourceTree = "<group>"; };
 		A00000000000000000000085 /* UpdaterService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdaterService.swift; sourceTree = "<group>"; };
+		A0000000000000000000008B /* SileroVADHysteresis.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SileroVADHysteresis.swift; sourceTree = "<group>"; };
+		A0000000000000000000008D /* QuickSettingsControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickSettingsControls.swift; sourceTree = "<group>"; };
+		A0000000000000000000008F /* PopoverOutsideClickMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PopoverOutsideClickMonitor.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -186,6 +192,7 @@
 				A00000000000000000000041 /* LiveTranscriptionSession.swift */,
 				A00000000000000000000039 /* SettingsStore.swift */,
 				A0000000000000000000007C /* SileroVADEngine.swift */,
+				A0000000000000000000008B /* SileroVADHysteresis.swift */,
 				A0000000000000000000003A /* SourceCatalogService.swift */,
 				A00000000000000000000047 /* SpeedMonitor.swift */,
 				A00000000000000000000085 /* UpdaterService.swift */,
@@ -207,6 +214,7 @@
 		A00000000000000000000075 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+				A0000000000000000000008D /* QuickSettingsControls.swift */,
 				A00000000000000000000074 /* SessionActionButtonLabel.swift */,
 			);
 			path = Shared;
@@ -234,6 +242,7 @@
 		A00000000000000000000013 /* StatusBar */ = {
 			isa = PBXGroup;
 			children = (
+				A0000000000000000000008F /* PopoverOutsideClickMonitor.swift */,
 				A0000000000000000000003F /* StatusBarController.swift */,
 				A00000000000000000000040 /* StatusBarPopoverView.swift */,
 			);
@@ -365,13 +374,16 @@
 				A00000000000000000000067 /* GlossaryService.swift in Sources */,
 				A00000000000000000000059 /* SettingsStore.swift in Sources */,
 				A0000000000000000000007B /* SileroVADEngine.swift in Sources */,
+				A0000000000000000000008A /* SileroVADHysteresis.swift in Sources */,
 				A0000000000000000000005A /* SourceCatalogService.swift in Sources */,
 				A00000000000000000000068 /* SpeedMonitor.swift in Sources */,
 				A0000000000000000000005B /* OverlayView.swift in Sources */,
 				A0000000000000000000005C /* OverlayWindowController.swift in Sources */,
+				A0000000000000000000008C /* QuickSettingsControls.swift in Sources */,
 				A0000000000000000000005D /* SettingsView.swift in Sources */,
 				A0000000000000000000005E /* SettingsWindowController.swift in Sources */,
 				A00000000000000000000079 /* TranscriptView.swift in Sources */,
+				A0000000000000000000008E /* PopoverOutsideClickMonitor.swift in Sources */,
 				A0000000000000000000005F /* StatusBarController.swift in Sources */,
 				A00000000000000000000060 /* StatusBarPopoverView.swift in Sources */,
 				A00000000000000000000061 /* LiveTranscriptionSession.swift in Sources */,
