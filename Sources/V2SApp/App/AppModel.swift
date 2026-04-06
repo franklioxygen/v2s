@@ -9,6 +9,7 @@ private enum AppBuildInfo {
     static let marketingVersion = "0.3.25"
     static let buildNumber = "29"
     static let repositoryURLString = "https://github.com/franklioxygen/v2s"
+    static let repositoryURL = URL(string: repositoryURLString)
 }
 
 @MainActor
@@ -24,6 +25,7 @@ final class AppModel: ObservableObject {
     private var captionTranslationTasks: [UUID: Task<Void, Never>] = [:]
     private var pendingCaptions: [QueuedCaption] = []
     private var readyCaptionTranslations: [UUID: String] = [:]
+    private var captionTranslationWaiters: [UUID: [UUID: CheckedContinuation<String?, Never>]] = [:]
     private var displayedCaption: QueuedCaption?
     private var activeInputLanguageID: String?
     private var isBootstrapping = true
@@ -212,8 +214,8 @@ final class AppModel: ObservableObject {
         "v\(AppBuildInfo.marketingVersion)"
     }
 
-    var appRepositoryURL: URL {
-        URL(string: AppBuildInfo.repositoryURLString)!
+    var appRepositoryURL: URL? {
+        AppBuildInfo.repositoryURL
     }
 
     var showsOriginalSubtitle: Bool {
@@ -1380,7 +1382,7 @@ final class AppModel: ObservableObject {
             let dropped = pendingCaptions.remove(at: 1)
             captionTranslationTasks[dropped.id]?.cancel()
             captionTranslationTasks.removeValue(forKey: dropped.id)
-            readyCaptionTranslations.removeValue(forKey: dropped.id)
+            updateReadyCaptionTranslation(nil, for: dropped.id)
         }
 
         processCaptionQueueIfNeeded()
@@ -1468,6 +1470,7 @@ final class AppModel: ObservableObject {
         draftTranslationGeneration &+= 1
         draftClearGeneration &+= 1
         cancelCaptionTranslations()
+        resumeAllCaptionTranslationWaiters()
         pendingCaptions.removeAll()
         readyCaptionTranslations.removeAll()
         translationRevisions.removeAll()
@@ -1519,7 +1522,7 @@ final class AppModel: ObservableObject {
             // getting stuck in pendingCaptions and replaying on the next queue start.
             defer {
                 pendingCaptions.removeAll(where: { $0.id == caption.id })
-                readyCaptionTranslations.removeValue(forKey: caption.id)
+                updateReadyCaptionTranslation(nil, for: caption.id)
             }
 
             // Archive the current caption before the next sentence replaces it.
@@ -1785,29 +1788,59 @@ final class AppModel: ObservableObject {
     }
 
     private func waitForTranslatedCaption(id: UUID, timeout: Double = 1.5) async -> String? {
-        let deadline = Date().addingTimeInterval(timeout)
-
-        while Task.isCancelled == false {
-            if let translatedText = readyCaptionTranslations[id] {
-                return translatedText
-            }
-
-            if liveTranscriptionSession == nil {
-                return nil
-            }
-
-            if Date() >= deadline {
-                return nil
-            }
-
-            do {
-                try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
-            } catch {
-                return nil
-            }
+        if let translatedText = readyCaptionTranslations[id] {
+            return translatedText
         }
 
-        return nil
+        guard liveTranscriptionSession != nil else {
+            return nil
+        }
+
+        let waiterID = UUID()
+        let timeoutNanoseconds = UInt64(max(0, timeout) * 1_000_000_000)
+        let timeoutTask = Task { @MainActor [weak self] in
+            if timeoutNanoseconds > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                } catch {
+                    return
+                }
+            }
+
+            self?.resumeCaptionTranslationWaiter(
+                captionID: id,
+                waiterID: waiterID,
+                translatedText: nil
+            )
+        }
+
+        return await withTaskCancellationHandler {
+            let translatedText = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+                if let translatedText = readyCaptionTranslations[id] {
+                    continuation.resume(returning: translatedText)
+                    return
+                }
+
+                guard liveTranscriptionSession != nil else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                captionTranslationWaiters[id, default: [:]][waiterID] = continuation
+            }
+
+            timeoutTask.cancel()
+            return translatedText
+        } onCancel: {
+            timeoutTask.cancel()
+            Task { @MainActor [weak self] in
+                self?.resumeCaptionTranslationWaiter(
+                    captionID: id,
+                    waiterID: waiterID,
+                    translatedText: nil
+                )
+            }
+        }
     }
 
     private func translateCaption(_ caption: QueuedCaption) {
@@ -1824,12 +1857,58 @@ final class AppModel: ObservableObject {
                 return
             }
 
-            if let translatedText {
-                readyCaptionTranslations[caption.id] = translatedText
-            } else {
-                readyCaptionTranslations.removeValue(forKey: caption.id)
-            }
+            updateReadyCaptionTranslation(translatedText, for: caption.id)
             captionTranslationTasks[caption.id] = nil
+        }
+    }
+
+    private func updateReadyCaptionTranslation(_ translatedText: String?, for captionID: UUID) {
+        if let translatedText {
+            readyCaptionTranslations[captionID] = translatedText
+        } else {
+            readyCaptionTranslations.removeValue(forKey: captionID)
+        }
+
+        resumeCaptionTranslationWaiters(for: captionID, translatedText: translatedText)
+    }
+
+    private func resumeCaptionTranslationWaiter(
+        captionID: UUID,
+        waiterID: UUID,
+        translatedText: String?
+    ) {
+        guard var waiters = captionTranslationWaiters[captionID],
+              let continuation = waiters.removeValue(forKey: waiterID) else {
+            return
+        }
+
+        if waiters.isEmpty {
+            captionTranslationWaiters.removeValue(forKey: captionID)
+        } else {
+            captionTranslationWaiters[captionID] = waiters
+        }
+
+        continuation.resume(returning: translatedText)
+    }
+
+    private func resumeCaptionTranslationWaiters(for captionID: UUID, translatedText: String?) {
+        guard let waiters = captionTranslationWaiters.removeValue(forKey: captionID) else {
+            return
+        }
+
+        for continuation in waiters.values {
+            continuation.resume(returning: translatedText)
+        }
+    }
+
+    private func resumeAllCaptionTranslationWaiters(translatedText: String? = nil) {
+        let waiters = captionTranslationWaiters
+        captionTranslationWaiters.removeAll()
+
+        for captionWaiters in waiters.values {
+            for continuation in captionWaiters.values {
+                continuation.resume(returning: translatedText)
+            }
         }
     }
 
@@ -1946,19 +2025,24 @@ final class AppModel: ObservableObject {
     }
 
     private func levenshteinDistance(_ a: [Character], _ b: [Character]) -> Int {
-        let m = a.count, n = b.count
+        let m = a.count
+        let n = b.count
+        guard m > 0 else { return n }
+        guard n > 0 else { return m }
+
         var dp = Array(0...n)
-        for i in 1...max(m, 1) {
-            guard i <= m else { break }
+
+        for i in 1...m {
             var prev = dp[0]
             dp[0] = i
-            for j in 1...max(n, 1) {
-                guard j <= n else { break }
+
+            for j in 1...n {
                 let temp = dp[j]
-                dp[j] = a[i-1] == b[j-1] ? prev : 1 + min(prev, dp[j], dp[j-1])
+                dp[j] = a[i - 1] == b[j - 1] ? prev : 1 + min(prev, dp[j], dp[j - 1])
                 prev = temp
             }
         }
+
         return dp[n]
     }
 
@@ -2320,6 +2404,11 @@ private final class TranslationCoordinator: ObservableObject {
         }
     }
 
+    private enum OperationWaitResult {
+        case signaled
+        case timedOut
+    }
+
     enum ServiceError: LocalizedError, AppLocalizableError {
         case unavailableOnSystem
         case unsupportedPair(String, String)
@@ -2357,6 +2446,8 @@ private final class TranslationCoordinator: ObservableObject {
     private var activeOperationID: UUID?
     private var cancelledOperationIDs: Set<UUID> = []
     private var generation: Int = 0
+    private var runnerAvailabilityWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var operationSignalWaiters: [UUID: CheckedContinuation<OperationWaitResult, Never>] = [:]
     fileprivate var consecutiveTimeouts: Int = 0
 
     func prepareIfNeeded(
@@ -2448,11 +2539,7 @@ private final class TranslationCoordinator: ObservableObject {
                 break
             }
 
-            do {
-                try await Task.sleep(nanoseconds: 50_000_000)
-            } catch {
-                return
-            }
+            await waitForRunnerAvailability(runnerID: runnerID)
         }
 
         guard Task.isCancelled == false else {
@@ -2464,6 +2551,7 @@ private final class TranslationCoordinator: ObservableObject {
         defer {
             if activeRunnerID == runnerID {
                 activeRunnerID = nil
+                signalRunnerAvailabilityWaiters()
             }
         }
 
@@ -2517,27 +2605,9 @@ private final class TranslationCoordinator: ObservableObject {
 
     func reset() {
         generation &+= 1
-
-        cancelledOperationIDs.removeAll()
-        if let activeOperationID {
-            cancelledOperationIDs.insert(activeOperationID)
-        }
-
-        for operation in pendingOperations {
-            switch operation {
-            case .prepare(_, _, _, let continuation):
-                continuation.resume(throwing: CancellationError())
-            case .translate(_, _, _, _, let continuation):
-                continuation.resume(throwing: CancellationError())
-            }
-        }
-
-        pendingOperations.removeAll()
-        activeRunnerID = nil
-        activeOperationID = nil
+        cancelOutstandingOperations()
         currentPair = nil
         configuration = nil
-        consecutiveTimeouts = 0
     }
 
     /// Invalidate the current TranslationSession so SwiftUI's `.translationTask()`
@@ -2546,6 +2616,7 @@ private final class TranslationCoordinator: ObservableObject {
     func invalidateSession() {
         configuration?.invalidate()
         activeRunnerID = nil
+        signalRunnerAvailabilityWaiters()
         configuration = nil
     }
 
@@ -2556,23 +2627,7 @@ private final class TranslationCoordinator: ObservableObject {
         var oldConfig = configuration
         // Bump generation so the stuck runner exits when it finally returns
         generation &+= 1
-        // Cancel all pending operations
-        cancelledOperationIDs.removeAll()
-        if let activeOperationID {
-            cancelledOperationIDs.insert(activeOperationID)
-        }
-        for operation in pendingOperations {
-            switch operation {
-            case .prepare(_, _, _, let continuation):
-                continuation.resume(throwing: CancellationError())
-            case .translate(_, _, _, _, let continuation):
-                continuation.resume(throwing: CancellationError())
-            }
-        }
-        pendingOperations.removeAll()
-        activeRunnerID = nil
-        activeOperationID = nil
-        consecutiveTimeouts = 0
+        cancelOutstandingOperations()
 
         // Invalidate the old session so SwiftUI provides a fresh one
         oldConfig?.invalidate()
@@ -2589,6 +2644,7 @@ private final class TranslationCoordinator: ObservableObject {
     private func enqueue(_ operation: PendingOperation) {
         activate(pair: operation.pair)
         pendingOperations.append(operation)
+        signalOperationWaiters()
     }
 
     private func activate(pair: LanguagePair) {
@@ -2617,29 +2673,46 @@ private final class TranslationCoordinator: ObservableObject {
         pendingOperations = survivors
 
         for operation in cancelled {
-            switch operation {
-            case .prepare(_, _, _, let continuation):
-                continuation.resume(throwing: CancellationError())
-            case .translate(_, _, _, _, let continuation):
-                continuation.resume(throwing: CancellationError())
-            }
+            cancel(operation)
         }
     }
 
     private func cancelOperation(id: UUID) {
         if let index = pendingOperations.firstIndex(where: { $0.id == id }) {
             let operation = pendingOperations.remove(at: index)
-            switch operation {
-            case .prepare(_, _, _, let continuation):
-                continuation.resume(throwing: CancellationError())
-            case .translate(_, _, _, _, let continuation):
-                continuation.resume(throwing: CancellationError())
-            }
+            cancel(operation)
             return
         }
 
         if activeOperationID == id {
             cancelledOperationIDs.insert(id)
+        }
+    }
+
+    private func cancelOutstandingOperations() {
+        cancelledOperationIDs.removeAll()
+        if let activeOperationID {
+            cancelledOperationIDs.insert(activeOperationID)
+        }
+
+        for operation in pendingOperations {
+            cancel(operation)
+        }
+
+        pendingOperations.removeAll()
+        activeRunnerID = nil
+        activeOperationID = nil
+        consecutiveTimeouts = 0
+        signalRunnerAvailabilityWaiters()
+        signalOperationWaiters()
+    }
+
+    private func cancel(_ operation: PendingOperation) {
+        switch operation {
+        case .prepare(_, _, _, let continuation):
+            continuation.resume(throwing: CancellationError())
+        case .translate(_, _, _, _, let continuation):
+            continuation.resume(throwing: CancellationError())
         }
     }
 
@@ -2662,18 +2735,113 @@ private final class TranslationCoordinator: ObservableObject {
                 return pendingOperations.remove(at: index)
             }
 
-            if Date() >= deadline {
-                return nil
-            }
-
-            do {
-                try await Task.sleep(nanoseconds: 50_000_000)
-            } catch {
+            if await waitForOperationSignal(for: pair, generation: generation, until: deadline) == .timedOut {
                 return nil
             }
         }
 
         return nil
+    }
+
+    private func waitForRunnerAvailability(runnerID: UUID) async {
+        let waiterID = UUID()
+
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                if activeRunnerID == nil || activeRunnerID == runnerID {
+                    continuation.resume()
+                    return
+                }
+
+                runnerAvailabilityWaiters[waiterID] = continuation
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.resumeRunnerAvailabilityWaiter(id: waiterID)
+            }
+        }
+    }
+
+    private func resumeRunnerAvailabilityWaiter(id: UUID) {
+        guard let continuation = runnerAvailabilityWaiters.removeValue(forKey: id) else {
+            return
+        }
+
+        continuation.resume()
+    }
+
+    private func signalRunnerAvailabilityWaiters() {
+        let waiters = runnerAvailabilityWaiters
+        runnerAvailabilityWaiters.removeAll()
+
+        for continuation in waiters.values {
+            continuation.resume()
+        }
+    }
+
+    private func waitForOperationSignal(
+        for pair: LanguagePair,
+        generation: Int,
+        until deadline: Date
+    ) async -> OperationWaitResult {
+        guard deadline.timeIntervalSinceNow > 0 else {
+            return .timedOut
+        }
+
+        let waiterID = UUID()
+        let timeoutTask = Task { @MainActor [weak self] in
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            if remaining > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+                } catch {
+                    return
+                }
+            }
+
+            self?.resumeOperationWaiter(id: waiterID, result: .timedOut)
+        }
+
+        return await withTaskCancellationHandler {
+            let result = await withCheckedContinuation { (continuation: CheckedContinuation<OperationWaitResult, Never>) in
+                guard self.generation == generation else {
+                    continuation.resume(returning: .signaled)
+                    return
+                }
+
+                if self.pendingOperations.contains(where: { $0.pair == pair && $0.generation == generation }) {
+                    continuation.resume(returning: .signaled)
+                    return
+                }
+
+                self.operationSignalWaiters[waiterID] = continuation
+            }
+
+            timeoutTask.cancel()
+            return result
+        } onCancel: {
+            timeoutTask.cancel()
+            Task { @MainActor [weak self] in
+                self?.resumeOperationWaiter(id: waiterID, result: .timedOut)
+            }
+        }
+    }
+
+    private func resumeOperationWaiter(id: UUID, result: OperationWaitResult) {
+        guard let continuation = operationSignalWaiters.removeValue(forKey: id) else {
+            return
+        }
+
+        continuation.resume(returning: result)
+    }
+
+    private func signalOperationWaiters() {
+        let waiters = operationSignalWaiters
+        operationSignalWaiters.removeAll()
+
+        for continuation in waiters.values {
+            continuation.resume(returning: .signaled)
+        }
     }
 
     private func finishOperation(

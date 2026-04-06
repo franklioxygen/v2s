@@ -20,7 +20,9 @@ actor SpeedMonitor {
         prune(nowMs: nowMs)
         guard !records.isEmpty else { return 0.0 }
         let total = records.reduce(0) { $0 + $1.chars }
-        return Double(total) / Double(windowMs) * 1000.0
+        let earliestTimestamp = records[0].timestampMs
+        let spanMs = max(1, min(windowMs, nowMs - earliestTimestamp))
+        return Double(total) / Double(spanMs) * 1000.0
     }
 
     func reset() {

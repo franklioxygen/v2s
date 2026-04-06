@@ -393,20 +393,6 @@ struct SettingsView: View {
         .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
     }
 
-    // MARK: - Footer
-
-    private var footerBar: some View {
-        HStack {
-            Spacer()
-            Button(model.localized(.minimize)) { closeSettings() }
-                .buttonStyle(.bordered)
-            Button(model.localized(.quit)) { quitApp() }
-                .buttonStyle(.bordered)
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
-    }
-
     private var launchAtLoginBinding: Binding<Bool> {
         Binding(
             get: { launchAtLoginService.launchesAtLogin },

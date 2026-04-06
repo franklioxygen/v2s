@@ -57,6 +57,7 @@ final class SileroVADEngine {
         minSpeechFrames: 3,
         minSilenceFrames: 8
     )
+    private var hasLoggedInferenceFailure = false
 
     var isSpeaking: Bool { hysteresis.isSpeaking }
 
@@ -107,7 +108,17 @@ final class SileroVADEngine {
             let chunk = Array(accumulationBuffer.prefix(Self.chunkSize))
             accumulationBuffer.removeFirst(Self.chunkSize)
 
-            let probability = (try? infer(chunk: chunk)) ?? 0
+            let probability: Float
+            do {
+                probability = try infer(chunk: chunk)
+                hasLoggedInferenceFailure = false
+            } catch {
+                if !hasLoggedInferenceFailure {
+                    fputs("Silero VAD inference failed: \(error)\n", stderr)
+                    hasLoggedInferenceFailure = true
+                }
+                probability = 0
+            }
             if probability > maxProbability { maxProbability = probability }
 
             let transition = hysteresis.apply(probability: probability)
@@ -129,6 +140,7 @@ final class SileroVADEngine {
         cState = [Float](repeating: 0, count: Self.stateSize)
         accumulationBuffer.removeAll()
         hysteresis.reset()
+        hasLoggedInferenceFailure = false
     }
 
     // MARK: - Private

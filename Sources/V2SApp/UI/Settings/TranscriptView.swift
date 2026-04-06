@@ -54,6 +54,8 @@ struct TranscriptView: View {
     @State private var summarizedText: [TranscriptTab: String] = [:]
     @State private var isSummarizing = false
     @State private var summarizeError: String? = nil
+    @State private var summarizeTask: Task<Void, Never>?
+    @State private var summarizeGeneration = 0
 
     enum TranscriptTab: String, CaseIterable {
         case origin, translation
@@ -79,6 +81,9 @@ struct TranscriptView: View {
         .onChange(of: selectedTab) { _, _ in
             // Reset summary when switching tabs so user can summarize per-tab
             summarizeError = nil
+        }
+        .onDisappear {
+            cancelSummarization()
         }
     }
 
@@ -162,6 +167,8 @@ struct TranscriptView: View {
                 summarizeError = nil
                 if enabled {
                     startSummarization(for: selectedTab)
+                } else {
+                    cancelSummarization()
                 }
             }
     }
@@ -199,7 +206,16 @@ struct TranscriptView: View {
 
     // MARK: - Summarization
 
+    @MainActor
+    private func cancelSummarization() {
+        summarizeTask?.cancel()
+        summarizeTask = nil
+        isSummarizing = false
+    }
+
+    @MainActor
     private func startSummarization(for tab: TranscriptTab) {
+        cancelSummarization()
         let text = fullText(for: tab)
         guard !text.isEmpty else {
             isSummarizeEnabled = false
@@ -211,15 +227,29 @@ struct TranscriptView: View {
             summarizeError = model.localized(.summarizationRequiresMacOS26)
             return
         }
+
+        summarizeGeneration &+= 1
+        let generation = summarizeGeneration
         isSummarizing = true
-        Task {
-            defer { isSummarizing = false }
+        summarizeTask = Task {
             do {
-                let result = try await runFoundationModelSummarization(text: text)
-                summarizedText[tab] = result
+                let result = try await Self.runFoundationModelSummarization(text: text)
+                await MainActor.run {
+                    guard Task.isCancelled == false,
+                          summarizeGeneration == generation else { return }
+                    summarizedText[tab] = result
+                    isSummarizing = false
+                    summarizeTask = nil
+                }
             } catch {
-                isSummarizeEnabled = false
-                summarizeError = error.localizedDescription
+                await MainActor.run {
+                    guard Task.isCancelled == false,
+                          summarizeGeneration == generation else { return }
+                    isSummarizeEnabled = false
+                    summarizeError = error.localizedDescription
+                    isSummarizing = false
+                    summarizeTask = nil
+                }
             }
         }
 #else
@@ -230,7 +260,7 @@ struct TranscriptView: View {
 
 #if canImport(FoundationModels)
     @available(macOS 26.0, *)
-    private func runFoundationModelSummarization(text: String) async throws -> String {
+    private static func runFoundationModelSummarization(text: String) async throws -> String {
         let session = LanguageModelSession()
         let prompt = "Please provide a concise summary of the following transcript, preserving the key points:\n\n\(text)"
         let response = try await session.respond(to: prompt)

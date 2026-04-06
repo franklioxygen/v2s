@@ -40,7 +40,8 @@ struct OverlayColor: Codable, Equatable {
     }
 
     init(color: Color) {
-        let srgbColor = NSColor(color).usingColorSpace(.sRGB) ?? .white
+        let srgbColor = NSColor(color).usingColorSpace(.sRGB)
+            ?? NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
         self.init(
             red: Double(srgbColor.redComponent),
             green: Double(srgbColor.greenComponent),

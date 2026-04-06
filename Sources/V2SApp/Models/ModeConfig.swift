@@ -111,7 +111,6 @@ struct ModeConfig: Sendable {
 ///   LengthFitScore 0.15 · ConfidenceScore 0.15
 enum ChunkScorer {
     static func score(
-        silenceMs: Int,
         vadProbability: Float,
         stabilityScore: Float,
         boundaryScore: Float,
@@ -137,16 +136,6 @@ enum ChunkScorer {
         case 0.1..<0.35:  return 0.7 - (probability - 0.1) / 0.25 * 0.3
         case 0.35..<0.5:  return 0.4
         default:          return 0.0
-        }
-    }
-
-    /// Legacy heuristic silence scoring (kept for reference).
-    /// silence < 120 ms → 0.0 · 120–250 ms → 0.4–0.7 · >= 250 ms → 1.0
-    private static func silenceScoreValue(silenceMs: Int) -> Float {
-        switch silenceMs {
-        case ..<120:    return 0.0
-        case 120..<250: return 0.4 + Float(silenceMs - 120) / 130.0 * 0.3
-        default:        return 1.0
         }
     }
 }

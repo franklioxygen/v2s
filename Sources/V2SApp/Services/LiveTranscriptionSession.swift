@@ -199,6 +199,18 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var highPassPreviousInput: Float = 0.0
     private var highPassPreviousOutput: Float = 0.0
 
+    private func runOnCaptureQueue<T>(_ operation: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            captureQueue.async {
+                do {
+                    continuation.resume(returning: try operation())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     private enum SilenceCommitTrigger {
         case asrInactivity
         case vadOffset
@@ -227,18 +239,30 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         try await requestRequiredPermissions(for: source)
         if try await configureModernSpeechRecognizer(localeIdentifier: localeIdentifier) == false {
-            try configureSpeechRecognizer(localeIdentifier: localeIdentifier)
+            try await runOnCaptureQueue {
+                try self.configureSpeechRecognizer(localeIdentifier: localeIdentifier)
+            }
         }
 
         switch source.category {
         case .microphone:
-            try startMicrophoneCapture(deviceUniqueID: source.detail)
+            try await runOnCaptureQueue {
+                try self.startMicrophoneCapture(deviceUniqueID: source.detail)
+            }
         case .application:
-            try startApplicationAudioCapture(source: source)
+            try await runOnCaptureQueue {
+                try self.startApplicationAudioCapture(source: source)
+            }
         }
     }
 
     func stop() {
+        captureQueue.async { [weak self] in
+            self?.stopOnCaptureQueue()
+        }
+    }
+
+    private func stopOnCaptureQueue() {
         cancelSilenceTimer()
         cancelVADSilenceTimer()
 
@@ -602,9 +626,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         session.commitConfiguration()
 
         microphoneCaptureSession = session
-        captureQueue.async {
-            session.startRunning()
-        }
+        session.startRunning()
     }
 
     private func startApplicationAudioCapture(source: InputSource) throws {
@@ -1690,7 +1712,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let averageConfidence = transcriberAverageConfidence(result.text)
 
         let chunkScore = ChunkScorer.score(
-            silenceMs: silenceMs,
             vadProbability: lastVADProbability,
             stabilityScore: stabilityScore,
             boundaryScore: boundaryScore,
@@ -2034,30 +2055,12 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let boundaryScore: Float = lastSeg.substring.containsSentenceTerminator ? 0.9 : 0.45
 
         // Length fit score
-        let charCount = text.count
-        let isCJK = text.containsCJKCharacters
-        let lengthFitScore: Float
-        if isCJK {
-            switch charCount {
-            case 12...20: lengthFitScore = 1.0
-            case 5..<12:  lengthFitScore = Float(charCount) / 12.0 * 0.6
-            case 21...30: lengthFitScore = 0.7
-            default:      lengthFitScore = 0.3
-            }
-        } else {
-            switch charCount {
-            case 28...56: lengthFitScore = 1.0
-            case 10..<28: lengthFitScore = Float(charCount) / 28.0 * 0.6
-            case 57...84: lengthFitScore = 0.7
-            default:      lengthFitScore = 0.3
-            }
-        }
+        let lengthFitScore = draftLengthFitScore(for: text)
 
         let draftSegs = Array(allSegments[draftRange])
         let avgConfidence = draftSegs.map(\.confidence).reduce(0, +) / Float(draftSegs.count)
 
         let chunkScore = ChunkScorer.score(
-            silenceMs: silenceMs,
             vadProbability: lastVADProbability,
             stabilityScore: stabilityScore,
             boundaryScore: boundaryScore,

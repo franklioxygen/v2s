@@ -56,6 +56,10 @@ struct SileroVADHysteresis {
         } else if probability < speechOffsetThreshold {
             consecutiveSilenceFrames += 1
             consecutiveSpeechFrames = 0
+        } else if isSpeaking {
+            consecutiveSilenceFrames = 0
+        } else {
+            consecutiveSpeechFrames = 0
         }
     }
 }

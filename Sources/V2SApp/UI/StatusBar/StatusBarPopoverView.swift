@@ -277,18 +277,29 @@ struct VersionLink: View {
     @Environment(\.openURL) private var openURL
 
     let versionText: String
-    let repositoryURL: URL
+    let repositoryURL: URL?
     let font: Font
 
     var body: some View {
-        Button {
-            openURL(repositoryURL)
-        } label: {
-            Text(verbatim: versionText)
-                .font(font)
-                .foregroundStyle(.tertiary)
+        Group {
+            if let repositoryURL {
+                Button {
+                    openURL(repositoryURL)
+                } label: {
+                    versionLabel
+                }
+                .buttonStyle(.plain)
+                .help(repositoryURL.absoluteString)
+            } else {
+                versionLabel
+                    .help(versionText)
+            }
         }
-        .buttonStyle(.plain)
-        .help(repositoryURL.absoluteString)
+    }
+
+    private var versionLabel: some View {
+        Text(verbatim: versionText)
+            .font(font)
+            .foregroundStyle(.tertiary)
     }
 }

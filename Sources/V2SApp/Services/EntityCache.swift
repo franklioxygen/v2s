@@ -14,6 +14,10 @@ actor EntityCache {
     private let minConfidenceToLock: Float = 0.90
 
     func record(source: String, translation: String, confidence: Float) {
+        if let existingEntry = cache[source], existingEntry.locked {
+            return
+        }
+
         var entry = cache[source] ?? Entry(translation: translation, occurrences: 0, locked: false)
         if confidence >= minConfidenceToLock {
             entry.occurrences += 1
