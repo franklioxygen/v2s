@@ -150,7 +150,6 @@ final class AppModel: ObservableObject {
             persistSettings()
         }
         refreshSources()
-        scheduleSelectedLanguageResourcePreparation()
     }
 
     convenience init() {
@@ -256,31 +255,43 @@ final class AppModel: ObservableObject {
     }
 
     private func setStatus(_ descriptor: StatusDescriptor) {
+        guard statusDescriptor != descriptor else {
+            return
+        }
+
         statusDescriptor = descriptor
         applyStatusMessage()
     }
 
     private func applyStatusMessage() {
+        let message: String
+
         switch statusDescriptor {
         case .ready:
-            statusMessage = localized(.ready)
+            message = localized(.ready)
         case .noInputSourcesDetected:
-            statusMessage = localized(.noSourcesDetected) + "."
+            message = localized(.noSourcesDetected) + "."
         case .running(let sourceName):
-            statusMessage = localized(.runningOnFormat, sourceName)
+            message = localized(.runningOnFormat, sourceName)
         case .chooseInputSourceBeforeStarting:
-            statusMessage = localized(.chooseInputSourceBeforeStarting)
+            message = localized(.chooseInputSourceBeforeStarting)
         case .checkingLanguageResources:
-            statusMessage = localized(.checkingLanguageResources)
+            message = localized(.checkingLanguageResources)
         case .downloadLanguageResourcesInSystemSettings:
-            statusMessage = localized(.downloadRequiredLanguageResourcesSystemSettings)
+            message = localized(.downloadRequiredLanguageResourcesSystemSettings)
         case .preparing(let sourceName):
-            statusMessage = localized(.preparingSourceFormat, sourceName)
+            message = localized(.preparingSourceFormat, sourceName)
         case .showingOverlayPreview:
-            statusMessage = localized(.showingOverlayPreview)
-        case .custom(let message):
-            statusMessage = message
+            message = localized(.showingOverlayPreview)
+        case .custom(let customMessage):
+            message = customMessage
         }
+
+        guard statusMessage != message else {
+            return
+        }
+
+        statusMessage = message
     }
 
     private func relocalizeInterface(from oldLanguageID: String) {
@@ -318,19 +329,30 @@ final class AppModel: ObservableObject {
 
     func refreshSources() {
         let snapshot = sourceCatalogService.loadSnapshot()
-        applicationSources = snapshot.applications
-        microphoneSources = snapshot.microphones
-
-        if let selectedSourceID, allSources.contains(where: { $0.id == selectedSourceID }) == false {
-            self.selectedSourceID = allSources.first?.id
-        } else if selectedSourceID == nil {
-            selectedSourceID = allSources.first?.id
+        if applicationSources != snapshot.applications {
+            applicationSources = snapshot.applications
+        }
+        if microphoneSources != snapshot.microphones {
+            microphoneSources = snapshot.microphones
         }
 
+        let availableSources = snapshot.applications + snapshot.microphones
+
+        if let selectedSourceID, availableSources.contains(where: { $0.id == selectedSourceID }) == false {
+            self.selectedSourceID = availableSources.first?.id
+        } else if selectedSourceID == nil {
+            selectedSourceID = availableSources.first?.id
+        }
+
+        let selectedSourceName = availableSources
+            .first(where: { $0.id == selectedSourceID })?
+            .name
+            ?? localized(.selectedSource)
+
         if sessionState == .running {
-            setStatus(.running(sourceName: selectedSource?.name ?? localized(.selectedSource)))
+            setStatus(.running(sourceName: selectedSourceName))
         } else {
-            setStatus(allSources.isEmpty ? .noInputSourcesDetected : .ready)
+            setStatus(availableSources.isEmpty ? .noInputSourcesDetected : .ready)
         }
     }
 
@@ -345,6 +367,8 @@ final class AppModel: ObservableObject {
     }
 
     func startSession() async {
+        refreshSources()
+
         guard let selectedSource else {
             sessionState = .error
             setStatus(.chooseInputSourceBeforeStarting)
@@ -2263,7 +2287,7 @@ final class AppModel: ObservableObject {
 
 }
 
-private enum StatusDescriptor {
+private enum StatusDescriptor: Equatable {
     case ready
     case noInputSourcesDetected
     case running(sourceName: String)

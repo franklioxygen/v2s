@@ -44,22 +44,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.delegate = self
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 340, height: 500)
-        popover.contentViewController = NSHostingController(
-            rootView: StatusBarPopoverView(
-                model: model,
-                closePopover: { [weak self] in
-                    self?.popover.performClose(nil)
-                },
-                openAdvancedSettings: { [weak self] in
-                    self?.popover.performClose(nil)
-                    self?.openAdvancedSettings()
-                },
-                quitApp: { [weak self] in
-                    self?.popover.performClose(nil)
-                    self?.quitApp()
-                }
-            )
-        )
     }
 
     private func bindModel() {
@@ -107,6 +91,23 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         if popover.isShown {
             popover.performClose(sender)
         } else {
+            model.refreshSources()
+            popover.contentViewController = NSHostingController(
+                rootView: StatusBarPopoverView(
+                    model: model,
+                    closePopover: { [weak self] in
+                        self?.popover.performClose(nil)
+                    },
+                    openAdvancedSettings: { [weak self] in
+                        self?.popover.performClose(nil)
+                        self?.openAdvancedSettings()
+                    },
+                    quitApp: { [weak self] in
+                        self?.popover.performClose(nil)
+                        self?.quitApp()
+                    }
+                )
+            )
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
@@ -128,6 +129,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         outsideClickMonitor.stop()
+        popover.contentViewController = nil
     }
 
     private func clickShouldKeepPopoverOpen(at screenPoint: NSPoint) -> Bool {

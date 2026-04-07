@@ -65,6 +65,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func showSettings() {
+        model.refreshSources()
         launchAtLoginService.refreshStatus()
         dockVisibilityController.setVisible(true, for: .settingsWindow)
         showWindow(nil)

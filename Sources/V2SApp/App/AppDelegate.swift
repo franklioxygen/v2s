@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -10,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindowController: SettingsWindowController?
     private var overlayWindowController: OverlayWindowController?
     private var sourceRefreshTimer: Timer?
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -42,15 +44,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         settingsWindowController.showSettings()
 
-        sourceRefreshTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        appModel.$sessionState
+            .removeDuplicates()
+            .sink { [weak self] state in
+                self?.updateSourceRefreshTimer(for: state)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func installSourceRefreshTimer(interval: TimeInterval) {
+        sourceRefreshTimer?.invalidate()
+        sourceRefreshTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.appModel.refreshSources()
             }
         }
     }
 
+    private func updateSourceRefreshTimer(for state: SessionState) {
+        guard state == .running else {
+            sourceRefreshTimer?.invalidate()
+            sourceRefreshTimer = nil
+            return
+        }
+
+        installSourceRefreshTimer(interval: 5.0)
+    }
+    
     func applicationWillTerminate(_ notification: Notification) {
         sourceRefreshTimer?.invalidate()
+        sourceRefreshTimer = nil
+        cancellables.removeAll()
         appModel.persistSettings()
     }
 }
