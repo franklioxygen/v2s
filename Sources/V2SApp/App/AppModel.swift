@@ -92,6 +92,7 @@ final class AppModel: ObservableObject {
             guard oldValue != interfaceLanguageID else { return }
             usesSystemInterfaceLanguage = false
             persistSettings()
+            AppLocalization.updateEmbeddedBundleLocalizationLanguageID(resolvedInterfaceLanguageID)
             relocalizeInterface(from: oldValue)
         }
     }
@@ -143,6 +144,7 @@ final class AppModel: ObservableObject {
         self.subtitleDisplayMode = settings.subtitleDisplayMode
         self.glossary = settings.glossary
         self.translationHostConfiguration = nil
+        AppLocalization.updateEmbeddedBundleLocalizationLanguageID(self.interfaceLanguageID)
 
         translationCoordinator.onConfigurationChange = { [weak self] configuration in
             self?.translationHostConfiguration = configuration

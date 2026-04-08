@@ -1,4 +1,5 @@
 import Foundation
+import ObjectiveC.runtime
 
 protocol AppLocalizableError {
     func localizedDescription(languageID: String) -> String
@@ -210,6 +211,11 @@ enum AppLocalization {
         }
 
         return error.localizedDescription
+    }
+
+    static func updateEmbeddedBundleLocalizationLanguageID(_ languageID: String) {
+        EmbeddedBundleLocalizationBridge.installIfNeeded()
+        EmbeddedBundleLocalizationBridge.setPreferredLanguageID(languageID)
     }
 
     private static let tables: [String: [String: String]] = [
@@ -1744,4 +1750,116 @@ enum AppLocalization {
             "checkForUpdates": "Проверить обновления",
         ],
     ]
+}
+
+private enum EmbeddedBundleLocalizationBridge {
+    private static let sparkleBundleIdentifier = "org.sparkle-project.Sparkle"
+    private static let lock = NSLock()
+    private static var preferredLanguageID = "en"
+    private static var stringsCache: [StringsCacheKey: [String: String]] = [:]
+
+    static func installIfNeeded() {
+        _ = swizzleBundleLocalization
+    }
+
+    static func setPreferredLanguageID(_ languageID: String) {
+        lock.lock()
+        preferredLanguageID = languageID
+        lock.unlock()
+    }
+
+    static func overrideLocalizedString(
+        for bundle: Bundle,
+        key: String,
+        tableName: String?
+    ) -> String? {
+        guard bundle.bundleIdentifier == sparkleBundleIdentifier
+            || bundle.bundleURL.lastPathComponent == "Sparkle.framework" else {
+            return nil
+        }
+
+        let localization = preferredLocalization(for: bundle)
+        let tableName = tableName ?? "Localizable"
+        let cacheKey = StringsCacheKey(bundlePath: bundle.bundlePath, localization: localization, tableName: tableName)
+
+        if let cachedTable = cachedStrings(for: cacheKey) {
+            return cachedTable[key]
+        }
+
+        guard let url = bundle.url(
+            forResource: tableName,
+            withExtension: "strings",
+            subdirectory: nil,
+            localization: localization
+        ) else {
+            cache(strings: [:], for: cacheKey)
+            return nil
+        }
+
+        let strings = (NSDictionary(contentsOf: url) as? [String: String]) ?? [:]
+        cache(strings: strings, for: cacheKey)
+        return strings[key]
+    }
+
+    private static func preferredLocalization(for bundle: Bundle) -> String {
+        let languageID: String = {
+            lock.lock()
+            defer { lock.unlock() }
+            return preferredLanguageID
+        }()
+
+        return Bundle.preferredLocalizations(
+            from: bundle.localizations,
+            forPreferences: [languageID, "en"]
+        ).first ?? "en"
+    }
+
+    private static func cachedStrings(for key: StringsCacheKey) -> [String: String]? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stringsCache[key]
+    }
+
+    private static func cache(strings: [String: String], for key: StringsCacheKey) {
+        lock.lock()
+        stringsCache[key] = strings
+        lock.unlock()
+    }
+
+    private static let swizzleBundleLocalization: Void = {
+        guard
+            let originalMethod = class_getInstanceMethod(
+                Bundle.self,
+                #selector(Bundle.localizedString(forKey:value:table:))
+            ),
+            let swizzledMethod = class_getInstanceMethod(
+                Bundle.self,
+                #selector(Bundle.v2s_localizedString(forKey:value:table:))
+            )
+        else {
+            return
+        }
+
+        method_exchangeImplementations(originalMethod, swizzledMethod)
+    }()
+}
+
+private struct StringsCacheKey: Hashable {
+    let bundlePath: String
+    let localization: String
+    let tableName: String
+}
+
+private extension Bundle {
+    @objc func v2s_localizedString(forKey key: String, value: String?, table tableName: String?) -> String {
+        if let override = EmbeddedBundleLocalizationBridge.overrideLocalizedString(
+            for: self,
+            key: key,
+            tableName: tableName
+        ) {
+            return override
+        }
+
+        return v2s_localizedString(forKey: key, value: value, table: tableName)
+    }
 }

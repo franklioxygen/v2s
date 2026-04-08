@@ -63,8 +63,8 @@ struct SettingsView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.regular)
             .disabled(model.isSessionButtonDisabled)
-            Button(model.localized(.showSubtitlePreview)) {
-                model.showOverlayPreview()
+            Button(model.isOverlayVisible ? model.localized(.hideOverlay) : model.localized(.showSubtitlePreview)) {
+                model.toggleOverlayVisibility()
             }
             .buttonStyle(.bordered)
             .controlSize(.regular)
