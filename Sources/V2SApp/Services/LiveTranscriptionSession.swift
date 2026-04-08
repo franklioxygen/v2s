@@ -1137,25 +1137,32 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             return []
         }
 
-        let nsText = trimmed as NSString
-        let matches = Self.dialogueClauseSeparatorRegex.matches(
-            in: trimmed,
-            range: NSRange(location: 0, length: nsText.length)
-        )
-        guard matches.count == 1,
-              let separatorRange = matches.first?.range else {
+        guard let separatorRange = singleDialogueClauseSeparatorRange(in: trimmed) else {
             return [trimmed]
         }
 
-        let left = nsText.substring(to: separatorRange.location).trimmingCharacters(in: .whitespacesAndNewlines)
-        let rightStart = separatorRange.location + separatorRange.length
-        let right = nsText.substring(from: rightStart).trimmingCharacters(in: .whitespacesAndNewlines)
+        let left = String(trimmed[..<separatorRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let right = String(trimmed[separatorRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard shouldSplitDialogueClauses(left: left, right: right) else {
             return [trimmed]
         }
 
         return [left, right]
+    }
+
+    private func singleDialogueClauseSeparatorRange(in text: String) -> Range<String.Index>? {
+        var separatorRange: Range<String.Index>?
+
+        for index in text.indices where Self.dialogueClauseSeparators.contains(text[index]) {
+            if separatorRange != nil {
+                return nil
+            }
+
+            separatorRange = index..<text.index(after: index)
+        }
+
+        return separatorRange
     }
 
     private func shouldSplitDialogueClauses(left: String, right: String) -> Bool {
@@ -2633,7 +2640,7 @@ private extension LiveTranscriptionSession {
     static let minimumCJKLeadingOverlapCharacters = 4
     static let recentCommittedSentenceLimit = 6
     static let committedPrefixContinuationWindow: TimeInterval = 3.0
-    static let dialogueClauseSeparatorRegex = try! NSRegularExpression(pattern: "[、,，]")
+    static let dialogueClauseSeparators: Set<Character> = ["、", ",", "，"]
     static let dialogueClauseEndingSuffixes = [
         "ね", "よ", "の", "な", "さ", "わ", "ぞ", "ぜ", "かな", "かも", "だよ", "だね"
     ]
