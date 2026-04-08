@@ -1656,6 +1656,40 @@ final class AppModel: ObservableObject {
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 
+    private func relaxedComparableCaptionText(_ text: String) -> String {
+        comparableCaptionText(text)
+            .replacingOccurrences(
+                of: "[ー〜～]+$",
+                with: "",
+                options: .regularExpression
+            )
+    }
+
+    private func isNearDuplicateCaptionText(_ lhs: String, _ rhs: String) -> Bool {
+        let lhsComparable = comparableCaptionText(lhs)
+        let rhsComparable = comparableCaptionText(rhs)
+        guard lhsComparable.isEmpty == false,
+              rhsComparable.isEmpty == false else {
+            return false
+        }
+
+        if lhsComparable == rhsComparable {
+            return true
+        }
+
+        if relaxedComparableCaptionText(lhs) == relaxedComparableCaptionText(rhs) {
+            return true
+        }
+
+        let maxLength = max(lhsComparable.count, rhsComparable.count)
+        guard maxLength >= Self.recentRecognizedNearDuplicateMinimumLength else {
+            return false
+        }
+
+        let distanceRatio = levenshteinDistanceRatio(lhsComparable, rhsComparable)
+        return distanceRatio <= Self.recentRecognizedNearDuplicateSimilarityThreshold
+    }
+
     private func sanitizedDisplayText(_ text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.isEmpty == false else {
@@ -1687,7 +1721,16 @@ final class AppModel: ObservableObject {
             return false
         }
 
+        if let displayedCaption,
+           isNearDuplicateCaptionText(displayedCaption.sourceText, text) {
+            return false
+        }
+
         if pendingCaptions.contains(where: { comparableCaptionText($0.sourceText) == comparable }) {
+            return false
+        }
+
+        if pendingCaptions.contains(where: { isNearDuplicateCaptionText($0.sourceText, text) }) {
             return false
         }
 
@@ -1699,7 +1742,9 @@ final class AppModel: ObservableObject {
             return false
         }
 
-        return recentRecognizedCaptionTexts.contains(where: { $0.comparableText == comparable }) == false
+        return recentRecognizedCaptionTexts.contains(where: {
+            $0.comparableText == comparable || isNearDuplicateCaptionText($0.rawText, text)
+        }) == false
     }
 
     private func rememberRecognizedSentence(_ text: String) {
@@ -2306,6 +2351,8 @@ private extension AppModel {
     static let archivedCaptionReplaySuppressionWindow: TimeInterval = 1.8
     static let archivedCaptionReplaySimilarityThreshold = 0.18
     static let archivedCaptionNearDuplicateMinimumLength = 8
+    static let recentRecognizedNearDuplicateMinimumLength = 4
+    static let recentRecognizedNearDuplicateSimilarityThreshold = 0.22
     static let sameLanguageTranslationSuppressionMinimumLength = 8
     static let finalizedDraftPromotionLimit = 32
     static let captionComparisonTrimCharacterSet = CharacterSet.whitespacesAndNewlines
