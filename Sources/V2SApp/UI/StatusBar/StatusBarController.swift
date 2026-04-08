@@ -6,6 +6,7 @@ import SwiftUI
 final class StatusBarController: NSObject, NSPopoverDelegate {
     private let model: AppModel
     private let openAdvancedSettings: () -> Void
+    private let showTranscript: () -> Void
     private let quitApp: () -> Void
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
@@ -15,10 +16,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     init(
         model: AppModel,
         openAdvancedSettings: @escaping () -> Void,
+        showTranscript: @escaping () -> Void,
         quitApp: @escaping () -> Void
     ) {
         self.model = model
         self.openAdvancedSettings = openAdvancedSettings
+        self.showTranscript = showTranscript
         self.quitApp = quitApp
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
@@ -44,22 +47,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.delegate = self
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 340, height: 500)
-        popover.contentViewController = NSHostingController(
-            rootView: StatusBarPopoverView(
-                model: model,
-                closePopover: { [weak self] in
-                    self?.popover.performClose(nil)
-                },
-                openAdvancedSettings: { [weak self] in
-                    self?.popover.performClose(nil)
-                    self?.openAdvancedSettings()
-                },
-                quitApp: { [weak self] in
-                    self?.popover.performClose(nil)
-                    self?.quitApp()
-                }
-            )
-        )
     }
 
     private func bindModel() {
@@ -107,6 +94,27 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         if popover.isShown {
             popover.performClose(sender)
         } else {
+            model.refreshSources()
+            popover.contentViewController = NSHostingController(
+                rootView: StatusBarPopoverView(
+                    model: model,
+                    closePopover: { [weak self] in
+                        self?.popover.performClose(nil)
+                    },
+                    openAdvancedSettings: { [weak self] in
+                        self?.popover.performClose(nil)
+                        self?.openAdvancedSettings()
+                    },
+                    showTranscript: { [weak self] in
+                        self?.popover.performClose(nil)
+                        self?.showTranscript()
+                    },
+                    quitApp: { [weak self] in
+                        self?.popover.performClose(nil)
+                        self?.quitApp()
+                    }
+                )
+            )
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
@@ -128,6 +136,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         outsideClickMonitor.stop()
+        popover.contentViewController = nil
     }
 
     private func clickShouldKeepPopoverOpen(at screenPoint: NSPoint) -> Bool {

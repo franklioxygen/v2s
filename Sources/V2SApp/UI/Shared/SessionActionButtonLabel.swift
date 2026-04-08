@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SessionActionButtonLabel: View {
     let title: String
+    let symbolName: String
     let showsActivity: Bool
 
     var body: some View {
@@ -10,7 +11,7 @@ struct SessionActionButtonLabel: View {
                 SessionWaitIndicator()
                     .transition(.identity)
             } else {
-                Image(systemName: "play.fill")
+                Image(systemName: symbolName)
                     .font(.system(size: 10, weight: .semibold))
                     .accessibilityHidden(true)
                     .transition(.identity)

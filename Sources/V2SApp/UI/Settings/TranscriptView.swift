@@ -54,6 +54,8 @@ struct TranscriptView: View {
     @State private var summarizedText: [TranscriptTab: String] = [:]
     @State private var isSummarizing = false
     @State private var summarizeError: String? = nil
+    @State private var summarizeTask: Task<Void, Never>?
+    @State private var summarizeGeneration = 0
 
     enum TranscriptTab: String, CaseIterable {
         case origin, translation
@@ -79,6 +81,15 @@ struct TranscriptView: View {
         .onChange(of: selectedTab) { _, _ in
             // Reset summary when switching tabs so user can summarize per-tab
             summarizeError = nil
+        }
+        .onChange(of: model.transcriptGeneration) { _, _ in
+            cancelSummarization()
+            isSummarizeEnabled = false
+            summarizedText = [:]
+            summarizeError = nil
+        }
+        .onDisappear {
+            cancelSummarization()
         }
     }
 
@@ -145,6 +156,13 @@ struct TranscriptView: View {
 
             Spacer()
 
+            Button(model.localized(.clear)) {
+                model.clearTranscript()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+            .disabled(model.hasTranscript == false)
+
             Button(model.localized(.copy)) {
                 copyCurrentText()
             }
@@ -162,6 +180,8 @@ struct TranscriptView: View {
                 summarizeError = nil
                 if enabled {
                     startSummarization(for: selectedTab)
+                } else {
+                    cancelSummarization()
                 }
             }
     }
@@ -169,20 +189,16 @@ struct TranscriptView: View {
     // MARK: - Data Helpers
 
     private func fullText(for tab: TranscriptTab) -> String {
-        guard let state = model.overlayState else { return "" }
-        let historyTexts: [String]
-        let currentText: String
+        model.transcriptText(isTranslation: tab == .translation)
+    }
+
+    private func summaryLanguageID(for tab: TranscriptTab) -> String {
         switch tab {
         case .origin:
-            historyTexts = state.history.map(\.sourceText)
-            currentText = state.sourceText
+            return model.transcriptSourceLanguageID
         case .translation:
-            historyTexts = state.history.map(\.translatedText)
-            currentText = state.translatedText
+            return model.transcriptTargetLanguageID
         }
-        return (historyTexts + [currentText])
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
     }
 
     private func copyCurrentText() {
@@ -199,8 +215,18 @@ struct TranscriptView: View {
 
     // MARK: - Summarization
 
+    @MainActor
+    private func cancelSummarization() {
+        summarizeTask?.cancel()
+        summarizeTask = nil
+        isSummarizing = false
+    }
+
+    @MainActor
     private func startSummarization(for tab: TranscriptTab) {
+        cancelSummarization()
         let text = fullText(for: tab)
+        let languageID = summaryLanguageID(for: tab)
         guard !text.isEmpty else {
             isSummarizeEnabled = false
             return
@@ -211,15 +237,32 @@ struct TranscriptView: View {
             summarizeError = model.localized(.summarizationRequiresMacOS26)
             return
         }
+
+        summarizeGeneration &+= 1
+        let generation = summarizeGeneration
         isSummarizing = true
-        Task {
-            defer { isSummarizing = false }
+        summarizeTask = Task {
             do {
-                let result = try await runFoundationModelSummarization(text: text)
-                summarizedText[tab] = result
+                let result = try await Self.runFoundationModelSummarization(
+                    text: text,
+                    languageID: languageID
+                )
+                await MainActor.run {
+                    guard Task.isCancelled == false,
+                          summarizeGeneration == generation else { return }
+                    summarizedText[tab] = result
+                    isSummarizing = false
+                    summarizeTask = nil
+                }
             } catch {
-                isSummarizeEnabled = false
-                summarizeError = error.localizedDescription
+                await MainActor.run {
+                    guard Task.isCancelled == false,
+                          summarizeGeneration == generation else { return }
+                    isSummarizeEnabled = false
+                    summarizeError = error.localizedDescription
+                    isSummarizing = false
+                    summarizeTask = nil
+                }
             }
         }
 #else
@@ -230,11 +273,33 @@ struct TranscriptView: View {
 
 #if canImport(FoundationModels)
     @available(macOS 26.0, *)
-    private func runFoundationModelSummarization(text: String) async throws -> String {
+    private static func runFoundationModelSummarization(
+        text: String,
+        languageID: String
+    ) async throws -> String {
         let session = LanguageModelSession()
-        let prompt = "Please provide a concise summary of the following transcript, preserving the key points:\n\n\(text)"
+        let prompt = summarizationPrompt(text: text, languageID: languageID)
         let response = try await session.respond(to: prompt)
-        return response.content
+        return response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @available(macOS 26.0, *)
+    private static func summarizationPrompt(text: String, languageID: String) -> String {
+        let languageName = summaryLanguageName(for: languageID)
+        return """
+        Provide a concise summary of the following transcript.
+        The summary must be written in \(languageName) (\(languageID)).
+        Preserve the key points and do not translate the summary into any other language.
+
+        Transcript:
+        \(text)
+        """
+    }
+
+    @available(macOS 26.0, *)
+    private static func summaryLanguageName(for languageID: String) -> String {
+        Locale(identifier: "en").localizedString(forIdentifier: languageID)
+            ?? LanguageCatalog.displayName(for: languageID)
     }
 #endif
 }

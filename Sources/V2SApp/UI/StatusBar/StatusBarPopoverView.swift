@@ -4,6 +4,7 @@ struct StatusBarPopoverView: View {
     @ObservedObject var model: AppModel
     let closePopover: () -> Void
     let openAdvancedSettings: () -> Void
+    let showTranscript: () -> Void
     let quitApp: () -> Void
 
     var body: some View {
@@ -66,6 +67,7 @@ struct StatusBarPopoverView: View {
             } label: {
                 SessionActionButtonLabel(
                     title: model.sessionButtonTitle,
+                    symbolName: model.sessionButtonSymbolName,
                     showsActivity: model.showsSessionWaitIndicator
                 )
                 .frame(maxWidth: .infinity)
@@ -107,12 +109,14 @@ struct StatusBarPopoverView: View {
                     interfaceLanguageID: model.resolvedInterfaceLanguageID,
                     selection: model.inputLanguageSelectionBinding
                 )
+                .disabled(model.isLanguagePairLocked)
             }
             SettingsControlRow(label: model.localized(.subtitleShort)) {
                 CommonLanguageMenuPicker(
                     interfaceLanguageID: model.resolvedInterfaceLanguageID,
                     selection: model.outputLanguageSelectionBinding
                 )
+                .disabled(model.isLanguagePairLocked)
             }
             SettingsControlRow(label: model.localized(.modeShort)) {
                 SubtitleModeMenuPicker(
@@ -138,6 +142,14 @@ struct StatusBarPopoverView: View {
             HStack {
                 sectionHeader(model.localized(.overlay), icon: "rectangle.on.rectangle")
                 Spacer()
+                Button {
+                    showTranscript()
+                } label: {
+                    Text(model.localized(.transcript))
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 Button {
                     if model.isOverlayVisible { model.toggleOverlayVisibility() }
                     else { model.showOverlayPreview() }
@@ -277,18 +289,29 @@ struct VersionLink: View {
     @Environment(\.openURL) private var openURL
 
     let versionText: String
-    let repositoryURL: URL
+    let repositoryURL: URL?
     let font: Font
 
     var body: some View {
-        Button {
-            openURL(repositoryURL)
-        } label: {
-            Text(verbatim: versionText)
-                .font(font)
-                .foregroundStyle(.tertiary)
+        Group {
+            if let repositoryURL {
+                Button {
+                    openURL(repositoryURL)
+                } label: {
+                    versionLabel
+                }
+                .buttonStyle(.plain)
+                .help(repositoryURL.absoluteString)
+            } else {
+                versionLabel
+                    .help(versionText)
+            }
         }
-        .buttonStyle(.plain)
-        .help(repositoryURL.absoluteString)
+    }
+
+    private var versionLabel: some View {
+        Text(verbatim: versionText)
+            .font(font)
+            .foregroundStyle(.tertiary)
     }
 }

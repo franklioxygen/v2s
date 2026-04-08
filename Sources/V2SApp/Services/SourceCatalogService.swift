@@ -2,13 +2,19 @@ import AppKit
 import AVFoundation
 import Foundation
 
-struct SourceCatalogSnapshot {
+struct SourceCatalogSnapshot: Equatable {
     let applications: [InputSource]
     let microphones: [InputSource]
 }
 
 @MainActor
 final class SourceCatalogService {
+    private let microphoneDiscoverySession = AVCaptureDevice.DiscoverySession(
+        deviceTypes: [.microphone, .external],
+        mediaType: .audio,
+        position: .unspecified
+    )
+
     func loadSnapshot() -> SourceCatalogSnapshot {
         SourceCatalogSnapshot(
             applications: loadApplications(),
@@ -37,13 +43,7 @@ final class SourceCatalogService {
     }
 
     private func loadMicrophones() -> [InputSource] {
-        let discoverySession = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.microphone, .external],
-            mediaType: .audio,
-            position: .unspecified
-        )
-
-        let devices = discoverySession.devices.map { device in
+        let devices = microphoneDiscoverySession.devices.map { device in
             InputSource(
                 id: "mic:\(device.uniqueID)",
                 name: device.localizedName,

@@ -8,6 +8,7 @@ struct SettingsView: View {
     let closeSettings: () -> Void
     let quitApp: () -> Void
     let openSubtitleModeInfo: () -> Void
+    let showTranscript: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -55,6 +56,7 @@ struct SettingsView: View {
             } label: {
                 SessionActionButtonLabel(
                     title: model.sessionButtonTitle,
+                    symbolName: model.sessionButtonSymbolName,
                     showsActivity: model.showsSessionWaitIndicator
                 )
             }
@@ -63,6 +65,11 @@ struct SettingsView: View {
             .disabled(model.isSessionButtonDisabled)
             Button(model.localized(.showSubtitlePreview)) {
                 model.showOverlayPreview()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+            Button(model.localized(.transcript)) {
+                showTranscript()
             }
             .buttonStyle(.bordered)
             .controlSize(.regular)
@@ -128,6 +135,7 @@ struct SettingsView: View {
                             interfaceLanguageID: model.resolvedInterfaceLanguageID,
                             selection: model.inputLanguageSelectionBinding
                         )
+                        .disabled(model.isLanguagePairLocked)
                     }
                     Divider()
                     SettingsControlRow(label: model.localized(.subtitleLanguage)) {
@@ -135,6 +143,7 @@ struct SettingsView: View {
                             interfaceLanguageID: model.resolvedInterfaceLanguageID,
                             selection: model.outputLanguageSelectionBinding
                         )
+                        .disabled(model.isLanguagePairLocked)
                     }
                     Divider()
                     SettingsControlRow(label: model.localized(.subtitleMode)) {
@@ -391,20 +400,6 @@ struct SettingsView: View {
         }
         .padding(14)
         .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    // MARK: - Footer
-
-    private var footerBar: some View {
-        HStack {
-            Spacer()
-            Button(model.localized(.minimize)) { closeSettings() }
-                .buttonStyle(.bordered)
-            Button(model.localized(.quit)) { quitApp() }
-                .buttonStyle(.bordered)
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
     }
 
     private var launchAtLoginBinding: Binding<Bool> {

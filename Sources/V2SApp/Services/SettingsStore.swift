@@ -19,6 +19,10 @@ final class SettingsStore {
             let data = try Data(contentsOf: fileURL)
             return try JSONDecoder().decode(AppSettings.self, from: data)
         } catch {
+            let nsError = error as NSError
+            if nsError.domain != NSCocoaErrorDomain || nsError.code != NSFileReadNoSuchFileError {
+                fputs("Failed to load settings: \(error)\n", stderr)
+            }
             return .default
         }
     }
@@ -41,9 +45,9 @@ final class SettingsStore {
 }
 
 private extension JSONEncoder {
-    static var pretty: JSONEncoder {
+    static let pretty: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return encoder
-    }
+    }()
 }

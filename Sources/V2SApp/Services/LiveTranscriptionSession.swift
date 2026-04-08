@@ -63,11 +63,18 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let promotionSegmentID: UUID?
     }
 
+    private struct ApplicationCaptureDescriptor: Sendable {
+        let appName: String
+        let processObjectIDs: [AudioObjectID]
+        let readStreamFailureMessage: String
+    }
+
     @MainActor
     private struct RecentCommittedSentence {
         let rawText: String
         let comparableText: String
         let time: Date
+        let allowsPrefixContinuation: Bool
     }
 
     private struct AudioLevelStats {
@@ -199,6 +206,18 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var highPassPreviousInput: Float = 0.0
     private var highPassPreviousOutput: Float = 0.0
 
+    private func runOnCaptureQueue<T>(_ operation: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            captureQueue.async {
+                do {
+                    continuation.resume(returning: try operation())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     private enum SilenceCommitTrigger {
         case asrInactivity
         case vadOffset
@@ -227,18 +246,33 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         try await requestRequiredPermissions(for: source)
         if try await configureModernSpeechRecognizer(localeIdentifier: localeIdentifier) == false {
-            try configureSpeechRecognizer(localeIdentifier: localeIdentifier)
+            try await runOnCaptureQueue {
+                try self.configureSpeechRecognizer(localeIdentifier: localeIdentifier)
+            }
         }
 
         switch source.category {
         case .microphone:
-            try startMicrophoneCapture(deviceUniqueID: source.detail)
+            try await runOnCaptureQueue {
+                try self.startMicrophoneCapture(deviceUniqueID: source.detail)
+            }
         case .application:
-            try startApplicationAudioCapture(source: source)
+            let captureDescriptor = try await MainActor.run {
+                try self.makeApplicationCaptureDescriptor(for: source)
+            }
+            try await runOnCaptureQueue {
+                try self.startApplicationAudioCapture(descriptor: captureDescriptor)
+            }
         }
     }
 
     func stop() {
+        captureQueue.async { [weak self] in
+            self?.stopOnCaptureQueue()
+        }
+    }
+
+    private func stopOnCaptureQueue() {
         cancelSilenceTimer()
         cancelVADSilenceTimer()
 
@@ -602,17 +636,23 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         session.commitConfiguration()
 
         microphoneCaptureSession = session
-        captureQueue.async {
-            session.startRunning()
-        }
+        session.startRunning()
     }
 
-    private func startApplicationAudioCapture(source: InputSource) throws {
-        let processObjectIDs = try resolveApplicationProcessObjectIDs(for: source)
-        let capture = ApplicationAudioCapture(
+    @MainActor
+    private func makeApplicationCaptureDescriptor(for source: InputSource) throws -> ApplicationCaptureDescriptor {
+        ApplicationCaptureDescriptor(
             appName: source.name,
-            processObjectIDs: processObjectIDs,
-            readStreamFailureMessage: localized(.failedToReadCapturedAudioStreamFormat, source.name),
+            processObjectIDs: try resolveApplicationProcessObjectIDs(for: source),
+            readStreamFailureMessage: localized(.failedToReadCapturedAudioStreamFormat, source.name)
+        )
+    }
+
+    private func startApplicationAudioCapture(descriptor: ApplicationCaptureDescriptor) throws {
+        let capture = ApplicationAudioCapture(
+            appName: descriptor.appName,
+            processObjectIDs: descriptor.processObjectIDs,
+            readStreamFailureMessage: descriptor.readStreamFailureMessage,
             queue: captureQueue,
             audioHandler: { [weak self] buffer in
                 self?.append(audioBuffer: buffer)
@@ -631,7 +671,11 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             throw mapApplicationCaptureError(error)
         } catch {
             throw SessionError.failedToStartCapture(
-                localized(.failedToStageWithReasonFormat, "start application audio capture", localizedErrorDescription(error))
+                localized(
+                    .failedToStageWithReasonFormat,
+                    "start application audio capture",
+                    localizedErrorDescription(error)
+                )
             )
         }
     }
@@ -752,13 +796,11 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             let vadResult = vadEngine.process(buffer: processingBuffer)
             lastVADProbability = vadResult.speechProbability
 
-            if recognitionBackend == .legacy {
-                if vadResult.containsSpeechOffset {
-                    scheduleVADSilenceCommit()
-                }
-                if vadResult.containsSpeechOnset {
-                    cancelVADSilenceTimer()
-                }
+            if vadResult.containsSpeechOffset {
+                scheduleVADSilenceCommit()
+            }
+            if vadResult.containsSpeechOnset {
+                cancelVADSilenceTimer()
             }
         }
 
@@ -1041,7 +1083,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
     @MainActor
     private func emitRecognizedText(_ text: String, promotionSegmentID: UUID? = nil) {
-        let sentenceTexts = splitRecognizedSentences(in: text)
+        let sentenceTexts = splitCommittedEmissionUnits(in: text)
 
         for (index, sentenceText) in sentenceTexts.enumerated() {
             emitRecognizedSentence(
@@ -1061,7 +1103,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         pruneRecentCommittedSentenceHistory()
 
         for emission in emissions {
-            let sentenceTexts = splitRecognizedSentences(in: emission.text)
+            let sentenceTexts = splitCommittedEmissionUnits(in: emission.text)
             var pendingPromotionID = emission.promotionSegmentID
 
             for sentenceText in sentenceTexts {
@@ -1083,6 +1125,65 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         if clearDraftAfter {
             emitPartialDraft(nil)
         }
+    }
+
+    private func splitCommittedEmissionUnits(in text: String) -> [String] {
+        splitRecognizedSentences(in: text).flatMap(splitDialogueClausesIfNeeded)
+    }
+
+    private func splitDialogueClausesIfNeeded(_ text: String) -> [String] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            return []
+        }
+
+        guard let separatorRange = singleDialogueClauseSeparatorRange(in: trimmed) else {
+            return [trimmed]
+        }
+
+        let left = String(trimmed[..<separatorRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let right = String(trimmed[separatorRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard shouldSplitDialogueClauses(left: left, right: right) else {
+            return [trimmed]
+        }
+
+        return [left, right]
+    }
+
+    private func singleDialogueClauseSeparatorRange(in text: String) -> Range<String.Index>? {
+        var separatorRange: Range<String.Index>?
+
+        for index in text.indices where Self.dialogueClauseSeparators.contains(text[index]) {
+            if separatorRange != nil {
+                return nil
+            }
+
+            separatorRange = index..<text.index(after: index)
+        }
+
+        return separatorRange
+    }
+
+    private func shouldSplitDialogueClauses(left: String, right: String) -> Bool {
+        guard activeHeuristicLanguage == .japanese,
+              left.isEmpty == false,
+              right.isEmpty == false,
+              left.containsCJKCharacters || right.containsCJKCharacters else {
+            return false
+        }
+
+        let maxClauseLength = 18
+        guard left.count <= maxClauseLength,
+              right.count <= maxClauseLength else {
+            return false
+        }
+
+        let leftLooksComplete = Self.japaneseDialogueClauseEndingSuffixes.contains(where: { left.hasSuffix($0) })
+            || left.containsSentenceTerminator
+        let rightLooksLikeNewTurn = Self.japaneseDialogueClauseLeadingPhrases.contains(where: { right.hasPrefix($0) })
+
+        return leftLooksComplete || rightLooksLikeNewTurn
     }
 
     @MainActor
@@ -1109,6 +1210,16 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         if recentCommittedSentenceHistory.contains(where: { $0.comparableText == comparable }) {
             return nil
+        }
+
+        if let extendedSentence = trimmedCommittedPrefixContinuation(from: trimmed) {
+            let extendedComparable = comparableCommittedSentenceText(extendedSentence)
+            guard extendedComparable.isEmpty == false,
+                  recentCommittedSentenceHistory.contains(where: { $0.comparableText == extendedComparable }) == false else {
+                return nil
+            }
+
+            return extendedSentence
         }
 
         let bestOverlap = recentCommittedSentenceHistory
@@ -1148,10 +1259,35 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             RecentCommittedSentence(
                 rawText: text,
                 comparableText: comparable,
-                time: Date()
+                time: Date(),
+                allowsPrefixContinuation: text.containsSentenceTerminator == false
             )
         )
         pruneRecentCommittedSentenceHistory()
+    }
+
+    @MainActor
+    private func trimmedCommittedPrefixContinuation(from text: String) -> String? {
+        let now = Date()
+
+        for previous in recentCommittedSentenceHistory.suffix(3).reversed() {
+            guard previous.allowsPrefixContinuation,
+                  now.timeIntervalSince(previous.time) <= Self.committedPrefixContinuationWindow,
+                  text.count > previous.rawText.count,
+                  text.hasPrefix(previous.rawText) else {
+                continue
+            }
+
+            let remainder = dropLeadingCharacters(previous.rawText.count, from: text)
+                .trimmingCharacters(in: Self.leadingOverlapTrimCharacterSet)
+            guard remainder.isEmpty == false else {
+                continue
+            }
+
+            return remainder
+        }
+
+        return nil
     }
 
     @MainActor
@@ -1677,6 +1813,65 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         Int(now.timeIntervalSince(lastDraftTextChangeTime) * 1000) >= modernBoundaryCommitStabilityDelayMs
     }
 
+    private func canVADCommitModernDraft(_ rawText: String, at now: Date) -> Bool {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.isEmpty == false else {
+            return false
+        }
+
+        guard shouldHoldModernVADCommit(for: text) == false else {
+            return false
+        }
+
+        let stableForMs = Int(now.timeIntervalSince(lastDraftTextChangeTime) * 1000)
+        let minimumStableMs = max(vadSilenceCommitDeadlineMs, 260)
+        guard stableForMs >= minimumStableMs else {
+            return false
+        }
+
+        let maxDraftLength = text.containsCJKCharacters ? 14 : 28
+        return text.count <= maxDraftLength
+    }
+
+    private func shouldHoldModernVADCommit(for text: String) -> Bool {
+        guard String(text.suffix(1)).containsSentenceTerminator == false else {
+            return false
+        }
+
+        switch activeHeuristicLanguage {
+        case .japanese:
+            return Self.modernVADDeferredJapaneseCommitSuffixes.contains(where: { text.hasSuffix($0) })
+        case .english:
+            let normalized = text.lowercased()
+            return Self.modernVADDeferredEnglishCommitSuffixes.contains(where: { normalized.hasSuffix($0) })
+        case .other:
+            return false
+        }
+    }
+
+    private var activeHeuristicLanguage: RecognitionHeuristicLanguage {
+        switch activeLanguageCode {
+        case "ja":
+            return .japanese
+        case "en":
+            return .english
+        default:
+            return .other
+        }
+    }
+
+    private var activeLanguageCode: String? {
+        guard let activeLocaleIdentifier else {
+            return nil
+        }
+
+        let separators = CharacterSet(charactersIn: "-_")
+        return activeLocaleIdentifier
+            .components(separatedBy: separators)
+            .first?
+            .lowercased()
+    }
+
     @available(macOS 26.0, *)
     private func emitDraftUpdate(from result: SpeechTranscriber.Result, text: String) {
         let now = Date()
@@ -1690,7 +1885,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let averageConfidence = transcriberAverageConfidence(result.text)
 
         let chunkScore = ChunkScorer.score(
-            silenceMs: silenceMs,
             vadProbability: lastVADProbability,
             stabilityScore: stabilityScore,
             boundaryScore: boundaryScore,
@@ -1877,14 +2071,33 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
 
         if recognitionBackend == .speechAnalyzer {
-            guard trigger == .asrInactivity,
-                  let split = committableModernText(in: latestModernText) else {
+            let committedRawText: String
+            let remainingRawText: String
+
+            switch trigger {
+            case .asrInactivity:
+                guard let split = committableModernText(in: latestModernText) else {
+                    return
+                }
+                committedRawText = split.committedRawText
+                remainingRawText = split.remainingRawText
+            case .vadOffset:
+                let now = Date()
+                guard canVADCommitModernDraft(latestModernText, at: now) else {
+                    return
+                }
+                committedRawText = latestModernText
+                remainingRawText = ""
+            }
+
+            let text = committedRawText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard text.isEmpty == false else {
+                latestModernText = remainingRawText
                 return
             }
 
-            let text = split.committedRawText.trimmingCharacters(in: .whitespacesAndNewlines)
-            modernCommittedPrefixText += split.committedRawText
-            latestModernText = split.remainingRawText
+            modernCommittedPrefixText += committedRawText
+            latestModernText = remainingRawText
             let committedDraftID = currentDraftId
             resetDraftState()
             Task {
@@ -1895,7 +2108,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
                             promotionSegmentID: committedDraftID
                         )
                     ],
-                    clearDraftAfter: true
+                    clearDraftAfter: remainingRawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 )
             }
             return
@@ -2034,30 +2247,12 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let boundaryScore: Float = lastSeg.substring.containsSentenceTerminator ? 0.9 : 0.45
 
         // Length fit score
-        let charCount = text.count
-        let isCJK = text.containsCJKCharacters
-        let lengthFitScore: Float
-        if isCJK {
-            switch charCount {
-            case 12...20: lengthFitScore = 1.0
-            case 5..<12:  lengthFitScore = Float(charCount) / 12.0 * 0.6
-            case 21...30: lengthFitScore = 0.7
-            default:      lengthFitScore = 0.3
-            }
-        } else {
-            switch charCount {
-            case 28...56: lengthFitScore = 1.0
-            case 10..<28: lengthFitScore = Float(charCount) / 28.0 * 0.6
-            case 57...84: lengthFitScore = 0.7
-            default:      lengthFitScore = 0.3
-            }
-        }
+        let lengthFitScore = draftLengthFitScore(for: text)
 
         let draftSegs = Array(allSegments[draftRange])
         let avgConfidence = draftSegs.map(\.confidence).reduce(0, +) / Float(draftSegs.count)
 
         let chunkScore = ChunkScorer.score(
-            silenceMs: silenceMs,
             vadProbability: lastVADProbability,
             stabilityScore: stabilityScore,
             boundaryScore: boundaryScore,
@@ -2468,9 +2663,30 @@ private extension String {
 }
 
 private extension LiveTranscriptionSession {
+    enum RecognitionHeuristicLanguage {
+        case japanese
+        case english
+        case other
+    }
+
     static let minimumLatinLeadingOverlapCharacters = 10
     static let minimumCJKLeadingOverlapCharacters = 4
     static let recentCommittedSentenceLimit = 6
+    static let committedPrefixContinuationWindow: TimeInterval = 3.0
+    static let dialogueClauseSeparators: Set<Character> = ["、", ",", "，"]
+    static let japaneseDialogueClauseEndingSuffixes = [
+        "ね", "よ", "の", "な", "さ", "わ", "ぞ", "ぜ", "かな", "かも", "だよ", "だね"
+    ]
+    static let japaneseDialogueClauseLeadingPhrases = [
+        "俺", "私", "僕", "うん", "いや", "や", "でも", "じゃ", "ただいま", "おかえり", "ありがとう", "ごめん"
+    ]
+    static let modernVADDeferredJapaneseCommitSuffixes = [
+        "けど", "けれど", "けれども", "から", "ので", "のに", "とか", "って",
+        "で", "て", "が", "を", "に", "へ", "と", "し"
+    ]
+    static let modernVADDeferredEnglishCommitSuffixes = [
+        " and", " or", " but", " so", " because", " if", " when", " that", " to"
+    ]
     static let committedComparisonTrimCharacterSet = CharacterSet.whitespacesAndNewlines
         .union(.punctuationCharacters)
         .union(.symbols)

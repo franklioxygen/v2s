@@ -6,6 +6,7 @@ import SwiftUI
 @MainActor
 final class OverlayWindowController {
     private let model: AppModel
+    private let showTranscript: () -> Void
     private let interactionState = OverlayInteractionState()
     private let panel: OverlayPanel
     private let controlsChromePanel: OverlayPanel
@@ -16,7 +17,6 @@ final class OverlayWindowController {
     private let subtitleHostingView: NSHostingView<OverlayView>
     private let controlsChromeHostingView: NSHostingView<OverlayControlsChromeView>
     private let scrollbarHostingView: NSHostingView<OverlayHistoryScrollbarView>
-    private lazy var transcriptWindowController = TranscriptWindowController(model: model)
     private let moveButtonHostingView: NSHostingView<OverlayMoveButtonView>
     private let closeButtonHostingView: NSHostingView<OverlayCloseButtonView>
     private let resizeButtonHostingView: NSHostingView<OverlayResizeButtonView>
@@ -30,6 +30,7 @@ final class OverlayWindowController {
     private var resizeDragStartHeight: Double?
     private var resizeDragStartTopLeft: NSPoint?
     private var mouseTrackingTimer: Timer?
+    private var mouseTrackingMode: MouseTrackingMode = .idle
     private var workspaceNotificationCancellable: AnyCancellable?
     private var sourceWindowTrackingTimer: Timer?
     private var lastSourceWindowFrame: NSRect?
@@ -47,8 +48,23 @@ final class OverlayWindowController {
         case idle, showing, hiding
     }
 
-    init(model: AppModel) {
+    private enum MouseTrackingMode {
+        case idle
+        case active
+
+        var interval: TimeInterval {
+            switch self {
+            case .idle:
+                return 1.0 / 8.0
+            case .active:
+                return 1.0 / 30.0
+            }
+        }
+    }
+
+    init(model: AppModel, showTranscript: @escaping () -> Void) {
         self.model = model
+        self.showTranscript = showTranscript
         self.panel = OverlayPanel(
             contentRect: NSRect(x: 0, y: 0, width: 1024, height: 120),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -126,7 +142,7 @@ final class OverlayWindowController {
         scrollbarHostingView.rootView = OverlayHistoryScrollbarView(
             model: model,
             interactionState: interactionState,
-            showTranscript: { [weak self] in self?.transcriptWindowController.showTranscript() }
+            showTranscript: showTranscript
         )
         bindModel()
         syncWindow()
@@ -328,7 +344,7 @@ final class OverlayWindowController {
             self.panel.animator().setFrame(finalFrame, display: true)
             self.panel.animator().alphaValue = 1.0
         }, completionHandler: { [weak self] in
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 guard let self, self.geniePhase == .showing else { return }
                 self.resetLayerTransform()
                 self.geniePhase = .idle
@@ -400,7 +416,7 @@ final class OverlayWindowController {
             animWindow.animator().setFrame(targetFrame, display: true)
             animWindow.animator().alphaValue = 0.0
         }, completionHandler: { [weak self] in
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 animWindow.orderOut(nil)
                 self?.genieHideWindow = nil
                 if self?.geniePhase == .hiding {
@@ -615,6 +631,10 @@ final class OverlayWindowController {
             closeButtonPanel.setFrame(buttonFrames[1], display: true)
             resizeButtonPanel.setFrame(buttonFrames[2], display: true)
         }
+
+        if panelsShown {
+            updateMouseTrackingMode(for: NSEvent.mouseLocation)
+        }
     }
 
     private func resolvedPanelWidth(in visibleFrame: NSRect, style: OverlayStyle) -> Double {
@@ -789,10 +809,18 @@ final class OverlayWindowController {
     }
 
     private func startMouseTrackingIfNeeded() {
-        guard mouseTrackingTimer == nil else { return }
+        guard panelsShown else { return }
+        let desiredMode = desiredMouseTrackingMode(for: NSEvent.mouseLocation)
+        guard mouseTrackingTimer == nil || mouseTrackingMode != desiredMode else { return }
+        restartMouseTracking(mode: desiredMode)
+    }
 
-        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
+    private func restartMouseTracking(mode: MouseTrackingMode) {
+        mouseTrackingTimer?.invalidate()
+        mouseTrackingMode = mode
+
+        let timer = Timer(timeInterval: mode.interval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
                 self?.updatePassThroughBubble()
             }
         }
@@ -803,6 +831,7 @@ final class OverlayWindowController {
     private func stopMouseTracking() {
         mouseTrackingTimer?.invalidate()
         mouseTrackingTimer = nil
+        mouseTrackingMode = .idle
     }
 
     private func updatePassThroughBubble() {
@@ -814,6 +843,7 @@ final class OverlayWindowController {
         }
 
         let mouseLocation = NSEvent.mouseLocation
+        updateMouseTrackingMode(for: mouseLocation)
         interactionState.updateScrollbarRevealProgress(
             scrollbarRevealProgress(for: mouseLocation, scrollbarFrame: scrollbarPanel.frame)
         )
@@ -849,6 +879,50 @@ final class OverlayWindowController {
                 diameter: Self.passThroughBubbleDiameter
             )
         )
+    }
+
+    private func updateMouseTrackingMode(for mouseLocation: NSPoint) {
+        let desiredMode = desiredMouseTrackingMode(for: mouseLocation)
+        guard mouseTrackingTimer == nil || desiredMode != mouseTrackingMode else {
+            return
+        }
+
+        restartMouseTracking(mode: desiredMode)
+    }
+
+    private func desiredMouseTrackingMode(for mouseLocation: NSPoint) -> MouseTrackingMode {
+        guard model.isOverlayVisible,
+              model.overlayState != nil,
+              panelsShown else {
+            return .idle
+        }
+
+        let trackingBounds = overlayTrackingBounds().insetBy(
+            dx: -Self.mouseTrackingActivationPadding,
+            dy: -Self.mouseTrackingActivationPadding
+        )
+        return trackingBounds.contains(mouseLocation) ? .active : .idle
+    }
+
+    private func overlayTrackingBounds() -> NSRect {
+        let trackedFrames = [
+            panel.frame,
+            controlsChromePanel.frame,
+            scrollbarPanel.frame,
+            moveButtonPanel.frame,
+            closeButtonPanel.frame,
+            resizeButtonPanel.frame
+        ]
+
+        guard var trackingBounds = trackedFrames.first else {
+            return .zero
+        }
+
+        for frame in trackedFrames.dropFirst() {
+            trackingBounds = trackingBounds.union(frame)
+        }
+
+        return trackingBounds
     }
 
     private func scrollbarRevealProgress(for mouseLocation: NSPoint, scrollbarFrame: NSRect) -> CGFloat {
@@ -1068,7 +1142,7 @@ final class OverlayWindowController {
         lastSourceWindowFrame = sourceAppWindowFrame()
 
         let timer = Timer(timeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 self?.pollSourceWindowFrame()
             }
         }
@@ -1130,6 +1204,7 @@ private final class OverlayPanel: NSPanel {
 private extension OverlayWindowController {
     static let minimumOverlayHeight: Double = 105
     static let attachToSourceRefreshDelayNanoseconds: UInt64 = 120_000_000
+    static let mouseTrackingActivationPadding: CGFloat = 96
     static let passThroughBubbleDiameter: CGFloat = 118
     static let scrollbarRevealDistance: CGFloat = 42
     static let panelCollectionBehavior: NSWindow.CollectionBehavior = [

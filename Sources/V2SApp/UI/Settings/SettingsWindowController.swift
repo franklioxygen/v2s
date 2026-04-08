@@ -4,6 +4,13 @@ import SwiftUI
 
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+    private final class SettingsWindowActions {
+        var closeSettings: () -> Void = {}
+        var quitApp: () -> Void = {}
+        var openSubtitleModeInfo: () -> Void = {}
+        var showTranscript: () -> Void = {}
+    }
+
     private let model: AppModel
     private let launchAtLoginService: LaunchAtLoginService
     private let dockVisibilityController: DockVisibilityController
@@ -16,21 +23,24 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         updaterService: UpdaterService,
         launchAtLoginService: LaunchAtLoginService,
         dockVisibilityController: DockVisibilityController,
+        showTranscript: @escaping () -> Void,
         quitApp: @escaping () -> Void
     ) {
         self.model = model
         self.launchAtLoginService = launchAtLoginService
         self.dockVisibilityController = dockVisibilityController
         self.quitApp = quitApp
+        let actions = SettingsWindowActions()
         let window = NSWindow()
         let hostingController = NSHostingController(
             rootView: SettingsView(
                 model: model,
                 updaterService: updaterService,
                 launchAtLoginService: launchAtLoginService,
-                closeSettings: {},
-                quitApp: {},
-                openSubtitleModeInfo: {}
+                closeSettings: { actions.closeSettings() },
+                quitApp: { actions.quitApp() },
+                openSubtitleModeInfo: { actions.openSubtitleModeInfo() },
+                showTranscript: { actions.showTranscript() }
             )
         )
         window.contentViewController = hostingController
@@ -41,20 +51,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.delegate = self
         applyLocalizedTitle()
         bindLocalizedTitle()
-        hostingController.rootView = SettingsView(
-            model: model,
-            updaterService: updaterService,
-            launchAtLoginService: launchAtLoginService,
-            closeSettings: { [weak self] in
-                self?.closeForSessionStart()
-            },
-            quitApp: { [weak self] in
-                self?.quitApp()
-            },
-            openSubtitleModeInfo: { [weak self] in
-                self?.showSubtitleModeInfo()
-            }
-        )
+        actions.closeSettings = { [weak self] in
+            self?.closeForSessionStart()
+        }
+        actions.quitApp = { [weak self] in
+            self?.quitApp()
+        }
+        actions.openSubtitleModeInfo = { [weak self] in
+            self?.showSubtitleModeInfo()
+        }
+        actions.showTranscript = showTranscript
     }
 
     @available(*, unavailable)
@@ -63,6 +69,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func showSettings() {
+        model.refreshSources()
         launchAtLoginService.refreshStatus()
         dockVisibilityController.setVisible(true, for: .settingsWindow)
         showWindow(nil)

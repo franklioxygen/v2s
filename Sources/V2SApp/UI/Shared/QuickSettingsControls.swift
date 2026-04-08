@@ -133,14 +133,20 @@ extension AppModel {
     var inputLanguageSelectionBinding: Binding<String> {
         Binding(
             get: { self.inputLanguageID },
-            set: { self.inputLanguageID = $0 }
+            set: {
+                guard self.isLanguagePairLocked == false else { return }
+                self.inputLanguageID = $0
+            }
         )
     }
 
     var outputLanguageSelectionBinding: Binding<String> {
         Binding(
             get: { self.outputLanguageID },
-            set: { self.outputLanguageID = $0 }
+            set: {
+                guard self.isLanguagePairLocked == false else { return }
+                self.outputLanguageID = $0
+            }
         )
     }
 

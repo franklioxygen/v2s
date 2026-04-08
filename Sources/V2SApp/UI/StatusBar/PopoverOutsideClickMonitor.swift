@@ -2,10 +2,25 @@ import AppKit
 
 @MainActor
 final class PopoverOutsideClickMonitor {
-    private var localMonitor: Any?
-    private var globalMonitor: Any?
+    nonisolated(unsafe) private var localMonitor: Any?
+    nonisolated(unsafe) private var globalMonitor: Any?
     private var shouldIgnoreClick: ((NSPoint) -> Bool)?
     private var onOutsideClick: (() -> Void)?
+
+    deinit {
+        let localMonitor = self.localMonitor
+        let globalMonitor = self.globalMonitor
+
+        if Thread.isMainThread {
+            Self.removeMonitor(localMonitor)
+            Self.removeMonitor(globalMonitor)
+        } else {
+            DispatchQueue.main.async {
+                Self.removeMonitor(localMonitor)
+                Self.removeMonitor(globalMonitor)
+            }
+        }
+    }
 
     func start(
         shouldIgnoreClick: @escaping (NSPoint) -> Bool,
@@ -61,5 +76,13 @@ final class PopoverOutsideClickMonitor {
         }
 
         return window.convertPoint(toScreen: event.locationInWindow)
+    }
+
+    nonisolated private static func removeMonitor(_ monitor: Any?) {
+        guard let monitor else {
+            return
+        }
+
+        NSEvent.removeMonitor(monitor)
     }
 }

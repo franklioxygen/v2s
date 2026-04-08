@@ -24,14 +24,20 @@ struct AppSettings: Codable {
     // Custom decoder so existing settings files load cleanly as new fields are added.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        selectedSourceID = try c.decodeIfPresent(String.self, forKey: .selectedSourceID)
-        inputLanguageID  = try c.decode(String.self, forKey: .inputLanguageID)
-        outputLanguageID = try c.decode(String.self, forKey: .outputLanguageID)
-        interfaceLanguageID = try c.decodeIfPresent(String.self, forKey: .interfaceLanguageID)
-        overlayStyle     = try c.decode(OverlayStyle.self, forKey: .overlayStyle)
-        subtitleMode     = try c.decodeIfPresent(SubtitleMode.self, forKey: .subtitleMode) ?? .balanced
-        subtitleDisplayMode = try c.decodeIfPresent(SubtitleDisplayMode.self, forKey: .subtitleDisplayMode) ?? .both
-        glossary         = try c.decodeIfPresent([String: String].self, forKey: .glossary) ?? [:]
+        selectedSourceID = try? c.decodeIfPresent(String.self, forKey: .selectedSourceID)
+        inputLanguageID = (try? c.decodeIfPresent(String.self, forKey: .inputLanguageID))
+            ?? AppSettings.default.inputLanguageID
+        outputLanguageID = (try? c.decodeIfPresent(String.self, forKey: .outputLanguageID))
+            ?? AppSettings.default.outputLanguageID
+        interfaceLanguageID = try? c.decodeIfPresent(String.self, forKey: .interfaceLanguageID)
+        overlayStyle = (try? c.decodeIfPresent(OverlayStyle.self, forKey: .overlayStyle))
+            ?? AppSettings.default.overlayStyle
+        subtitleMode = (try? c.decodeIfPresent(SubtitleMode.self, forKey: .subtitleMode))
+            ?? AppSettings.default.subtitleMode
+        subtitleDisplayMode = (try? c.decodeIfPresent(SubtitleDisplayMode.self, forKey: .subtitleDisplayMode))
+            ?? AppSettings.default.subtitleDisplayMode
+        glossary = (try? c.decodeIfPresent([String: String].self, forKey: .glossary))
+            ?? AppSettings.default.glossary
     }
 
     init(

@@ -145,6 +145,7 @@ enum AppTextKey: String {
     case origin
     case translation
     case summarize
+    case clear
     case copy
     case transcriptWindowTitle
     case summarizationRequiresMacOS26
@@ -353,6 +354,7 @@ enum AppLocalization {
             "origin": "Origin",
             "translation": "Translation",
             "summarize": "Summarize",
+            "clear": "Clear",
             "copy": "Copy",
             "transcriptWindowTitle": "Transcript",
             "summarizationRequiresMacOS26": "Summarization requires macOS 26 or newer.",
@@ -505,6 +507,7 @@ enum AppLocalization {
             "origin": "原文",
             "translation": "译文",
             "summarize": "摘要",
+            "clear": "清空",
             "copy": "复制",
             "transcriptWindowTitle": "字幕记录",
             "summarizationRequiresMacOS26": "摘要功能需要 macOS 26 或更高版本。",
@@ -657,6 +660,7 @@ enum AppLocalization {
             "origin": "Original",
             "translation": "Traducción",
             "summarize": "Resumir",
+            "clear": "Borrar",
             "copy": "Copiar",
             "transcriptWindowTitle": "Transcripción",
             "summarizationRequiresMacOS26": "El resumen requiere macOS 26 o posterior.",
@@ -809,6 +813,7 @@ enum AppLocalization {
             "origin": "Original",
             "translation": "Übersetzung",
             "summarize": "Zusammenfassen",
+            "clear": "Leeren",
             "copy": "Kopieren",
             "transcriptWindowTitle": "Transkript",
             "summarizationRequiresMacOS26": "Zusammenfassung erfordert macOS 26 oder neuer.",
@@ -961,6 +966,7 @@ enum AppLocalization {
             "origin": "原文",
             "translation": "翻訳",
             "summarize": "要約",
+            "clear": "クリア",
             "copy": "コピー",
             "transcriptWindowTitle": "トランスクリプト",
             "summarizationRequiresMacOS26": "要約機能には macOS 26 以降が必要です。",
@@ -1113,6 +1119,7 @@ enum AppLocalization {
             "origin": "Original",
             "translation": "Traduction",
             "summarize": "Résumer",
+            "clear": "Effacer",
             "copy": "Copier",
             "transcriptWindowTitle": "Transcription",
             "summarizationRequiresMacOS26": "Le résumé nécessite macOS 26 ou une version ultérieure.",
@@ -1265,6 +1272,7 @@ enum AppLocalization {
             "origin": "원문",
             "translation": "번역",
             "summarize": "요약",
+            "clear": "지우기",
             "copy": "복사",
             "transcriptWindowTitle": "기록",
             "summarizationRequiresMacOS26": "요약 기능은 macOS 26 이상이 필요합니다.",
@@ -1417,6 +1425,7 @@ enum AppLocalization {
             "origin": "الأصل",
             "translation": "الترجمة",
             "summarize": "تلخيص",
+            "clear": "مسح",
             "copy": "نسخ",
             "transcriptWindowTitle": "النص المكتوب",
             "summarizationRequiresMacOS26": "التلخيص يتطلب macOS 26 أو أحدث.",
@@ -1569,6 +1578,7 @@ enum AppLocalization {
             "origin": "Original",
             "translation": "Tradução",
             "summarize": "Resumir",
+            "clear": "Limpar",
             "copy": "Copiar",
             "transcriptWindowTitle": "Transcrição",
             "summarizationRequiresMacOS26": "O resumo requer macOS 26 ou posterior.",
@@ -1721,6 +1731,7 @@ enum AppLocalization {
             "origin": "Оригинал",
             "translation": "Перевод",
             "summarize": "Резюме",
+            "clear": "Очистить",
             "copy": "Копировать",
             "transcriptWindowTitle": "Транскрипция",
             "summarizationRequiresMacOS26": "Для создания резюме требуется macOS 26 или новее.",
