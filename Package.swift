@@ -24,5 +24,10 @@ let package = Package(
                 .copy("Resources/silero_vad.onnx"),
             ]
         ),
+        .testTarget(
+            name: "v2sTests",
+            dependencies: ["v2s"],
+            path: "Tests/V2STests"
+        ),
     ]
 )

@@ -1260,7 +1260,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
                 rawText: text,
                 comparableText: comparable,
                 time: Date(),
-                allowsPrefixContinuation: text.containsSentenceTerminator == false
+                allowsPrefixContinuation: SentenceBoundaryHeuristics
+                    .endsWithLikelySentenceTerminator(in: text) == false
             )
         )
         pruneRecentCommittedSentenceHistory()
@@ -1385,18 +1386,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     }
 
     private func sentenceRanges(in text: NSString) -> [NSRange] {
-        var ranges: [NSRange] = []
-        text.enumerateSubstrings(
-            in: NSRange(location: 0, length: text.length),
-            options: [.bySentences, .substringNotRequired]
-        ) { _, substringRange, _, _ in
-            guard substringRange.length > 0 else {
-                return
-            }
-            ranges.append(substringRange)
-        }
-
-        return ranges
+        SentenceBoundaryHeuristics.sentenceRanges(in: text)
     }
 
     private func pendingModernText(from fullText: String) -> String {
@@ -1451,7 +1441,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             return nil
         }
 
-        if String(trimmedText.suffix(1)).containsSentenceTerminator {
+        if SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: trimmedText) {
             return (rawText, "")
         }
 
@@ -1470,23 +1460,28 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         return (committedRawText, remainingRawText)
     }
 
-    private func boundaryGapText(
+    private func hasLikelyPunctuationBoundary(
         afterSegmentAt index: Int,
         in formattedText: NSString,
         segments: [SFTranscriptionSegment]
-    ) -> String {
+    ) -> Bool {
         let currentRange = segments[index].substringRange
-        let currentEndLocation = currentRange.location + currentRange.length
-        let nextStartLocation = index < segments.count - 1
+        let boundaryEndLocation = index < segments.count - 1
             ? segments[index + 1].substringRange.location
             : formattedText.length
 
-        guard nextStartLocation > currentEndLocation else {
-            return ""
+        guard boundaryEndLocation > currentRange.location else {
+            return false
         }
 
-        return formattedText.substring(
-            with: NSRange(location: currentEndLocation, length: nextStartLocation - currentEndLocation)
+        let boundaryText = formattedText.substring(
+            with: NSRange(location: currentRange.location, length: boundaryEndLocation - currentRange.location)
+        )
+        let nextText = index < segments.count - 1 ? segments[index + 1].substring : nil
+
+        return SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(
+            in: boundaryText,
+            followedBy: nextText
         )
     }
 
@@ -1541,11 +1536,13 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             let sentenceStartTimestamp = segments[sentenceStartIndex].timestamp
             let sentenceEndTimestamp = segment.timestamp + segment.duration
             let currentSentenceDuration = max(sentenceEndTimestamp - sentenceStartTimestamp, 0)
-            let gapText = boundaryGapText(afterSegmentAt: index, in: formattedText, segments: segments)
-
             // Apple may place restored punctuation in the gap before the next segment
             // rather than inside the current segment substring.
-            let punctuationBoundary = segment.substring.containsSentenceTerminator || gapText.containsSentenceTerminator
+            let punctuationBoundary = hasLikelyPunctuationBoundary(
+                afterSegmentAt: index,
+                in: formattedText,
+                segments: segments
+            )
             // 0.85 s was too conservative and often merged two short sentences.
             let strongPauseBoundary = (nextPauseDuration ?? 0) >= max(0.55, Double(modeConfig.minSilenceCommitMs) / 1000.0 + 0.24)
             // Char-length limit removed: 40 chars is only ~6 English words and caused
@@ -1754,7 +1751,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         latestModernText = pendingRawText
         if let split = committableModernText(in: pendingRawText),
            split.remainingRawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           String(text.suffix(1)).containsSentenceTerminator,
+           SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: text),
            canFastCommitModernBoundary(at: now) {
             let committedText = split.committedRawText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard committedText.isEmpty == false else {
@@ -1834,8 +1831,12 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     }
 
     private func shouldHoldModernVADCommit(for text: String) -> Bool {
-        guard String(text.suffix(1)).containsSentenceTerminator == false else {
+        guard SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: text) == false else {
             return false
+        }
+
+        if SentenceBoundaryHeuristics.endsWithLikelyNonTerminalAbbreviation(in: text) {
+            return true
         }
 
         switch activeHeuristicLanguage {
@@ -1880,7 +1881,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let silenceMs = draftStability.silenceMs
         let stabilityScore = draftStability.stabilityScore
 
-        let boundaryScore: Float = String(text.suffix(1)).containsSentenceTerminator ? 0.9 : 0.45
+        let boundaryScore: Float = SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: text) ? 0.9 : 0.45
         let lengthFitScore = draftLengthFitScore(for: text)
         let averageConfidence = transcriberAverageConfidence(result.text)
 
@@ -2243,8 +2244,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let stabilityScore = draftStability.stabilityScore
 
         // Boundary score: sentence-terminating punctuation scores highest
-        let lastSeg = allSegments[lastIdx]
-        let boundaryScore: Float = lastSeg.substring.containsSentenceTerminator ? 0.9 : 0.45
+        let boundaryScore: Float = SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: text) ? 0.9 : 0.45
 
         // Length fit score
         let lengthFitScore = draftLengthFitScore(for: text)
