@@ -1180,17 +1180,31 @@ final class OverlayWindowController {
             return matchedScreen
         }
 
-        let mouseLocation = NSEvent.mouseLocation
+        let isInteractingAcrossDisplays = dragStartTopLeft != nil || resizeDragStartTopLeft != nil
 
-        return NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) })
-            ?? NSScreen.main
-            ?? NSScreen.screens.first
+        // Once the overlay is already shown, keep it anchored to its current display
+        // so incidental cursor movement between monitors does not make it jump.
+        if isInteractingAcrossDisplays == false,
+           panel.isVisible,
+           let panelScreen = screen(containing: panel.frame) {
+            return panelScreen
+        }
+
+        return screenForMouseLocation()
     }
 
     private func screen(containing frame: NSRect) -> NSScreen? {
         NSScreen.screens.max { lhs, rhs in
             lhs.frame.intersection(frame).area < rhs.frame.intersection(frame).area
         }
+    }
+
+    private func screenForMouseLocation() -> NSScreen? {
+        let mouseLocation = NSEvent.mouseLocation
+
+        return NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
     }
 }
 
