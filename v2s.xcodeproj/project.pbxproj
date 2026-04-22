@@ -45,6 +45,7 @@
 		A0000000000000000000008A /* SileroVADHysteresis.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000008B /* SileroVADHysteresis.swift */; };
 		A0000000000000000000008C /* QuickSettingsControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000008D /* QuickSettingsControls.swift */; };
 		A0000000000000000000008E /* PopoverOutsideClickMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000008F /* PopoverOutsideClickMonitor.swift */; };
+		A00000000000000000000090 /* SentenceBoundaryHeuristics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000091 /* SentenceBoundaryHeuristics.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -86,6 +87,7 @@
 		A0000000000000000000008B /* SileroVADHysteresis.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SileroVADHysteresis.swift; sourceTree = "<group>"; };
 		A0000000000000000000008D /* QuickSettingsControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickSettingsControls.swift; sourceTree = "<group>"; };
 		A0000000000000000000008F /* PopoverOutsideClickMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PopoverOutsideClickMonitor.swift; sourceTree = "<group>"; };
+		A00000000000000000000091 /* SentenceBoundaryHeuristics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SentenceBoundaryHeuristics.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -190,6 +192,7 @@
 				A00000000000000000000045 /* EntityCache.swift */,
 				A00000000000000000000046 /* GlossaryService.swift */,
 				A00000000000000000000041 /* LiveTranscriptionSession.swift */,
+				A00000000000000000000091 /* SentenceBoundaryHeuristics.swift */,
 				A00000000000000000000039 /* SettingsStore.swift */,
 				A0000000000000000000007C /* SileroVADEngine.swift */,
 				A0000000000000000000008B /* SileroVADHysteresis.swift */,
@@ -372,6 +375,7 @@
 				A00000000000000000000065 /* SubtitleSegment.swift in Sources */,
 				A00000000000000000000066 /* EntityCache.swift in Sources */,
 				A00000000000000000000067 /* GlossaryService.swift in Sources */,
+				A00000000000000000000090 /* SentenceBoundaryHeuristics.swift in Sources */,
 				A00000000000000000000059 /* SettingsStore.swift in Sources */,
 				A0000000000000000000007B /* SileroVADEngine.swift in Sources */,
 				A0000000000000000000008A /* SileroVADHysteresis.swift in Sources */,
