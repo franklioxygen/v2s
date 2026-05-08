@@ -76,6 +76,12 @@ v2s will ask for permissions on first use:
 - **Audio Capture** — when capturing audio from another app.
 - **Screen Capture** — only when you ask GPT to use visible screen context.
 
+If macOS shows "Apple could not verify 'v2s' is free of malware that may harm your Mac or compromise your privacy", make sure the app came from a trusted release, then remove the quarantine attribute:
+
+```bash
+sudo xattr -dr com.apple.quarantine /Applications/v2s.app
+```
+
 ## Requirements
 
 - Translation requires macOS 26 or newer

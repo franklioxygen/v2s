@@ -66,6 +66,12 @@
 - **Audio Capture**：当输入源为其他应用时需要。
 - **Screen Capture**：仅在你要求 GPT 使用当前屏幕上下文时需要。
 
+如果 macOS 提示“Apple 无法验证‘v2s’是否包含可能危害 Mac 安全或泄漏隐私的恶意软件”，请先确认应用来自可信发布源，然后移除隔离属性：
+
+```bash
+sudo xattr -dr com.apple.quarantine /Applications/v2s.app
+```
+
 ## 环境要求
 
 - 翻译功能需要 macOS 26 或更高版本
