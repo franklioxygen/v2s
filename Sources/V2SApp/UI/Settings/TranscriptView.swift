@@ -20,12 +20,18 @@ final class TranscriptWindowController: NSWindowController, NSWindowDelegate {
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 560, height: 520))
         window.center()
+        window.sharingType = model.privacyModeEnabled ? .none : .readOnly
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
         applyLocalizedTitle()
         model.$interfaceLanguageID
             .sink { [weak self] _ in self?.applyLocalizedTitle() }
+            .store(in: &cancellables)
+        model.$privacyModeEnabled
+            .sink { [weak self] enabled in
+                self?.window?.sharingType = enabled ? .none : .readOnly
+            }
             .store(in: &cancellables)
     }
 

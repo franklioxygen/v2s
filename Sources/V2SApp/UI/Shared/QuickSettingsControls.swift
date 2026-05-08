@@ -60,6 +60,60 @@ struct SourceMenuPicker: View {
     }
 }
 
+struct SourceMultiSelectPicker: View {
+    let sources: [InputSource]
+    let interfaceLanguageID: String
+    let emptyTitle: String
+    @Binding var selection: Set<String>
+
+    var body: some View {
+        Menu {
+            if sources.isEmpty {
+                Text(emptyTitle)
+            } else {
+                ForEach(sources) { source in
+                    Button {
+                        toggle(source.id)
+                    } label: {
+                        Label(
+                            "\(source.category.displayName(in: interfaceLanguageID)) · \(source.name)",
+                            systemImage: selection.contains(source.id) ? "checkmark.circle.fill" : "circle"
+                        )
+                    }
+                }
+            }
+        } label: {
+            Text(title)
+                .lineLimit(1)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var title: String {
+        guard sources.isEmpty == false else {
+            return emptyTitle
+        }
+
+        let selectedSources = sources.filter { selection.contains($0.id) }
+        switch selectedSources.count {
+        case 0:
+            return emptyTitle
+        case 1:
+            return selectedSources[0].name
+        default:
+            return AppLocalization.string(.multipleSourcesFormat, languageID: interfaceLanguageID, selectedSources.count)
+        }
+    }
+
+    private func toggle(_ id: String) {
+        if selection.contains(id) {
+            selection.remove(id)
+        } else {
+            selection.insert(id)
+        }
+    }
+}
+
 struct SubtitleModeMenuPicker: View {
     let interfaceLanguageID: String
     let showsDetail: Bool
@@ -138,6 +192,13 @@ extension AppModel {
         Binding(
             get: { self.selectedSourceID },
             set: { self.selectedSourceID = $0 }
+        )
+    }
+
+    var selectedSourcesBinding: Binding<Set<String>> {
+        Binding(
+            get: { self.selectedSourceIDs },
+            set: { self.selectedSourceIDs = $0 }
         )
     }
 

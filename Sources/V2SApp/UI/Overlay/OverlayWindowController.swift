@@ -7,6 +7,7 @@ import SwiftUI
 final class OverlayWindowController {
     private let model: AppModel
     private let showTranscript: () -> Void
+    private let quitApp: () -> Void
     private let interactionState = OverlayInteractionState()
     private let panel: OverlayPanel
     private let controlsChromePanel: OverlayPanel
@@ -14,12 +15,12 @@ final class OverlayWindowController {
     private let moveButtonPanel: OverlayPanel
     private let closeButtonPanel: OverlayPanel
     private let resizeButtonPanel: OverlayPanel
-    private let subtitleHostingView: NSHostingView<OverlayView>
+    private let subtitleHostingView: InteractiveHostingView<OverlayView>
     private let controlsChromeHostingView: NSHostingView<OverlayControlsChromeView>
-    private let scrollbarHostingView: NSHostingView<OverlayHistoryScrollbarView>
-    private let moveButtonHostingView: NSHostingView<OverlayMoveButtonView>
-    private let closeButtonHostingView: NSHostingView<OverlayCloseButtonView>
-    private let resizeButtonHostingView: NSHostingView<OverlayResizeButtonView>
+    private let scrollbarHostingView: InteractiveHostingView<OverlayHistoryScrollbarView>
+    private let moveButtonHostingView: InteractiveHostingView<OverlayMoveButtonView>
+    private let closeButtonHostingView: InteractiveHostingView<OverlayCloseButtonView>
+    private let resizeButtonHostingView: InteractiveHostingView<OverlayResizeButtonView>
     private var cancellables = Set<AnyCancellable>()
     /// Top-left corner (minX, maxY) of the panel after a user drag. nil = use auto-position.
     private var userDefinedTopLeft: NSPoint?
@@ -62,9 +63,10 @@ final class OverlayWindowController {
         }
     }
 
-    init(model: AppModel, showTranscript: @escaping () -> Void) {
+    init(model: AppModel, showTranscript: @escaping () -> Void, quitApp: @escaping () -> Void) {
         self.model = model
         self.showTranscript = showTranscript
+        self.quitApp = quitApp
         self.panel = OverlayPanel(
             contentRect: NSRect(x: 0, y: 0, width: 1024, height: 120),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -101,22 +103,22 @@ final class OverlayWindowController {
             backing: .buffered,
             defer: false
         )
-        self.subtitleHostingView = NSHostingView(
+        self.subtitleHostingView = InteractiveHostingView(
             rootView: OverlayView(model: model, interactionState: interactionState)
         )
         self.controlsChromeHostingView = NSHostingView(rootView: OverlayControlsChromeView())
-        self.scrollbarHostingView = NSHostingView(
+        self.scrollbarHostingView = InteractiveHostingView(
             rootView: OverlayHistoryScrollbarView(model: model, interactionState: interactionState)
         )
-        self.moveButtonHostingView = NSHostingView(
+        self.moveButtonHostingView = InteractiveHostingView(
             rootView: OverlayMoveButtonView(
                 onMoveDragStart: {},
                 onMoveDragChanged: { _ in },
                 onMoveDragEnded: {}
             )
         )
-        self.closeButtonHostingView = NSHostingView(rootView: OverlayCloseButtonView(model: model))
-        self.resizeButtonHostingView = NSHostingView(
+        self.closeButtonHostingView = InteractiveHostingView(rootView: OverlayCloseButtonView(model: model))
+        self.resizeButtonHostingView = InteractiveHostingView(
             rootView: OverlayResizeButtonView(
                 onResizeDragStart: {},
                 onResizeDragChanged: { _ in },
@@ -185,9 +187,18 @@ final class OverlayWindowController {
         panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.ignoresMouseEvents = !acceptsInput
+        panel.acceptsMouseMovedEvents = acceptsInput
         panel.isMovable = false
         panel.isMovableByWindowBackground = false
         panel.collectionBehavior = Self.panelCollectionBehavior
+        panel.sharingType = model.privacyModeEnabled ? .none : .readOnly
+    }
+
+    private func applyPrivacyModeToPanels() {
+        let sharingType: NSWindow.SharingType = model.privacyModeEnabled ? .none : .readOnly
+        allOverlayPanels.forEach { $0.sharingType = sharingType }
+        genieHideWindow?.sharingType = sharingType
+        pendingHideSnapshot?.sharingType = sharingType
     }
 
     private func bindModel() {
@@ -213,6 +224,14 @@ final class OverlayWindowController {
 
         model.$overlayStyle
             .sink { [weak self] _ in self?.scheduleWindowSync() }
+            .store(in: &cancellables)
+
+        model.$privacyModeEnabled
+            .sink { [weak self] _ in self?.applyPrivacyModeToPanels() }
+            .store(in: &cancellables)
+
+        model.$overlayViewMode
+            .sink { [weak self] _ in self?.syncPanelInputMode() }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
@@ -253,6 +272,7 @@ final class OverlayWindowController {
         }
 
         model.stopSession()
+        quitApp()
     }
 
     private func scheduleWindowSync() {
@@ -288,6 +308,20 @@ final class OverlayWindowController {
                 positionPanels(animated: true)
             }
             startMouseTrackingIfNeeded()
+            updatePassThroughBubble()
+        }
+    }
+
+    private func syncPanelInputMode() {
+        let acceptsMainPanelInput = model.overlayViewMode == .gptReplies
+        panel.ignoresMouseEvents = !acceptsMainPanelInput
+        panel.acceptsMouseMovedEvents = acceptsMainPanelInput
+
+        if acceptsMainPanelInput {
+            interactionState.updatePassThroughBubble(nil)
+        }
+
+        if panelsShown {
             updatePassThroughBubble()
         }
     }
@@ -453,6 +487,7 @@ final class OverlayWindowController {
         window.hasShadow = false
         window.hidesOnDeactivate = false
         window.collectionBehavior = Self.panelCollectionBehavior
+        window.sharingType = model.privacyModeEnabled ? .none : .readOnly
         window.contentView = imageView
 
         return window
@@ -527,6 +562,8 @@ final class OverlayWindowController {
     // MARK: - Panel Ordering
 
     private func orderFrontAllPanels() {
+        applyPrivacyModeToPanels()
+        syncPanelInputMode()
         panel.orderFront(nil)
         panel.orderFrontRegardless()
 
@@ -553,6 +590,17 @@ final class OverlayWindowController {
         moveButtonPanel.orderOut(nil)
         closeButtonPanel.orderOut(nil)
         resizeButtonPanel.orderOut(nil)
+    }
+
+    private var allOverlayPanels: [NSWindow] {
+        [
+            panel,
+            controlsChromePanel,
+            scrollbarPanel,
+            moveButtonPanel,
+            closeButtonPanel,
+            resizeButtonPanel
+        ]
     }
 
     private func positionPanels(animated: Bool = false) {
@@ -848,7 +896,8 @@ final class OverlayWindowController {
             scrollbarRevealProgress(for: mouseLocation, scrollbarFrame: scrollbarPanel.frame)
         )
 
-        guard model.overlayStyle.clickThrough else {
+        guard model.overlayStyle.clickThrough,
+              model.overlayViewMode != .gptReplies else {
             interactionState.updatePassThroughBubble(nil)
             return
         }
@@ -1215,6 +1264,19 @@ private final class OverlayPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+private final class InteractiveHostingView<Content: View>: NSHostingView<Content> {
+    override var acceptsFirstResponder: Bool { true }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
+    }
+}
+
 private extension OverlayWindowController {
     static let minimumOverlayHeight: Double = 105
     static let attachToSourceRefreshDelayNanoseconds: UInt64 = 120_000_000
@@ -1222,6 +1284,7 @@ private extension OverlayWindowController {
     static let passThroughBubbleDiameter: CGFloat = 118
     static let scrollbarRevealDistance: CGFloat = 42
     static let panelCollectionBehavior: NSWindow.CollectionBehavior = [
+        .canJoinAllSpaces,
         .fullScreenAuxiliary,
         .ignoresCycle,
         .stationary

@@ -11,6 +11,7 @@ struct OverlayView: View {
     @State private var lastLiveLayersHeight: CGFloat = 0.0
     @State private var lastCommittedSlotHeight: CGFloat = 0.0
     @State private var measuredHistoryEntryHeights: [UUID: CGFloat] = [:]
+    @State private var screenContextIndicatorHovered = false
 
     var body: some View {
         ZStack {
@@ -32,7 +33,9 @@ struct OverlayView: View {
     @ViewBuilder
     private var subtitleContent: some View {
         Group {
-            if let state = model.overlayState {
+            if model.overlayViewMode == .gptReplies, !model.gptReplyHistory.isEmpty {
+                gptReplyContent
+            } else if let state = model.overlayState {
                 GeometryReader { proxy in
                     let availableHistoryHeight = availableHistoryHeight(for: proxy.size.height, state: state)
                     let visibleHistoryEntries = historyVisibleEntries(from: state.history, availableHeight: availableHistoryHeight)
@@ -122,6 +125,106 @@ struct OverlayView: View {
         }
         .padding(.horizontal, OverlayControlsLayout.outerPadding)
         .padding(.vertical, OverlayControlsLayout.outerPadding)
+    }
+
+    // MARK: - GPT Reply Mode
+
+    @ViewBuilder
+    private var gptReplyContent: some View {
+        if !model.gptReplyHistory.isEmpty {
+            gptCurrentEntryView
+                .padding(.leading, 20)
+                .padding(.trailing, 20 + OverlayHistoryScrollbarLayout.panelWidth + OverlayHistoryScrollbarLayout.contentSpacing)
+                .padding(.top, 12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(backgroundView)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                )
+                .overlay(alignment: .topLeading) {
+                    screenContextIndicator
+                }
+        }
+    }
+
+    @ViewBuilder
+    private var screenContextIndicator: some View {
+        if model.gptScreenContextStatus.isWarning {
+            ZStack(alignment: .topLeading) {
+                Circle()
+                    .fill(Color.red.opacity(0.9))
+                    .frame(width: 9, height: 9)
+                    .overlay(
+                        Circle()
+                            .strokeBorder(Color.white.opacity(0.75), lineWidth: 1)
+                    )
+                    .padding(10)
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            screenContextIndicatorHovered = hovering
+                        }
+                    }
+                    .help("\(model.gptScreenContextStatus.title): \(model.gptScreenContextStatus.detail)")
+
+                if screenContextIndicatorHovered {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(model.gptScreenContextStatus.title)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.white)
+                        Text(model.gptScreenContextStatus.detail)
+                            .font(.system(size: 10, weight: .regular))
+                            .foregroundStyle(Color.white.opacity(0.82))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 7)
+                    .padding(.horizontal, 9)
+                    .frame(width: 260, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.black.opacity(0.82))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.13), lineWidth: 1)
+                    )
+                    .padding(.leading, 22)
+                    .padding(.top, 5)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topLeading)))
+                    .allowsHitTesting(false)
+                }
+            }
+            .zIndex(4)
+        }
+    }
+
+    private var gptCurrentEntryView: some View {
+        let clampedOffset = min(max(model.gptReplyScrollOffset, 0), max(0, model.gptReplyHistory.count - 1))
+        let entry = model.gptReplyHistory[model.gptReplyHistory.count - 1 - clampedOffset]
+        return ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .center, spacing: Self.captionPairSpacing) {
+                Text(entry.title)
+                    .font(.system(size: displayedSourceFontSize, weight: .regular))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity)
+                    .foregroundStyle(subtitleColor(opacity: 0.72))
+                Text(entry.message)
+                    .font(.system(size: model.overlayStyle.scaledTranslatedFontSize, weight: .semibold))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity)
+                    .foregroundStyle(baseSubtitleColor)
+            }
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { model.updateGPTReplyVisibleCount(1) }
+        .onChange(of: model.gptReplyHistory.count) { _, _ in model.updateGPTReplyVisibleCount(1) }
     }
 
     // MARK: - Continuous flow
@@ -895,8 +998,26 @@ struct OverlayHistoryScrollbarView: View {
         let latestButtonRevealProgress = latestButtonRevealProgress(for: revealProgress)
 
         VStack(spacing: 0) {
+            actionButton(
+                systemImage: "arrow.triangle.2.circlepath",
+                accessibilityLabel: model.localized(.followUp),
+                help: model.localized(.followUpShortcutHelp),
+                revealProgress: revealProgress,
+                action: model.requestGPTFollowUp
+            )
+            .padding(.top, OverlayHistoryScrollbarLayout.verticalPadding)
+            .padding(.bottom, OverlayHistoryScrollbarLayout.buttonSpacing)
+
+            actionButton(
+                systemImage: "questionmark.bubble",
+                accessibilityLabel: model.localized(.askGPT),
+                help: model.localized(.askShortcutHelp),
+                revealProgress: revealProgress,
+                action: model.requestGPTAsk
+            )
+            .padding(.bottom, OverlayHistoryScrollbarLayout.buttonSpacing)
+
             transcriptButton(revealProgress: revealProgress)
-                .padding(.top, OverlayHistoryScrollbarLayout.verticalPadding)
                 .padding(.bottom, OverlayHistoryScrollbarLayout.buttonSpacing)
 
             GeometryReader { proxy in
@@ -930,11 +1051,23 @@ struct OverlayHistoryScrollbarView: View {
                             .offset(y: metrics.thumbTop)
 
                         OverlayHistoryScrollbarInputLayer(
-                            currentOffset: model.overlayHistoryScrollOffset,
+                            currentOffset: effectiveScrollOffset,
                             maxScrollOffset: metrics.maxScrollOffset,
                             thumbHeight: metrics.thumbHeight,
-                            onOffsetChange: { model.setOverlayHistoryScrollOffset($0) },
-                            onStepScroll: { model.scrollOverlayHistory(by: $0) }
+                            onOffsetChange: { [model] offset in
+                                if model.overlayViewMode == .gptReplies {
+                                    model.setGPTReplyScrollOffset(offset)
+                                } else {
+                                    model.setOverlayHistoryScrollOffset(offset)
+                                }
+                            },
+                            onStepScroll: { [model] delta in
+                                if model.overlayViewMode == .gptReplies {
+                                    model.scrollGPTReplyHistory(by: delta)
+                                } else {
+                                    model.scrollOverlayHistory(by: delta)
+                                }
+                            }
                         )
                     }
                     .frame(height: trackHeight)
@@ -950,9 +1083,21 @@ struct OverlayHistoryScrollbarView: View {
         }
     }
 
+    private var effectiveScrollOffset: Int {
+        model.overlayViewMode == .gptReplies ? model.gptReplyScrollOffset : model.overlayHistoryScrollOffset
+    }
+
+    private var effectiveTotalCount: Int {
+        model.overlayViewMode == .gptReplies ? model.gptReplyHistory.count : (model.overlayState?.history.count ?? 0)
+    }
+
+    private var effectiveVisibleCount: Int {
+        model.overlayViewMode == .gptReplies ? model.gptReplyVisibleCount : model.overlayHistoryVisibleCount
+    }
+
     private func scrollbarMetrics(trackHeight: CGFloat) -> OverlayHistoryScrollbarMetrics {
-        let totalCount = max(model.overlayState?.history.count ?? 0, 0)
-        let visibleCount = max(0, model.overlayHistoryVisibleCount)
+        let totalCount = max(effectiveTotalCount, 0)
+        let visibleCount = max(0, effectiveVisibleCount)
         let maxScrollOffset = max(0, totalCount - visibleCount)
         let clampedTrackHeight = max(trackHeight, OverlayHistoryScrollbarLayout.minimumThumbHeight)
         let visibilityRatio = totalCount > 0
@@ -966,7 +1111,7 @@ struct OverlayHistoryScrollbarView: View {
         let progressFromTop: CGFloat
 
         if maxScrollOffset > 0 {
-            progressFromTop = 1.0 - (CGFloat(model.overlayHistoryScrollOffset) / CGFloat(maxScrollOffset))
+            progressFromTop = 1.0 - (CGFloat(effectiveScrollOffset) / CGFloat(maxScrollOffset))
         } else {
             progressFromTop = 1.0
         }
@@ -990,18 +1135,24 @@ struct OverlayHistoryScrollbarView: View {
     }
 
     private func latestButtonReservedHeight(for revealProgress: CGFloat) -> CGFloat {
-        let fullHeight = OverlayControlsLayout.controlSize + OverlayHistoryScrollbarLayout.buttonSpacing
+        let fullHeight = (OverlayControlsLayout.controlSize + OverlayHistoryScrollbarLayout.buttonSpacing) * 2
+            + OverlayControlsLayout.controlSize
+            + OverlayHistoryScrollbarLayout.buttonSpacing
         return fullHeight * revealProgress
     }
 
     private func latestButtonRevealProgress(for revealProgress: CGFloat) -> CGFloat {
-        guard model.overlayHistoryScrollOffset > 0 else { return 0.0 }
+        guard effectiveScrollOffset > 0 else { return 0.0 }
         return revealProgress
     }
 
     private func latestButton(revealProgress: CGFloat) -> some View {
         Button {
-            model.setOverlayHistoryScrollOffset(0)
+            if model.overlayViewMode == .gptReplies {
+                model.setGPTReplyScrollOffset(0)
+            } else {
+                model.setOverlayHistoryScrollOffset(0)
+            }
         } label: {
             ZStack {
                 Circle().fill(Color.white.opacity(0.12))
@@ -1020,12 +1171,26 @@ struct OverlayHistoryScrollbarView: View {
     }
 
     private func transcriptButton(revealProgress: CGFloat) -> some View {
-        Button {
-            showTranscript()
-        } label: {
+        actionButton(
+            systemImage: "doc.text",
+            accessibilityLabel: model.localized(.transcript),
+            help: model.localized(.transcript),
+            revealProgress: revealProgress,
+            action: showTranscript
+        )
+    }
+
+    private func actionButton(
+        systemImage: String,
+        accessibilityLabel: String,
+        help: String,
+        revealProgress: CGFloat,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
             ZStack {
                 Circle().fill(Color.white.opacity(0.12))
-                Image(systemName: "doc.text")
+                Image(systemName: systemImage)
                     .font(.system(size: 9, weight: .medium))
                     .foregroundColor(.white.opacity(0.65))
             }
@@ -1036,7 +1201,8 @@ struct OverlayHistoryScrollbarView: View {
         .scaleEffect(0.9 + (0.1 * revealProgress))
         .allowsHitTesting(revealProgress > 0.05)
         .animation(.easeOut(duration: 0.16), value: revealProgress)
-        .accessibilityLabel(model.localized(.transcript))
+        .accessibilityLabel(accessibilityLabel)
+        .help(help)
     }
 }
 

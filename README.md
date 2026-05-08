@@ -5,11 +5,13 @@
 </p>
 
 <p align="center">
-  <strong>Live bilingual subtitles for meetings, calls, streams, and videos on macOS.</strong>
+  <strong>Private interview assistant and bilingual live subtitle overlay for macOS.</strong>
 </p>
 
 <p align="center">
-  v2s turns microphone input or app audio into a clean two-line subtitle bar so you can follow speech in one language and read it in another without leaving the screen you are already using.
+  v2s helps you follow interviews, meetings, calls, streams, and videos with bilingual subtitles,
+  multi-source audio capture, and an optional GPT assistant that can use transcript history,
+  screen OCR, and current-screen context when you explicitly ask for help.
 </p>
 
 <p align="center">
@@ -26,19 +28,26 @@
 
 ## Why v2s
 
-- Follow live conversations with translated subtitles pinned at the top of your screen.
-- Capture from your microphone or from a specific macOS app instead of your entire system mix.
-- Keep the original speech and the translated line visible together for fast context switching.
-- Stay in a lightweight menu bar workflow instead of juggling browser tabs or full-screen caption apps.
+- Use a discreet macOS overlay to keep interview or meeting context visible while staying in your current app.
+- Follow live conversations with bilingual subtitles, including original and translated text.
+- Capture from one or more microphones and running macOS apps instead of your entire system mix.
+- Ask GPT for a follow-up, explanation, or likely answer using the conversation history and visible screen context.
+- Keep a lightweight menu bar workflow instead of juggling browser tabs or full-screen caption apps.
 
 ## Features
 
 - Menu bar app built for always-available subtitle access.
 - Live subtitle overlay with translated text on the first line and source text on the second.
-- Audio source selection for microphones and running macOS apps.
+- Multi-source audio capture for microphones and running macOS apps.
+- Per-source language selection for bilingual or mixed-language conversations.
 - On-device speech transcription powered by Apple SpeechAnalyzer.
 - On-device translation powered by Apple Translation.
 - Transcript summarization powered by Apple Intelligence for quick overview of conversations.
+- GPT interview assistant with Follow Up and Ask actions, global hotkeys, configurable model, API key, and API base URL.
+- Screen context support through macOS screenshot capture plus Vision OCR; text-only fallback is used when a provider rejects images.
+- Scrollable subtitle and GPT reply modes with a hotkey to switch between them.
+- Privacy mode for the overlay and settings windows so they can be hidden from screenshots, screen recording, and screen sharing.
+- Single-instance launch guard: opening v2s again wakes the existing window, or restarts it if the old instance is unresponsive.
 - Overlay styling controls so the subtitle bar stays readable on top of real work.
 
 ## Input Languages
@@ -49,10 +58,12 @@ Supported input languages: Cantonese, Chinese (Simplified), English, French, Ger
 
 ## Privacy
 
-- No account, cloud backend, analytics, or telemetry.
-- Audio and subtitle text never leave your Mac through v2s.
+- No built-in account, cloud backend, analytics, or telemetry.
+- Audio transcription and translation are handled through Apple's system frameworks.
 - Translation uses Apple's on-device Translation framework. Some language packs may need to be downloaded first through System Settings.
 - Speech recognition uses Apple's on-device SpeechAnalyzer/SpeechTranscriber resources for the listed input languages.
+- GPT features are optional and user configured. When you press Follow Up or Ask, v2s sends the prior transcript, timestamps, conversation/source name, skills prompt, OCR text, and, when available and supported by the provider, a current-screen screenshot to your configured API endpoint.
+- If screen capture permission is missing or the selected API/model does not support images, v2s falls back to text and OCR context and shows an in-overlay warning indicator.
 
 ## Getting Started
 
@@ -62,12 +73,20 @@ Supported input languages: Cantonese, Chinese (Simplified), English, French, Ger
 4. Select an input source (a running app or microphone).
 5. Choose your input and subtitle languages.
 6. Click **Start**.
+7. Optional: configure GPT API settings, skills, and hotkeys for interview assistance.
 
 v2s will ask for permissions on first use:
 
 - **Speech Recognition** — to transcribe audio into text.
 - **Microphone** — when using a microphone as the input source.
 - **Audio Capture** — when capturing audio from another app.
+- **Screen Capture** — only when you ask GPT to use visible screen context.
+
+If macOS shows "Apple could not verify 'v2s' is free of malware that may harm your Mac or compromise your privacy", make sure the app came from a trusted release, then remove the quarantine attribute:
+
+```bash
+sudo xattr -dr com.apple.quarantine /Applications/v2s.app
+```
 
 ## Requirements
 

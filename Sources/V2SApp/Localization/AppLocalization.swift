@@ -17,6 +17,7 @@ enum AppTextKey: String {
     case showSubtitlePreview
     case inputSource
     case selectedSource
+    case multipleSourcesFormat
     case noSourcesDetected
     case noSources
     case choose
@@ -35,6 +36,23 @@ enum AppTextKey: String {
     case subtitleDisplayOriginalOnly
     case subtitleDisplayTranslatedOnly
     case refreshLanguageResources
+    case privacyMode
+    case privacyModeDetail
+    case gptAssistant
+    case openAIAPIKey
+    case apiBaseURL
+    case gptModel
+    case skills
+    case sourceLanguage
+    case skillsPlaceholder
+    case autoDetectConversationLanguages
+    case followUp
+    case askGPT
+    case gptThinking
+    case gptAPIKeyMissing
+    case gptRequestFailedFormat
+    case followUpShortcutHelp
+    case askShortcutHelp
     case glossary
     case glossaryEmpty
     case sourceTerm
@@ -157,6 +175,24 @@ enum AppTextKey: String {
     case launchAtLoginUpdateFailedFormat
     case checkForUpdatesAutomatically
     case checkForUpdates
+    case translateTo
+    case hotKeys
+    case hotKeyFollowUp
+    case hotKeyAsk
+    case key
+    case modifiers
+    case hotKeyConflictNote
+    case fetchModels
+    case fetchingModels
+    case selectFromList
+    case testAPI
+    case testingAPI
+    case testPassed
+    case testFailed
+    case hotKeySwitchMode
+    case switchModeShortcutHelp
+    case gptRepliesMode
+    case subtitlesMode
 }
 
 enum AppLocalization {
@@ -231,6 +267,7 @@ enum AppLocalization {
             "showSubtitlePreview": "Show Subtitle Preview",
             "inputSource": "Input Source",
             "selectedSource": "Selected Source",
+            "multipleSourcesFormat": "%d sources",
             "noSourcesDetected": "No sources detected",
             "noSources": "No sources",
             "choose": "Choose...",
@@ -249,6 +286,23 @@ enum AppLocalization {
             "subtitleDisplayOriginalOnly": "Only show original subtitle",
             "subtitleDisplayTranslatedOnly": "Only show translated subtitle",
             "refreshLanguageResources": "Refresh Language Resources",
+            "privacyMode": "Privacy Mode",
+            "privacyModeDetail": "Hide v2s overlay windows from screenshots, screen recording, and screen sharing when macOS allows it.",
+            "gptAssistant": "GPT Assistant",
+            "openAIAPIKey": "OpenAI API Key",
+            "apiBaseURL": "API Base URL",
+            "gptModel": "GPT Model",
+            "skills": "Skills",
+            "sourceLanguage": "Source Language",
+            "skillsPlaceholder": "Prompt skills, role rules, terminology, or answer style...",
+            "autoDetectConversationLanguages": "Auto-detect two conversation languages",
+            "followUp": "Follow Up",
+            "askGPT": "Ask",
+            "gptThinking": "Thinking...",
+            "gptAPIKeyMissing": "Add an OpenAI API key in Settings before using GPT.",
+            "gptRequestFailedFormat": "GPT request failed: %@",
+            "followUpShortcutHelp": "Follow Up (Option-Command-F)",
+            "askShortcutHelp": "Ask GPT (Option-Command-G)",
             "glossary": "Glossary",
             "glossaryEmpty": "No terms added. Use + to add source -> target term pairs.",
             "sourceTerm": "Source term",
@@ -371,6 +425,24 @@ enum AppLocalization {
             "launchAtLoginUpdateFailedFormat": "Couldn't update launch-at-login setting: %@",
             "checkForUpdatesAutomatically": "Check for Updates Automatically",
             "checkForUpdates": "Check for Updates",
+            "translateTo": "Translate To",
+            "hotKeys": "Keyboard Shortcuts",
+            "hotKeyFollowUp": "Follow Up Shortcut",
+            "hotKeyAsk": "Ask Shortcut",
+            "key": "Key",
+            "modifiers": "Modifiers",
+            "hotKeyConflictNote": "Shortcuts take effect immediately. Make sure the key combination isn't used by another app.",
+            "fetchModels": "Fetch Models",
+            "fetchingModels": "Fetching…",
+            "selectFromList": "Select from list",
+            "testAPI": "Test API",
+            "testingAPI": "Testing…",
+            "testPassed": "OK",
+            "testFailed": "Failed",
+            "hotKeySwitchMode": "Switch View Shortcut",
+            "switchModeShortcutHelp": "Switch between Subtitles and GPT Replies",
+            "gptRepliesMode": "GPT Replies",
+            "subtitlesMode": "Subtitles",
         ],
         "zh-Hans": [
             "start": "开始",
@@ -384,6 +456,7 @@ enum AppLocalization {
             "showSubtitlePreview": "显示字幕预览",
             "inputSource": "输入源",
             "selectedSource": "已选输入源",
+            "multipleSourcesFormat": "%d 个输入源",
             "noSourcesDetected": "未检测到输入源",
             "noSources": "没有可用输入源",
             "choose": "选择...",
@@ -402,6 +475,23 @@ enum AppLocalization {
             "subtitleDisplayOriginalOnly": "仅显示原文字幕",
             "subtitleDisplayTranslatedOnly": "仅显示译文字幕",
             "refreshLanguageResources": "刷新语言资源",
+            "privacyMode": "隐私模式",
+            "privacyModeDetail": "在 macOS 允许时，让 v2s 浮窗在截屏、录屏和屏幕共享中不可见。",
+            "gptAssistant": "GPT 助手",
+            "openAIAPIKey": "OpenAI API Key",
+            "apiBaseURL": "API 地址",
+            "gptModel": "GPT 模型",
+            "skills": "Skills",
+            "sourceLanguage": "识别语言",
+            "skillsPlaceholder": "填写提示词技能、角色规则、术语或回复风格...",
+            "autoDetectConversationLanguages": "自动识别对话中的两种语言",
+            "followUp": "Follow Up",
+            "askGPT": "提问",
+            "gptThinking": "思考中...",
+            "gptAPIKeyMissing": "请先在设置中填写 OpenAI API Key。",
+            "gptRequestFailedFormat": "GPT 请求失败：%@",
+            "followUpShortcutHelp": "Follow Up（Option-Command-F）",
+            "askShortcutHelp": "提问 GPT（Option-Command-G）",
             "glossary": "术语表",
             "glossaryEmpty": "还没有添加术语。点击 + 添加源词 -> 目标词条目。",
             "sourceTerm": "源词",
@@ -524,6 +614,24 @@ enum AppLocalization {
             "launchAtLoginUpdateFailedFormat": "无法更新登录时启动设置：%@",
             "checkForUpdatesAutomatically": "自动检查更新",
             "checkForUpdates": "检查更新",
+            "translateTo": "翻译为",
+            "hotKeys": "键盘快捷键",
+            "hotKeyFollowUp": "跟进快捷键",
+            "hotKeyAsk": "提问快捷键",
+            "key": "按键",
+            "modifiers": "修饰键",
+            "hotKeyConflictNote": "快捷键立即生效，请确保组合键未被其他应用占用。",
+            "fetchModels": "获取模型列表",
+            "fetchingModels": "获取中…",
+            "selectFromList": "从列表选择",
+            "testAPI": "测试 API",
+            "testingAPI": "测试中…",
+            "testPassed": "连接成功",
+            "testFailed": "失败",
+            "hotKeySwitchMode": "切换视图快捷键",
+            "switchModeShortcutHelp": "在字幕与 GPT 回复之间切换",
+            "gptRepliesMode": "GPT 回复",
+            "subtitlesMode": "字幕",
         ],
         "es": [
             "start": "Iniciar",

@@ -22,6 +22,7 @@ xcuserdata/
 *.log
 tmp/
 dist/
+V2SDebug.app/
 .claude/worktrees/
 
 

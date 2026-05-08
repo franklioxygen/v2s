@@ -47,10 +47,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 560, height: 520))
         window.center()
+        window.sharingType = model.privacyModeEnabled ? .none : .readOnly
         super.init(window: window)
         window.delegate = self
         applyLocalizedTitle()
         bindLocalizedTitle()
+        bindPrivacyMode()
         actions.closeSettings = { [weak self] in
             self?.closeForSessionStart()
         }
@@ -93,6 +95,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             .store(in: &cancellables)
     }
 
+    private func bindPrivacyMode() {
+        model.$privacyModeEnabled
+            .sink { [weak self] enabled in
+                self?.window?.sharingType = enabled ? .none : .readOnly
+                self?.subtitleModeInfoWindowController.window?.sharingType = enabled ? .none : .readOnly
+            }
+            .store(in: &cancellables)
+    }
+
     private func applyLocalizedTitle() {
         window?.title = model.localized(.advancedSettingsWindowTitle)
     }
@@ -117,6 +128,7 @@ private final class SubtitleModeInfoWindowController: NSWindowController {
         window.styleMask = [.titled, .closable, .miniaturizable]
         window.setContentSize(NSSize(width: 520, height: 420))
         window.center()
+        window.sharingType = model.privacyModeEnabled ? .none : .readOnly
         window.isReleasedWhenClosed = false
         super.init(window: window)
         applyLocalizedTitle()

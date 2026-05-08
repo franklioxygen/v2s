@@ -31,6 +31,11 @@ struct SettingsView: View {
                 closeSettings()
             }
         }
+        .onChange(of: model.overlayViewMode) { _, mode in
+            if mode == .gptReplies {
+                closeSettings()
+            }
+        }
     }
 
     // MARK: - Header Bar
@@ -114,19 +119,20 @@ struct SettingsView: View {
                 settingsCard {
                     sectionHeader(model.localized(.inputSource), icon: "mic.fill")
                     SettingsControlRow(label: model.localized(.selectedSource)) {
-                        SourceMenuPicker(
+                        SourceMultiSelectPicker(
                             sources: model.allSources,
                             interfaceLanguageID: model.resolvedInterfaceLanguageID,
                             emptyTitle: model.allSources.isEmpty
                                 ? model.localized(.noSourcesDetected)
                                 : model.localized(.choose),
-                            selection: model.selectedSourceOptionalBinding
+                            selection: model.selectedSourcesBinding
                         )
                     }
                     SecondaryRefreshButton(
                         title: model.localized(.refreshSources),
                         action: model.refreshSources
                     )
+                    selectedSourceLanguageRows
                 }
                 settingsCard {
                     sectionHeader(model.localized(.languages), icon: "globe")
@@ -170,6 +176,79 @@ struct SettingsView: View {
                         )
                     }
                     LanguageResourcesFooter(model: model)
+                }
+                settingsCard {
+                    sectionHeader(model.localized(.privacyMode), icon: "eye.slash")
+                    settingsRow(model.localized(.privacyMode)) {
+                        Toggle("", isOn: $model.privacyModeEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+                    Text(model.localized(.privacyModeDetail))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                settingsCard {
+                    sectionHeader(model.localized(.hotKeys), icon: "keyboard")
+                    HotKeyRow(
+                        label: model.localized(.hotKeyFollowUp),
+                        binding: $model.hotKeyFollowUp
+                    )
+                    Divider()
+                    HotKeyRow(
+                        label: model.localized(.hotKeyAsk),
+                        binding: $model.hotKeyAsk
+                    )
+                    Divider()
+                    HotKeyRow(
+                        label: model.localized(.hotKeySwitchMode),
+                        binding: $model.hotKeySwitchMode
+                    )
+                    Text(model.localized(.hotKeyConflictNote))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                settingsCard {
+                    sectionHeader(model.localized(.gptAssistant), icon: "sparkles")
+                    SettingsControlRow(label: model.localized(.openAIAPIKey)) {
+                        SecureField(model.localized(.openAIAPIKey), text: $model.gptAPIKey)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 260)
+                    }
+                    Divider()
+                    SettingsControlRow(label: model.localized(.apiBaseURL)) {
+                        TextField(model.localized(.apiBaseURL), text: $model.gptAPIBaseURL)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 260)
+                    }
+                    Divider()
+                    GPTModelRow(model: model)
+                    Divider()
+                    settingsRow(model.localized(.autoDetectConversationLanguages)) {
+                        Toggle("", isOn: $model.autoDetectConversationLanguages)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+                    Divider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(model.localized(.skills))
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        TextEditor(text: $model.gptSkills)
+                            .font(.body)
+                            .frame(minHeight: 86)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+                            )
+                        Text(model.localized(.skillsPlaceholder))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Divider()
+                    GPTAPITestRow(model: model)
                 }
                 settingsCard {
                     sectionHeader(model.localized(.updates), icon: "arrow.triangle.2.circlepath")
@@ -231,6 +310,42 @@ struct SettingsView: View {
     }
 
     // MARK: - Overlay Tab
+
+    private var selectedSourceLanguageRows: some View {
+        let selectedSources = model.selectedSources
+        return VStack(alignment: .leading, spacing: 8) {
+            ForEach(selectedSources) { source in
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(source.name)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.primary)
+                    HStack(spacing: 12) {
+                        Label(model.localized(.inputLanguage), systemImage: "mic")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 100, alignment: .leading)
+                        CommonLanguageMenuPicker(
+                            interfaceLanguageID: model.resolvedInterfaceLanguageID,
+                            selection: sourceLanguageBinding(for: source)
+                        )
+                        .disabled(model.isLanguagePairLocked)
+                    }
+                    HStack(spacing: 12) {
+                        Label(model.localized(.translateTo), systemImage: "arrow.right")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 100, alignment: .leading)
+                        CommonLanguageMenuPicker(
+                            interfaceLanguageID: model.resolvedInterfaceLanguageID,
+                            selection: sourceOutputLanguageBinding(for: source)
+                        )
+                        .disabled(model.isLanguagePairLocked)
+                    }
+                }
+            }
+        }
+    }
 
     private var overlayTab: some View {
         ScrollView {
@@ -486,6 +601,20 @@ struct SettingsView: View {
             }
         )
     }
+
+    private func sourceLanguageBinding(for source: InputSource) -> Binding<String> {
+        Binding(
+            get: { model.languageID(for: source) },
+            set: { model.setLanguageID($0, for: source) }
+        )
+    }
+
+    private func sourceOutputLanguageBinding(for source: InputSource) -> Binding<String> {
+        Binding(
+            get: { model.outputLanguageIDForSource(source) },
+            set: { model.setOutputLanguageID($0, for: source) }
+        )
+    }
 }
 
 struct LanguageResourceStatusListView: View {
@@ -596,5 +725,157 @@ private struct LabeledSlider: View {
 
     private var formattedValue: String {
         String(format: "%.\(precision)f", value.wrappedValue)
+    }
+}
+
+private struct HotKeyRow: View {
+    let label: String
+    @Binding var binding: HotKeyBinding
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Picker("", selection: $binding.key) {
+                    ForEach(GlobalHotKeyController.availableKeys, id: \.self) { k in
+                        Text(k.uppercased()).tag(k)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 64)
+
+                Toggle("⌃", isOn: $binding.useControl)
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+                Toggle("⌥", isOn: $binding.useOption)
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+                Toggle("⇧", isOn: $binding.useShift)
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+                Toggle("⌘", isOn: $binding.useCommand)
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+
+                Text(binding.displayString)
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 60, alignment: .leading)
+            }
+        }
+    }
+}
+
+private struct GPTModelRow: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(model.localized(.gptModel))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                HStack(spacing: 6) {
+                    TextField(model.localized(.gptModel), text: $model.gptModel)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 180)
+                    Button {
+                        model.fetchGPTModels()
+                    } label: {
+                        if case .fetching = model.gptModelFetchState {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(width: 16, height: 16)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help(model.localized(.fetchModels))
+                    .disabled({
+                        if case .fetching = model.gptModelFetchState { return true }
+                        return false
+                    }())
+                }
+            }
+            if case .fetched(let models) = model.gptModelFetchState, !models.isEmpty {
+                HStack {
+                    Spacer()
+                    Menu {
+                        ForEach(models, id: \.self) { m in
+                            Button(m) { model.gptModel = m }
+                        }
+                    } label: {
+                        Label(model.localized(.selectFromList), systemImage: "list.bullet")
+                            .font(.caption)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+            }
+            if case .failed(let msg) = model.gptModelFetchState {
+                Text(msg)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+private struct GPTAPITestRow: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button {
+                model.testGPTAPI()
+            } label: {
+                if case .testing = model.gptAPITestState {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(model.localized(.testingAPI))
+                    }
+                } else {
+                    Label(model.localized(.testAPI), systemImage: "bolt.fill")
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled({
+                if case .testing = model.gptAPITestState { return true }
+                return false
+            }())
+
+            switch model.gptAPITestState {
+            case .idle:
+                EmptyView()
+            case .testing:
+                EmptyView()
+            case .passed(let preview):
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text(model.localized(.testPassed) + ": \(preview)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            case .failed(let msg):
+                HStack(spacing: 4) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text(model.localized(.testFailed) + ": \(msg)")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                }
+            }
+            Spacer()
+        }
     }
 }

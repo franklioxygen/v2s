@@ -21,6 +21,7 @@ final class AppModel: ObservableObject {
     private let entityCache = EntityCache()
     private let speedMonitor = SpeedMonitor()
     private var liveTranscriptionSession: LiveTranscriptionSession?
+    private var liveTranscriptionSessions: [LiveTranscriptionSession] = []
     private var captionDisplayTask: Task<Void, Never>?
     private var captionTranslationTasks: [UUID: Task<Void, Never>] = [:]
     private var pendingCaptions: [QueuedCaption] = []
@@ -64,8 +65,36 @@ final class AppModel: ObservableObject {
 
     @Published var selectedSourceID: String? {
         didSet {
+            if let selectedSourceID, selectedSourceIDs.contains(selectedSourceID) == false {
+                selectedSourceIDs = [selectedSourceID]
+            }
             persistSettings()
             syncOverlayPreviewIfNeeded()
+        }
+    }
+
+    @Published var selectedSourceIDs: Set<String> {
+        didSet {
+            if selectedSourceIDs.isEmpty {
+                if selectedSourceID != nil {
+                    selectedSourceID = nil
+                }
+            } else if let selectedSourceID, selectedSourceIDs.contains(selectedSourceID) {
+                // Keep the legacy single-source field stable for older settings readers.
+            } else {
+                selectedSourceID = selectedSourceIDs.sorted().first
+            }
+            persistSettings()
+            syncOverlayPreviewIfNeeded()
+        }
+    }
+
+    @Published var sourceLanguageOverrides: [String: String] {
+        didSet {
+            persistSettings()
+            if sessionState != .running {
+                scheduleSelectedLanguageResourcePreparation(openSystemSettingsIfNeeded: true)
+            }
         }
     }
 
@@ -124,6 +153,76 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @Published var privacyModeEnabled: Bool {
+        didSet {
+            persistSettings()
+        }
+    }
+
+    @Published var gptAPIKey: String {
+        didSet {
+            persistSettings()
+        }
+    }
+
+    @Published var gptAPIBaseURL: String {
+        didSet {
+            persistSettings()
+        }
+    }
+
+    @Published var gptModel: String {
+        didSet {
+            persistSettings()
+        }
+    }
+
+    @Published var gptSkills: String {
+        didSet {
+            persistSettings()
+        }
+    }
+
+    @Published var autoDetectConversationLanguages: Bool {
+        didSet {
+            persistSettings()
+        }
+    }
+
+    @Published var sourceOutputLanguageOverrides: [String: String] {
+        didSet {
+            persistSettings()
+        }
+    }
+
+    @Published var hotKeyFollowUp: HotKeyBinding {
+        didSet {
+            persistSettings()
+        }
+    }
+
+    @Published var hotKeyAsk: HotKeyBinding {
+        didSet {
+            persistSettings()
+        }
+    }
+
+    @Published var hotKeySwitchMode: HotKeyBinding {
+        didSet {
+            persistSettings()
+        }
+    }
+
+    @Published private(set) var gptRequestState: GPTRequestState = .idle
+    @Published private(set) var gptModelFetchState: GPTModelFetchState = .idle
+    @Published private(set) var gptAPITestState: GPTAPITestState = .idle
+    @Published var overlayViewMode: OverlayViewMode = .subtitles
+    @Published private(set) var gptReplyHistory: [GPTHistoryEntry] = []
+    @Published private(set) var gptReplyScrollOffset: Int = 0
+    @Published private(set) var gptReplyVisibleCount: Int = 0
+    @Published private(set) var gptLastReplyUsedScreenshot: Bool = true
+    @Published private(set) var gptScreenContextStatus: GPTScreenContextStatus = .unknown
+
     init(
         settingsStore: SettingsStore,
         sourceCatalogService: SourceCatalogService
@@ -132,7 +231,16 @@ final class AppModel: ObservableObject {
         self.sourceCatalogService = sourceCatalogService
 
         let settings = settingsStore.load()
+        var initialSelectedSourceIDs = Set(settings.selectedSourceIDs)
+        if initialSelectedSourceIDs.isEmpty, let selectedSourceID = settings.selectedSourceID {
+            initialSelectedSourceIDs = [selectedSourceID]
+        }
         self.selectedSourceID = settings.selectedSourceID
+        self.selectedSourceIDs = initialSelectedSourceIDs
+        self.sourceLanguageOverrides = settings.sourceLanguageOverrides.mapValues {
+            LanguageCatalog.supportedSpeechInputLanguageID(for: $0)
+        }
+        self.sourceOutputLanguageOverrides = settings.sourceOutputLanguageOverrides
         self.inputLanguageID = LanguageCatalog.supportedSpeechInputLanguageID(for: settings.inputLanguageID)
         self.outputLanguageID = settings.outputLanguageID
         self.usesSystemInterfaceLanguage = settings.interfaceLanguageID == nil
@@ -144,6 +252,15 @@ final class AppModel: ObservableObject {
         self.subtitleMode = settings.subtitleMode
         self.subtitleDisplayMode = settings.subtitleDisplayMode
         self.glossary = settings.glossary
+        self.privacyModeEnabled = settings.privacyModeEnabled
+        self.gptAPIKey = settings.gptAPIKey
+        self.gptAPIBaseURL = settings.gptAPIBaseURL
+        self.gptModel = settings.gptModel
+        self.gptSkills = settings.gptSkills
+        self.autoDetectConversationLanguages = settings.autoDetectConversationLanguages
+        self.hotKeyFollowUp = settings.hotKeyFollowUp
+        self.hotKeyAsk = settings.hotKeyAsk
+        self.hotKeySwitchMode = settings.hotKeySwitchMode
         self.translationHostConfiguration = nil
         AppLocalization.updateEmbeddedBundleLocalizationLanguageID(self.interfaceLanguageID)
 
@@ -172,6 +289,55 @@ final class AppModel: ObservableObject {
 
     var selectedSource: InputSource? {
         allSources.first(where: { $0.id == selectedSourceID })
+    }
+
+    var selectedSources: [InputSource] {
+        let selectedIDs = selectedSourceIDs
+        guard selectedIDs.isEmpty == false else {
+            return selectedSource.map { [$0] } ?? []
+        }
+
+        return allSources.filter { selectedIDs.contains($0.id) }
+    }
+
+    var selectedSourceDisplayName: String {
+        let names = selectedSources.map(\.name)
+        switch names.count {
+        case 0:
+            return localized(.selectedSource)
+        case 1:
+            return names[0]
+        default:
+            return localized(.multipleSourcesFormat, names.count)
+        }
+    }
+
+    func languageID(for source: InputSource) -> String {
+        sourceLanguageOverrides[source.id] ?? inputLanguageID
+    }
+
+    func setLanguageID(_ languageID: String, for source: InputSource) {
+        var overrides = sourceLanguageOverrides
+        if languageID == inputLanguageID {
+            overrides.removeValue(forKey: source.id)
+        } else {
+            overrides[source.id] = languageID
+        }
+        sourceLanguageOverrides = overrides
+    }
+
+    func outputLanguageIDForSource(_ source: InputSource) -> String {
+        sourceOutputLanguageOverrides[source.id] ?? outputLanguageID
+    }
+
+    func setOutputLanguageID(_ languageID: String, for source: InputSource) {
+        var overrides = sourceOutputLanguageOverrides
+        if languageID == outputLanguageID {
+            overrides.removeValue(forKey: source.id)
+        } else {
+            overrides[source.id] = languageID
+        }
+        sourceOutputLanguageOverrides = overrides
     }
 
     var sessionButtonTitle: String {
@@ -203,7 +369,7 @@ final class AppModel: ObservableObject {
             return false
         }
 
-        return selectedSource == nil
+        return selectedSources.isEmpty
             || isPreparingSelectedLanguageResources
             || hasBlockingLanguageResourceStatuses
     }
@@ -352,20 +518,29 @@ final class AppModel: ObservableObject {
         }
 
         let availableSources = snapshot.applications + snapshot.microphones
+        let availableSourceIDs = Set(availableSources.map(\.id))
+        let retainedSelectedSourceIDs = selectedSourceIDs.intersection(availableSourceIDs)
+        let retainedLanguageOverrides = sourceLanguageOverrides.filter { availableSourceIDs.contains($0.key) }
 
-        if let selectedSourceID, availableSources.contains(where: { $0.id == selectedSourceID }) == false {
-            self.selectedSourceID = availableSources.first?.id
-        } else if selectedSourceID == nil {
-            selectedSourceID = availableSources.first?.id
+        if retainedSelectedSourceIDs != selectedSourceIDs {
+            selectedSourceIDs = retainedSelectedSourceIDs
+        }
+        if retainedLanguageOverrides != sourceLanguageOverrides {
+            sourceLanguageOverrides = retainedLanguageOverrides
         }
 
-        let selectedSourceName = availableSources
-            .first(where: { $0.id == selectedSourceID })?
-            .name
-            ?? localized(.selectedSource)
+        if selectedSourceIDs.isEmpty, let firstID = availableSources.first?.id {
+            selectedSourceIDs = [firstID]
+        }
+
+        if let selectedSourceID, availableSourceIDs.contains(selectedSourceID) == false {
+            self.selectedSourceID = selectedSourceIDs.sorted().first ?? availableSources.first?.id
+        } else if selectedSourceID == nil {
+            selectedSourceID = selectedSourceIDs.sorted().first ?? availableSources.first?.id
+        }
 
         if sessionState == .running {
-            setStatus(.running(sourceName: selectedSourceName))
+            setStatus(.running(sourceName: selectedSourceDisplayName))
         } else {
             setStatus(availableSources.isEmpty ? .noInputSourcesDetected : .ready)
         }
@@ -384,11 +559,13 @@ final class AppModel: ObservableObject {
     func startSession() async {
         refreshSources()
 
-        guard let selectedSource else {
+        let selectedSources = self.selectedSources
+        guard selectedSources.isEmpty == false else {
             sessionState = .error
             setStatus(.chooseInputSourceBeforeStarting)
             return
         }
+        let selectedSourceName = selectedSourceDisplayName
 
         resetLiveTextPipeline()
         setStatus(.checkingLanguageResources)
@@ -401,56 +578,76 @@ final class AppModel: ObservableObject {
         let previousTranscriptEntries = transcriptEntries
         let previousTranscriptInputLanguageID = transcriptInputLanguageID
         let previousTranscriptOutputLanguageID = transcriptOutputLanguageID
+        let selectedLanguageIDs = Set(selectedSources.map { languageID(for: $0) })
         resetTranscript(
-            sourceLanguageID: inputLanguageID,
+            sourceLanguageID: selectedLanguageIDs.count == 1 ? (selectedLanguageIDs.first ?? inputLanguageID) : "multiple",
             targetLanguageID: outputLanguageID
         )
 
-        activeInputLanguageID = inputLanguageID
+        activeInputLanguageID = selectedLanguageIDs.count == 1 ? selectedLanguageIDs.first : nil
         isOverlayVisible = true
         overlayState = OverlayPreviewState(
             translatedText: listeningPlaceholderText,
-            sourceText: localized(.waitingForAudioFromFormat, selectedSource.name),
-            sourceName: selectedSource.name
+            sourceText: localized(.waitingForAudioFromFormat, selectedSourceName),
+            sourceName: selectedSourceName
         )
         overlayHistoryScrollOffset = 0
-        setStatus(.preparing(sourceName: selectedSource.name))
+        gptReplyHistory = []
+        gptReplyScrollOffset = 0
+        overlayViewMode = .subtitles
+        gptScreenContextStatus = .unknown
+        gptLastReplyUsedScreenshot = true
+        setStatus(.preparing(sourceName: selectedSourceName))
 
-        let session = LiveTranscriptionSession()
-        liveTranscriptionSession = session
         let config = ModeConfig.config(for: subtitleMode)
-        let speechLocaleIdentifier = LanguageCatalog.speechLocaleIdentifier(for: inputLanguageID)
         let recognitionHints = recognitionContextualStrings()
+        let groupedSources = Dictionary(grouping: selectedSources) { languageID(for: $0) }
+        var startedSessions: [LiveTranscriptionSession] = []
 
         do {
-            try await session.start(
-                source: selectedSource,
-                localeIdentifier: speechLocaleIdentifier,
-                interfaceLanguageID: resolvedInterfaceLanguageID,
-                modeConfig: config,
-                contextualStrings: recognitionHints,
-                transcriptHandler: { [weak self] sentence in
-                    self?.enqueueRecognizedSentence(sentence, sourceName: selectedSource.name)
-                },
-                partialHandler: { [weak self] draft in
-                    self?.handlePartialDraft(draft)
-                },
-                errorHandler: { [weak self] message in
-                    self?.sessionState = .error
-                    self?.setStatus(.custom(message))
-                    self?.overlayState = OverlayPreviewState(
-                        translatedText: self?.captureStoppedText ?? "",
-                        sourceText: message,
-                        sourceName: selectedSource.name
-                    )
-                }
-            )
+            for (languageID, sources) in groupedSources {
+                let session = LiveTranscriptionSession()
+                let sourceNames = "\(sources.map(\.name).joined(separator: ", ")) · \(languageName(for: languageID))"
+                let speechLocaleIdentifier = LanguageCatalog.speechLocaleIdentifier(for: languageID)
+                try await session.start(
+                    sources: sources,
+                    localeIdentifier: speechLocaleIdentifier,
+                    interfaceLanguageID: resolvedInterfaceLanguageID,
+                    modeConfig: config,
+                    contextualStrings: recognitionHints,
+                    transcriptHandler: { [weak self] sentence in
+                        self?.enqueueRecognizedSentence(
+                            sentence,
+                            sourceName: sourceNames,
+                            sourceLanguageID: languageID
+                        )
+                    },
+                    partialHandler: { [weak self] draft in
+                        self?.handlePartialDraft(draft, sourceLanguageID: languageID, sourceName: sourceNames)
+                    },
+                    errorHandler: { [weak self] message in
+                        self?.sessionState = .error
+                        self?.setStatus(.custom(message))
+                        self?.overlayState = OverlayPreviewState(
+                            translatedText: self?.captureStoppedText ?? "",
+                            sourceText: message,
+                            sourceName: sourceNames
+                        )
+                    }
+                )
+                startedSessions.append(session)
+            }
+            liveTranscriptionSessions = startedSessions
+            liveTranscriptionSession = startedSessions.first
 
             sessionState = .running
-            setStatus(.running(sourceName: selectedSource.name))
+            setStatus(.running(sourceName: selectedSourceName))
         } catch {
+            for session in startedSessions {
+                session.stop()
+            }
             resetLiveTextPipeline()
-            liveTranscriptionSession = nil
+            stopLiveTranscriptionSessions()
             restoreTranscript(
                 entries: previousTranscriptEntries,
                 sourceLanguageID: previousTranscriptInputLanguageID,
@@ -462,7 +659,7 @@ final class AppModel: ObservableObject {
             overlayState = OverlayPreviewState(
                 translatedText: unableToStartText,
                 sourceText: localizedError,
-                sourceName: selectedSource.name
+                sourceName: selectedSourceName
             )
             overlayHistoryScrollOffset = 0
         }
@@ -470,12 +667,23 @@ final class AppModel: ObservableObject {
 
     func stopSession() {
         resetLiveTextPipeline()
-        liveTranscriptionSession?.stop()
-        liveTranscriptionSession = nil
+        stopLiveTranscriptionSessions()
         sessionState = .idle
         setStatus(allSources.isEmpty ? .noInputSourcesDetected : .ready)
         isOverlayVisible = false
         overlayState = nil
+    }
+
+    private func stopLiveTranscriptionSessions() {
+        for session in liveTranscriptionSessions {
+            session.stop()
+        }
+        let stoppedGroupedSessions = liveTranscriptionSessions.isEmpty == false
+        liveTranscriptionSessions.removeAll()
+        if stoppedGroupedSessions == false, let liveTranscriptionSession {
+            liveTranscriptionSession.stop()
+        }
+        liveTranscriptionSession = nil
     }
 
     func showOverlayPreview() {
@@ -531,13 +739,25 @@ final class AppModel: ObservableObject {
 
         let settings = AppSettings(
             selectedSourceID: selectedSourceID,
+            selectedSourceIDs: selectedSourceIDs.sorted(),
+            sourceLanguageOverrides: sourceLanguageOverrides,
+            sourceOutputLanguageOverrides: sourceOutputLanguageOverrides,
             inputLanguageID: inputLanguageID,
             outputLanguageID: outputLanguageID,
             interfaceLanguageID: usesSystemInterfaceLanguage ? nil : interfaceLanguageID,
             overlayStyle: overlayStyle,
             subtitleMode: subtitleMode,
             subtitleDisplayMode: subtitleDisplayMode,
-            glossary: glossary
+            glossary: glossary,
+            privacyModeEnabled: privacyModeEnabled,
+            gptAPIKey: gptAPIKey,
+            gptAPIBaseURL: gptAPIBaseURL,
+            gptModel: gptModel,
+            gptSkills: gptSkills,
+            autoDetectConversationLanguages: autoDetectConversationLanguages,
+            hotKeyFollowUp: hotKeyFollowUp,
+            hotKeyAsk: hotKeyAsk,
+            hotKeySwitchMode: hotKeySwitchMode
         )
 
         settingsStore.save(settings)
@@ -559,6 +779,244 @@ final class AppModel: ObservableObject {
                 }
                 return lhs.count < rhs.count
             }
+    }
+
+    func fetchGPTModels() {
+        guard case .fetching = gptModelFetchState else {
+            gptModelFetchState = .fetching
+            let client = OpenAIResponsesClient(apiKey: gptAPIKey, baseURLString: gptAPIBaseURL, model: gptModel)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    let models = try await client.fetchAvailableModels()
+                    self.gptModelFetchState = .fetched(models)
+                } catch {
+                    self.gptModelFetchState = .failed(error.localizedDescription)
+                }
+            }
+            return
+        }
+    }
+
+    func testGPTAPI() {
+        guard case .testing = gptAPITestState else {
+            gptAPITestState = .testing
+            let client = OpenAIResponsesClient(apiKey: gptAPIKey, baseURLString: gptAPIBaseURL, model: gptModel)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    let response = try await client.testConnection()
+                    let preview = String(response.prefix(80))
+                    self.gptAPITestState = .passed(preview)
+                } catch {
+                    self.gptAPITestState = .failed(error.localizedDescription)
+                }
+            }
+            return
+        }
+    }
+
+    func requestGPTFollowUp() {
+        requestGPT(action: .followUp)
+    }
+
+    func requestGPTAsk() {
+        requestGPT(action: .ask)
+    }
+
+    private func requestGPT(action: GPTConversationAction) {
+        guard gptRequestState.isRunning == false else {
+            return
+        }
+
+        let trimmedKey = gptAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedKey.isEmpty == false else {
+            let message = localized(.gptAPIKeyMissing)
+            gptRequestState = .failed(message)
+            showGPTOverlay(title: localized(action.titleKey), message: message)
+            return
+        }
+
+        let sourceName = selectedSourceDisplayName
+        let instructions = makeGPTInstructions(action: action)
+        let client = OpenAIResponsesClient(
+            apiKey: trimmedKey,
+            baseURLString: gptAPIBaseURL,
+            model: gptModel
+        )
+
+        gptRequestState = .running(action)
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Capture screenshot before switching overlay to GPT mode so the model
+            // sees the actual screen content, not the v2s thinking indicator.
+            let captureResult = await ScreenCaptureService.captureCurrentDisplayPNGResult()
+            let screenshot: Data?
+            let captureStatus: GPTScreenContextStatus
+            switch captureResult {
+            case .captured(let data):
+                screenshot = data
+                captureStatus = .screenshotReady
+            case .permissionNeeded:
+                screenshot = nil
+                captureStatus = .screenRecordingPermissionNeeded
+            case .failed:
+                screenshot = nil
+                captureStatus = .screenshotCaptureFailed
+            }
+            let ocrText: String? = if let data = screenshot { await OCRService.recognizeText(from: data) } else { nil }
+            let prompt = self.makeGPTPrompt(
+                action: action,
+                sourceName: sourceName,
+                hasScreenshot: screenshot != nil,
+                ocrText: ocrText
+            )
+            self.gptScreenContextStatus = captureStatus
+            self.gptLastReplyUsedScreenshot = screenshot != nil
+            self.showGPTOverlay(title: self.localized(action.titleKey), message: self.localized(.gptThinking))
+            do {
+                let (response, imageStatus) = try await client.respond(
+                    instructions: instructions,
+                    prompt: prompt,
+                    screenshotPNGData: screenshot
+                )
+                guard Task.isCancelled == false else { return }
+                self.gptScreenContextStatus = Self.resolvedScreenContextStatus(
+                    captureStatus: captureStatus,
+                    imageStatus: imageStatus
+                )
+                self.gptLastReplyUsedScreenshot = imageStatus == .sent
+                self.gptRequestState = .idle
+                self.showGPTOverlay(title: self.localized(action.titleKey), message: response)
+            } catch {
+                guard Task.isCancelled == false else { return }
+                let message = self.localized(.gptRequestFailedFormat, error.localizedDescription)
+                self.gptRequestState = .failed(message)
+                self.showGPTOverlay(title: self.localized(action.titleKey), message: message)
+            }
+        }
+    }
+
+    private func makeGPTInstructions(action: GPTConversationAction) -> String {
+        var instructions = """
+        You are an on-screen conversation assistant for v2s. Use the transcript, timing, original conversation name, and screenshot together. Be concise, practical, and answer in the language that best matches the current conversation.
+        """
+
+        if autoDetectConversationLanguages {
+            instructions += "\nAutomatically detect whether the conversation is primarily \(languageName(for: inputLanguageID)) or \(languageName(for: outputLanguageID)); preserve names and technical terms."
+        }
+
+        let skills = gptSkills.trimmingCharacters(in: .whitespacesAndNewlines)
+        if skills.isEmpty == false {
+            instructions += "\nUser skills/instructions:\n\(skills)"
+        }
+
+        switch action {
+        case .followUp:
+            instructions += "\nFor Follow Up, infer the next useful response, continuation, or action from context."
+        case .ask:
+            instructions += "\nFor Ask, answer the user's likely question from the visible screen and transcript. If intent is ambiguous, state the best interpretation first."
+        }
+
+        return instructions
+    }
+
+    private func makeGPTPrompt(
+        action: GPTConversationAction,
+        sourceName: String,
+        hasScreenshot: Bool,
+        ocrText: String?
+    ) -> String {
+        let formatter = ISO8601DateFormatter()
+        let transcriptLines = transcriptEntries.map { entry in
+            let source = entry.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let translation = entry.translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            return """
+            - time: \(formatter.string(from: entry.timestamp))
+              original: \(source.isEmpty ? "-" : source)
+              translation: \(translation.isEmpty ? "-" : translation)
+            """
+        }
+        .joined(separator: "\n")
+
+        var prompt = """
+        Action: \(localized(action.titleKey))
+        Original conversation name: \(sourceName)
+        Current time: \(formatter.string(from: Date()))
+        Input language setting: \(languageName(for: inputLanguageID)) (\(inputLanguageID))
+        Subtitle language setting: \(languageName(for: outputLanguageID)) (\(outputLanguageID))
+
+        Previous conversation content:
+        \(transcriptLines.isEmpty ? "(No transcript yet.)" : transcriptLines)
+
+        \(hasScreenshot ? "The attached image is the current screen screenshot." : "No screenshot image is attached. Use the transcript and OCR text if available.")
+        """
+
+        if let ocrText {
+            prompt += """
+
+
+        Screen text (OCR):
+        \(ocrText)
+        """
+        }
+
+        return prompt
+    }
+
+    private static func resolvedScreenContextStatus(
+        captureStatus: GPTScreenContextStatus,
+        imageStatus: OpenAIResponsesClient.ImageInputStatus
+    ) -> GPTScreenContextStatus {
+        switch imageStatus {
+        case .sent:
+            return .screenshotSent
+        case .rejectedByProvider:
+            return .apiRejectedImage
+        case .notProvided:
+            return captureStatus
+        }
+    }
+
+    private func showGPTOverlay(title: String, message: String) {
+        let entry = GPTHistoryEntry(id: UUID(), title: title, message: message)
+        // Replace the last entry if it's a pending "thinking" placeholder for the same action
+        if let last = gptReplyHistory.last,
+           last.title == title,
+           last.message == localized(.gptThinking) {
+            gptReplyHistory[gptReplyHistory.count - 1] = entry
+        } else {
+            gptReplyHistory.append(entry)
+        }
+        gptReplyScrollOffset = 0
+        overlayViewMode = .gptReplies
+        isOverlayVisible = true
+        if overlayState == nil {
+            overlayState = OverlayPreviewState(translatedText: "", sourceText: "", sourceName: "")
+        }
+    }
+
+    func toggleOverlayViewMode() {
+        overlayViewMode = overlayViewMode == .subtitles ? .gptReplies : .subtitles
+    }
+
+    func scrollGPTReplyHistory(by delta: Int) {
+        guard delta != 0 else { return }
+        setGPTReplyScrollOffset(gptReplyScrollOffset + delta)
+    }
+
+    func setGPTReplyScrollOffset(_ offset: Int) {
+        let maxOffset = max(0, gptReplyHistory.count - 1)
+        let clamped = min(max(offset, 0), maxOffset)
+        guard gptReplyScrollOffset != clamped else { return }
+        gptReplyScrollOffset = clamped
+    }
+
+    func updateGPTReplyVisibleCount(_ count: Int) {
+        let clamped = max(0, count)
+        guard gptReplyVisibleCount != clamped else { return }
+        gptReplyVisibleCount = clamped
     }
 
     func languageName(for identifier: String) -> String {
@@ -584,6 +1042,7 @@ final class AppModel: ObservableObject {
 
         let inputLanguageID = self.inputLanguageID
         let outputLanguageID = self.outputLanguageID
+        let speechLanguageIDs = selectedSpeechLanguageIDs()
 
         languageResourcePreparationTask?.cancel()
         languageResourceStatuses = []
@@ -596,6 +1055,7 @@ final class AppModel: ObservableObject {
             defer { self.languageResourcePreparationTask = nil }
 
             await self.prepareSelectedLanguageResources(
+                speechLanguageIDs: speechLanguageIDs,
                 inputLanguageID: inputLanguageID,
                 outputLanguageID: outputLanguageID,
                 openSystemSettingsIfNeeded: openSystemSettingsIfNeeded
@@ -629,28 +1089,31 @@ final class AppModel: ObservableObject {
     }
 
     private func prepareSelectedLanguageResources(
+        speechLanguageIDs: Set<String>,
         inputLanguageID: String,
         outputLanguageID: String,
         openSystemSettingsIfNeeded: Bool
     ) async {
         var destinationsToOpen = Set<LanguageResourceSystemSettingsDestination>()
         await withTaskGroup(of: LanguageResourceSystemSettingsDestination?.self) { group in
-            group.addTask { [weak self] in
-                guard let self else {
-                    return nil
-                }
+            for speechLanguageID in speechLanguageIDs {
+                group.addTask { [weak self] in
+                    guard let self else {
+                        return nil
+                    }
 
-                return await self.prepareSpeechRecognitionResourceIfNeeded(for: inputLanguageID)
+                    return await self.prepareSpeechRecognitionResourceIfNeeded(for: speechLanguageID)
+                }
             }
 
-            if inputLanguageID != outputLanguageID {
+            for sourceLanguageID in speechLanguageIDs where sourceLanguageID != outputLanguageID {
                 group.addTask { [weak self] in
                     guard let self else {
                         return nil
                     }
 
                     return await self.prepareTranslationResourceIfNeeded(
-                        from: inputLanguageID,
+                        from: sourceLanguageID,
                         to: outputLanguageID
                     )
                 }
@@ -672,6 +1135,11 @@ final class AppModel: ObservableObject {
         } else if let destination = destinationsToOpen.first {
             openSystemSettings(for: destination)
         }
+    }
+
+    private func selectedSpeechLanguageIDs() -> Set<String> {
+        let selectedIDs = Set(selectedSources.map { languageID(for: $0) })
+        return selectedIDs.isEmpty ? [inputLanguageID] : selectedIDs
     }
 
     private func prepareSpeechRecognitionResourceIfNeeded(
@@ -1127,11 +1595,12 @@ final class AppModel: ObservableObject {
 
     // MARK: - Draft handler
 
-    private func handlePartialDraft(_ draft: DraftSegment?) {
+    private func handlePartialDraft(_ draft: DraftSegment?, sourceLanguageID: String, sourceName: String) {
         guard liveTranscriptionSession != nil else { return }
         if let draft, isFinalizedDraftPromotionID(draft.segmentId) {
             return
         }
+        activeInputLanguageID = sourceLanguageID
 
         let draftText = sanitizedDisplayText(draft?.sourceText ?? "")
         let draftPromotionID = draft?.segmentId
@@ -1145,6 +1614,7 @@ final class AppModel: ObservableObject {
 
         cancelCommittedCaptionArchive()
         cancelPendingDraftClear()
+        overlayState?.sourceName = sourceName
         overlayState?.draftSourceText = draftText
         overlayState?.draftStablePrefixLength = min(draft?.stablePrefixLength ?? 0, draftText.count)
         overlayState?.draftPromotionID = draftPromotionID
@@ -1414,11 +1884,12 @@ final class AppModel: ObservableObject {
 
     // MARK: - Caption queue
 
-    private func enqueueRecognizedSentence(_ sentence: RecognizedSentence, sourceName: String) {
+    private func enqueueRecognizedSentence(_ sentence: RecognizedSentence, sourceName: String, sourceLanguageID: String) {
         let sourceText = sanitizedDisplayText(sentence.text)
         guard sourceText.isEmpty == false else {
             return
         }
+        activeInputLanguageID = sourceLanguageID
 
         if let promotionID = sentence.promotionSegmentID {
             guard isFinalizedDraftPromotionID(promotionID) == false else {
@@ -1438,6 +1909,7 @@ final class AppModel: ObservableObject {
                 promotionID: promotionID,
                 sourceText: sourceText,
                 sourceName: sourceName,
+                sourceLanguageID: sourceLanguageID,
                 promotedDraftTranslation: promotedDraftTranslation
             )
 
@@ -1456,6 +1928,7 @@ final class AppModel: ObservableObject {
                 promotionID: UUID(),
                 sourceText: sourceText,
                 sourceName: sourceName,
+                sourceLanguageID: sourceLanguageID,
                 promotedDraftTranslation: nil
             )
 
@@ -1511,7 +1984,7 @@ final class AppModel: ObservableObject {
                     return
                 }
 
-                let translationExpected = currentSourceLanguageID != outputLanguageID
+                let translationExpected = displayedCaption.sourceLanguageID != outputLanguageID
                 let resolvedTranslation = translationExpected
                     ? (translatedText ?? "")
                     : displayedCaption.sourceText
@@ -1654,10 +2127,11 @@ final class AppModel: ObservableObject {
             let earlyTranslation = readyCaptionTranslations[caption.id]
             let initialTranslation = earlyTranslation
                 ?? (caption.promotedDraftTranslation?.isEmpty == false ? caption.promotedDraftTranslation : nil)
-            let translationExpected = currentSourceLanguageID != outputLanguageID
+            let translationExpected = caption.sourceLanguageID != outputLanguageID
 
             cancelCommittedCaptionArchive()
             displayedCaption = caption
+            activeInputLanguageID = caption.sourceLanguageID
 
             // If a draft translation was visible, skip the fade-in so the committed
             // text replaces the draft seamlessly instead of flashing.
@@ -1716,7 +2190,7 @@ final class AppModel: ObservableObject {
             // This is safe because no translation is in-flight at this point.
             if translationCoordinator.consecutiveTimeouts >= 2 {
                 translationCoordinator.recoverSession(
-                    source: currentSourceLanguageID,
+                    source: caption.sourceLanguageID,
                     target: outputLanguageID
                 )
             }
@@ -2144,7 +2618,7 @@ final class AppModel: ObservableObject {
     }
 
     private func translatedText(for caption: QueuedCaption) async -> String? {
-        let sourceLanguageID = currentSourceLanguageID
+        let sourceLanguageID = caption.sourceLanguageID
         let targetLanguageID = outputLanguageID
 
         guard sourceLanguageID != targetLanguageID else {
@@ -2280,8 +2754,10 @@ final class AppModel: ObservableObject {
         sourceText: String,
         translatedText: String
     ) {
+        let timestamp = transcriptEntries.first(where: { $0.id == id })?.timestamp ?? Date()
         let entry = TranscriptEntry(
             id: id,
+            timestamp: timestamp,
             sourceText: sourceText,
             translatedText: translatedText
         )
@@ -2559,6 +3035,110 @@ private enum StatusDescriptor: Equatable {
     case custom(String)
 }
 
+enum OverlayViewMode: Equatable {
+    case subtitles
+    case gptReplies
+}
+
+enum GPTScreenContextStatus: Equatable {
+    case unknown
+    case screenshotReady
+    case screenshotSent
+    case screenRecordingPermissionNeeded
+    case screenshotCaptureFailed
+    case apiRejectedImage
+
+    var isWarning: Bool {
+        switch self {
+        case .screenRecordingPermissionNeeded, .screenshotCaptureFailed, .apiRejectedImage:
+            return true
+        case .unknown, .screenshotReady, .screenshotSent:
+            return false
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .screenRecordingPermissionNeeded:
+            return "无法读取屏幕截图"
+        case .screenshotCaptureFailed:
+            return "截图捕获失败"
+        case .apiRejectedImage:
+            return "API 不支持图像"
+        case .unknown:
+            return "屏幕上下文未知"
+        case .screenshotReady:
+            return "截图已获取"
+        case .screenshotSent:
+            return "截图已发送"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .screenRecordingPermissionNeeded:
+            return "macOS 屏幕录制权限未授权。已请求权限；授权后再次提问即可发送截图。"
+        case .screenshotCaptureFailed:
+            return "ScreenCaptureKit 没有返回图像。GPT 只会收到字幕、历史对话和可用 OCR 文本。"
+        case .apiRejectedImage:
+            return "当前模型或 API endpoint 拒绝图像输入。已自动降级，继续发送文字和 OCR 内容。"
+        case .unknown:
+            return "尚未完成本次屏幕上下文检测。"
+        case .screenshotReady:
+            return "截图已获取，等待 API 响应。"
+        case .screenshotSent:
+            return "本次回复使用了当前屏幕截图。"
+        }
+    }
+}
+
+struct GPTHistoryEntry: Identifiable, Equatable {
+    let id: UUID
+    let title: String
+    let message: String
+}
+
+enum GPTConversationAction: Equatable {
+    case followUp
+    case ask
+
+    var titleKey: AppTextKey {
+        switch self {
+        case .followUp:
+            return .followUp
+        case .ask:
+            return .askGPT
+        }
+    }
+}
+
+enum GPTRequestState: Equatable {
+    case idle
+    case running(GPTConversationAction)
+    case failed(String)
+
+    var isRunning: Bool {
+        if case .running = self {
+            return true
+        }
+        return false
+    }
+}
+
+enum GPTModelFetchState: Equatable {
+    case idle
+    case fetching
+    case fetched([String])
+    case failed(String)
+}
+
+enum GPTAPITestState: Equatable {
+    case idle
+    case testing
+    case passed(String)
+    case failed(String)
+}
+
 private extension AppModel {
     static let overlayHistoryLimit = 120
     static let draftClearDelayNanoseconds: UInt64 = 150_000_000
@@ -2592,11 +3172,13 @@ private struct QueuedCaption: Identifiable, Equatable {
     let promotionID: UUID
     let sourceText: String
     let sourceName: String
+    let sourceLanguageID: String
     let promotedDraftTranslation: String?
 }
 
 struct TranscriptEntry: Identifiable, Equatable {
     let id: UUID
+    var timestamp: Date = Date()
     var sourceText: String
     var translatedText: String
 }

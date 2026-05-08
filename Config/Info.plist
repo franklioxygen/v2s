@@ -32,5 +32,7 @@
 	<string>v2s uses the microphone to generate subtitles from live speech.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>v2s uses speech recognition to transcribe audio into subtitles.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>v2s captures the current screen only when you ask GPT to use the visible context.</string>
 </dict>
 </plist>

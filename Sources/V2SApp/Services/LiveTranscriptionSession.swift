@@ -163,8 +163,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var latestModernText = ""
     private var modernCommittedPrefixText = ""
 
-    private var microphoneCaptureSession: AVCaptureSession?
-    private var applicationAudioCapture: ApplicationAudioCapture?
+    private var microphoneCaptureSessions: [AVCaptureSession] = []
+    private var applicationAudioCaptures: [ApplicationAudioCapture] = []
 
     private var transcriptHandler: (@MainActor (RecognizedSentence) -> Void)?
     private var partialHandler: (@MainActor (DraftSegment?) -> Void)?
@@ -233,6 +233,32 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         partialHandler: @escaping @MainActor (DraftSegment?) -> Void,
         errorHandler: @escaping @MainActor (String) -> Void
     ) async throws {
+        try await start(
+            sources: [source],
+            localeIdentifier: localeIdentifier,
+            interfaceLanguageID: interfaceLanguageID,
+            modeConfig: modeConfig,
+            contextualStrings: contextualStrings,
+            transcriptHandler: transcriptHandler,
+            partialHandler: partialHandler,
+            errorHandler: errorHandler
+        )
+    }
+
+    func start(
+        sources: [InputSource],
+        localeIdentifier: String,
+        interfaceLanguageID: String,
+        modeConfig: ModeConfig = .balanced,
+        contextualStrings: [String] = [],
+        transcriptHandler: @escaping @MainActor (RecognizedSentence) -> Void,
+        partialHandler: @escaping @MainActor (DraftSegment?) -> Void,
+        errorHandler: @escaping @MainActor (String) -> Void
+    ) async throws {
+        guard sources.isEmpty == false else {
+            throw SessionError.missingMicrophoneDevice
+        }
+
         self.transcriptHandler = transcriptHandler
         self.partialHandler = partialHandler
         self.modeConfig = modeConfig
@@ -244,25 +270,35 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             recentCommittedSentenceHistory.removeAll()
         }
 
-        try await requestRequiredPermissions(for: source)
+        for source in sources {
+            try await requestRequiredPermissions(for: source)
+        }
+
         if try await configureModernSpeechRecognizer(localeIdentifier: localeIdentifier) == false {
             try await runOnCaptureQueue {
                 try self.configureSpeechRecognizer(localeIdentifier: localeIdentifier)
             }
         }
 
-        switch source.category {
-        case .microphone:
-            try await runOnCaptureQueue {
-                try self.startMicrophoneCapture(deviceUniqueID: source.detail)
+        do {
+            for source in sources {
+                switch source.category {
+                case .microphone:
+                    try await runOnCaptureQueue {
+                        try self.startMicrophoneCapture(deviceUniqueID: source.detail)
+                    }
+                case .application:
+                    let captureDescriptor = try await MainActor.run {
+                        try self.makeApplicationCaptureDescriptor(for: source)
+                    }
+                    try await runOnCaptureQueue {
+                        try self.startApplicationAudioCapture(descriptor: captureDescriptor)
+                    }
+                }
             }
-        case .application:
-            let captureDescriptor = try await MainActor.run {
-                try self.makeApplicationCaptureDescriptor(for: source)
-            }
-            try await runOnCaptureQueue {
-                try self.startApplicationAudioCapture(descriptor: captureDescriptor)
-            }
+        } catch {
+            stop()
+            throw error
         }
     }
 
@@ -276,11 +312,15 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         cancelSilenceTimer()
         cancelVADSilenceTimer()
 
-        microphoneCaptureSession?.stopRunning()
-        microphoneCaptureSession = nil
+        for session in microphoneCaptureSessions {
+            session.stopRunning()
+        }
+        microphoneCaptureSessions.removeAll()
 
-        applicationAudioCapture?.stop()
-        applicationAudioCapture = nil
+        for capture in applicationAudioCaptures {
+            capture.stop()
+        }
+        applicationAudioCaptures.removeAll()
 
         stopModernSpeechRecognizer()
         recognitionRequest?.endAudio()
@@ -635,7 +675,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         session.addOutput(output)
         session.commitConfiguration()
 
-        microphoneCaptureSession = session
+        microphoneCaptureSessions.append(session)
         session.startRunning()
     }
 
@@ -666,7 +706,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         do {
             try capture.start()
-            applicationAudioCapture = capture
+            applicationAudioCaptures.append(capture)
         } catch let error as ApplicationAudioCapture.CaptureError {
             throw mapApplicationCaptureError(error)
         } catch {

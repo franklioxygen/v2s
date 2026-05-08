@@ -36,6 +36,10 @@
 		A00000000000000000000066 /* EntityCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000045 /* EntityCache.swift */; };
 		A00000000000000000000067 /* GlossaryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000046 /* GlossaryService.swift */; };
 		A00000000000000000000068 /* SpeedMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000047 /* SpeedMonitor.swift */; };
+		A00000000000000000000092 /* GlobalHotKeyController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000096 /* GlobalHotKeyController.swift */; };
+		A00000000000000000000093 /* OCRService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000097 /* OCRService.swift */; };
+		A00000000000000000000094 /* OpenAIResponsesClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000098 /* OpenAIResponsesClient.swift */; };
+		A00000000000000000000095 /* ScreenCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000099 /* ScreenCaptureService.swift */; };
 		A00000000000000000000079 /* TranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000007A /* TranscriptView.swift */; };
 		A0000000000000000000007B /* SileroVADEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000007C /* SileroVADEngine.swift */; };
 		A0000000000000000000007D /* onnxruntime in Frameworks */ = {isa = PBXBuildFile; productRef = A0000000000000000000007F /* onnxruntime */; };
@@ -80,6 +84,10 @@
 		A00000000000000000000045 /* EntityCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntityCache.swift; sourceTree = "<group>"; };
 		A00000000000000000000046 /* GlossaryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlossaryService.swift; sourceTree = "<group>"; };
 		A00000000000000000000047 /* SpeedMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeedMonitor.swift; sourceTree = "<group>"; };
+		A00000000000000000000096 /* GlobalHotKeyController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalHotKeyController.swift; sourceTree = "<group>"; };
+		A00000000000000000000097 /* OCRService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OCRService.swift; sourceTree = "<group>"; };
+		A00000000000000000000098 /* OpenAIResponsesClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIResponsesClient.swift; sourceTree = "<group>"; };
+		A00000000000000000000099 /* ScreenCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenCaptureService.swift; sourceTree = "<group>"; };
 		A0000000000000000000007A /* TranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptView.swift; sourceTree = "<group>"; };
 		A0000000000000000000007C /* SileroVADEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SileroVADEngine.swift; sourceTree = "<group>"; };
 		A00000000000000000000081 /* silero_vad.onnx */ = {isa = PBXFileReference; lastKnownFileType = file; path = silero_vad.onnx; sourceTree = "<group>"; };
@@ -190,8 +198,12 @@
 			isa = PBXGroup;
 			children = (
 				A00000000000000000000045 /* EntityCache.swift */,
+				A00000000000000000000096 /* GlobalHotKeyController.swift */,
 				A00000000000000000000046 /* GlossaryService.swift */,
 				A00000000000000000000041 /* LiveTranscriptionSession.swift */,
+				A00000000000000000000097 /* OCRService.swift */,
+				A00000000000000000000098 /* OpenAIResponsesClient.swift */,
+				A00000000000000000000099 /* ScreenCaptureService.swift */,
 				A00000000000000000000091 /* SentenceBoundaryHeuristics.swift */,
 				A00000000000000000000039 /* SettingsStore.swift */,
 				A0000000000000000000007C /* SileroVADEngine.swift */,
@@ -374,7 +386,11 @@
 				A00000000000000000000083 /* SubtitleDisplayMode.swift in Sources */,
 				A00000000000000000000065 /* SubtitleSegment.swift in Sources */,
 				A00000000000000000000066 /* EntityCache.swift in Sources */,
+				A00000000000000000000092 /* GlobalHotKeyController.swift in Sources */,
 				A00000000000000000000067 /* GlossaryService.swift in Sources */,
+				A00000000000000000000093 /* OCRService.swift in Sources */,
+				A00000000000000000000094 /* OpenAIResponsesClient.swift in Sources */,
+				A00000000000000000000095 /* ScreenCaptureService.swift in Sources */,
 				A00000000000000000000090 /* SentenceBoundaryHeuristics.swift in Sources */,
 				A00000000000000000000059 /* SettingsStore.swift in Sources */,
 				A0000000000000000000007B /* SileroVADEngine.swift in Sources */,

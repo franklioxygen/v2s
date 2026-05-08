@@ -15,6 +15,7 @@ struct StatusBarPopoverView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     sourceSection
                     languageSection
+                    gptSection
                     overlaySection
                 }
                 .padding(16)
@@ -85,17 +86,26 @@ struct StatusBarPopoverView: View {
         VStack(alignment: .leading, spacing: 8) {
             sectionHeader(model.localized(.inputSource), icon: "mic.fill")
             SettingsControlRow(label: model.localized(.sourceShort)) {
-                SourceMenuPicker(
+                SourceMultiSelectPicker(
                     sources: model.allSources,
                     interfaceLanguageID: model.resolvedInterfaceLanguageID,
                     emptyTitle: model.allSources.isEmpty ? model.localized(.noSources) : model.localized(.choose),
-                    selection: model.selectedSourceOptionalBinding
+                    selection: model.selectedSourcesBinding
                 )
             }
             SecondaryRefreshButton(
                 title: model.localized(.refreshSources),
                 action: model.refreshSources
             )
+            ForEach(model.selectedSources) { source in
+                SettingsControlRow(label: source.name) {
+                    CommonLanguageMenuPicker(
+                        interfaceLanguageID: model.resolvedInterfaceLanguageID,
+                        selection: sourceLanguageBinding(for: source)
+                    )
+                    .disabled(model.isLanguagePairLocked)
+                }
+            }
         }
     }
 
@@ -133,6 +143,39 @@ struct StatusBarPopoverView: View {
                 )
             }
             LanguageResourcesFooter(model: model)
+        }
+    }
+
+    // MARK: - GPT
+
+    private var gptSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader(model.localized(.gptAssistant), icon: "sparkles")
+            HStack(spacing: 8) {
+                Button {
+                    model.requestGPTFollowUp()
+                    closePopover()
+                } label: {
+                    Label(model.localized(.followUp), systemImage: "arrow.triangle.2.circlepath")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(model.gptRequestState.isRunning)
+                .help(model.localized(.followUpShortcutHelp))
+
+                Button {
+                    model.requestGPTAsk()
+                    closePopover()
+                } label: {
+                    Label(model.localized(.askGPT), systemImage: "questionmark.bubble")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(model.gptRequestState.isRunning)
+                .help(model.localized(.askShortcutHelp))
+            }
         }
     }
 
@@ -282,6 +325,13 @@ struct StatusBarPopoverView: View {
         Binding(
             get: { model.overlayStyle.sourceFontSize },
             set: { v in model.updateOverlayStyle { $0.sourceFontSize = v } }
+        )
+    }
+
+    private func sourceLanguageBinding(for source: InputSource) -> Binding<String> {
+        Binding(
+            get: { model.languageID(for: source) },
+            set: { model.setLanguageID($0, for: source) }
         )
     }
 }
