@@ -899,7 +899,10 @@ final class AppModel: ObservableObject {
     private func prepareSpeechRecognitionResourceIfNeeded(
         for languageID: String
     ) async -> LanguageResourceSystemSettingsDestination? {
-        guard #available(macOS 26.0, *) else {
+#if !SUPPORTS_SPEECH_TRANSCRIBER
+        return nil
+#else
+        guard #available(macOS 26.0, *), SpeechTranscriber.isAvailable else {
             return nil
         }
 
@@ -946,8 +949,10 @@ final class AppModel: ObservableObject {
         }
 
         return nil
+#endif
     }
 
+#if SUPPORTS_SPEECH_TRANSCRIBER
     @available(macOS 26.0, *)
     private func ensureSpeechAssetsReady(
         for modules: [any SpeechModule],
@@ -1065,6 +1070,7 @@ final class AppModel: ObservableObject {
 
         try await request.downloadAndInstall()
     }
+#endif
 
     private func prepareTranslationResourceIfNeeded(
         from sourceLanguageID: String,

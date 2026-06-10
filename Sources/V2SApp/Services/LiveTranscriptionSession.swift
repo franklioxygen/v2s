@@ -245,7 +245,17 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
 
         try await requestRequiredPermissions(for: source)
-        if try await configureModernSpeechRecognizer(localeIdentifier: localeIdentifier) == false {
+        var useLegacy = false
+#if SUPPORTS_SPEECH_TRANSCRIBER
+        if #available(macOS 26.0, *) {
+            useLegacy = try await configureModernSpeechRecognizer(localeIdentifier: localeIdentifier) == false
+        } else {
+            useLegacy = true
+        }
+#else
+        useLegacy = true
+#endif
+        if useLegacy {
             try await runOnCaptureQueue {
                 try self.configureSpeechRecognizer(localeIdentifier: localeIdentifier)
             }
@@ -384,8 +394,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
     }
 
+#if SUPPORTS_SPEECH_TRANSCRIBER
+    @available(macOS 26.0, *)
     private func configureModernSpeechRecognizer(localeIdentifier: String) async throws -> Bool {
-        guard #available(macOS 26.0, *), SpeechTranscriber.isAvailable else {
+        guard SpeechTranscriber.isAvailable else {
             return false
         }
 
@@ -497,6 +509,17 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             try await installer.downloadAndInstall()
         }
     }
+#else
+    private func configureModernSpeechRecognizer(localeIdentifier: String) async throws -> Bool {
+        return false
+    }
+
+    private func ensureSpeechAnalyzerAssetsIfNeeded(
+        for transcriber: AnyObject,
+        locale: Locale
+    ) async throws {
+    }
+#endif
 
     private func stopModernSpeechRecognizer() {
         modernAnalyzerTask?.cancel()
@@ -509,21 +532,30 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         modernAudioConverterInputSignature = nil
         resetModernTranscriptionState()
 
+#if SUPPORTS_SPEECH_TRANSCRIBER
         if #available(macOS 26.0, *) {
-            (analyzerInputContinuationState as? AsyncStream<AnalyzerInput>.Continuation)?.finish()
-            analyzerInputContinuationState = nil
-            let analyzer = speechAnalyzerState as? SpeechAnalyzer
-            speechAnalyzerState = nil
-            speechTranscriberState = nil
-            analyzerInputFormat = nil
+            stopModernSpeechAnalyzerInternal()
+        }
+#endif
+    }
 
-            if let analyzer {
-                Task {
-                    await analyzer.cancelAndFinishNow()
-                }
+#if SUPPORTS_SPEECH_TRANSCRIBER
+    @available(macOS 26.0, *)
+    private func stopModernSpeechAnalyzerInternal() {
+        (analyzerInputContinuationState as? AsyncStream<AnalyzerInput>.Continuation)?.finish()
+        analyzerInputContinuationState = nil
+        let analyzer = speechAnalyzerState as? SpeechAnalyzer
+        speechAnalyzerState = nil
+        speechTranscriberState = nil
+        analyzerInputFormat = nil
+
+        if let analyzer {
+            Task {
+                await analyzer.cancelAndFinishNow()
             }
         }
     }
+#endif
 
     private func fallbackFromSpeechAnalyzer(_ error: Error) {
         captureQueue.async { [weak self] in
@@ -823,8 +855,19 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     }
 
     private func appendToSpeechAnalyzer(_ processingBuffer: AVAudioPCMBuffer) {
-        guard #available(macOS 26.0, *),
-              recognitionBackend == .speechAnalyzer,
+#if SUPPORTS_SPEECH_TRANSCRIBER
+        if #available(macOS 26.0, *) {
+            appendToSpeechAnalyzerInternal(processingBuffer)
+        }
+#else
+        _ = processingBuffer
+#endif
+    }
+
+#if SUPPORTS_SPEECH_TRANSCRIBER
+    @available(macOS 26.0, *)
+    private func appendToSpeechAnalyzerInternal(_ processingBuffer: AVAudioPCMBuffer) {
+        guard recognitionBackend == .speechAnalyzer,
               let continuation = analyzerInputContinuationState as? AsyncStream<AnalyzerInput>.Continuation else {
             return
         }
@@ -835,6 +878,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         continuation.yield(AnalyzerInput(buffer: analyzerBuffer))
     }
+#endif
 
     private func prepareProcessingBuffer(from audioBuffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
         if audioBuffer.format.matches(processingFormat) {
@@ -900,8 +944,20 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     }
 
     private func makeSpeechAnalyzerBuffer(from processingBuffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard #available(macOS 26.0, *),
-              let analyzerInputFormat else {
+#if SUPPORTS_SPEECH_TRANSCRIBER
+        if #available(macOS 26.0, *) {
+            return makeSpeechAnalyzerBufferInternal(from: processingBuffer)
+        }
+        return processingBuffer
+#else
+        return processingBuffer
+#endif
+    }
+
+#if SUPPORTS_SPEECH_TRANSCRIBER
+    @available(macOS 26.0, *)
+    private func makeSpeechAnalyzerBufferInternal(from processingBuffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let analyzerInputFormat else {
             return processingBuffer
         }
 
@@ -927,6 +983,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             failurePrefix: localized(.failedToConvertCapturedAudioForSpeechAnalyzer)
         )
     }
+#endif
 
     private func convertBuffer(
         _ inputBuffer: AVAudioPCMBuffer,
@@ -1702,6 +1759,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
     }
 
+#if SUPPORTS_SPEECH_TRANSCRIBER
     @available(macOS 26.0, *)
     private func processModernRecognitionResult(_ result: SpeechTranscriber.Result) {
         let now = Date()
@@ -1783,6 +1841,11 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         emitDraftUpdate(from: result, text: text)
         scheduleSilenceCommit()
     }
+#else
+    private func processModernRecognitionResult(_ result: Any) {
+        // Not supported without SpeechTranscriber API
+    }
+#endif
 
     private func observeDraftText(_ text: String, at now: Date) {
         if text != lastDraftText {
@@ -1873,6 +1936,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             .lowercased()
     }
 
+#if SUPPORTS_SPEECH_TRANSCRIBER
     @available(macOS 26.0, *)
     private func emitDraftUpdate(from result: SpeechTranscriber.Result, text: String) {
         let now = Date()
@@ -1957,6 +2021,11 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let durationMs = cmTimeMilliseconds(result.range.duration)
         return "\(startMs):\(durationMs):\(normalizedTranscriberText(result.text))"
     }
+#else
+    private func emitDraftUpdate(from result: Any, text: String) {
+        // Not supported without SpeechTranscriber API
+    }
+#endif
 
     private func draftLengthFitScore(for text: String) -> Float {
         let charCount = text.count
@@ -2466,16 +2535,13 @@ private final class ApplicationAudioCapture {
             guard startStatus == noErr else {
                 throw CaptureError.failed(stage: "start app audio capture", status: startStatus)
             }
-        } catch let error as AudioHardwareError {
-            stop()
-
-            if error.error == permErr {
-                throw CaptureError.permissionDenied
-            }
-
-            throw CaptureError.failed(stage: "configure app audio capture", status: error.error)
         } catch {
             stop()
+
+            let nsError = error as NSError
+            if nsError.code == permErr {
+                throw CaptureError.permissionDenied
+            }
             throw error
         }
     }

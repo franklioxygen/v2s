@@ -66,7 +66,8 @@ v2s 的输入语言列表仅包含 Apple SpeechAnalyzer/SpeechTranscriber 路径
 
 ## 环境要求
 
-- 语音转写和翻译功能需要 macOS 26 或更高版本
+- **基础功能（语音转写）**：macOS 15 (Sequoia) 或更高版本
+- **完整功能（SpeechTranscriber / AI 摘要）**：macOS 26 或更高版本
 
 ## 从源码构建
 

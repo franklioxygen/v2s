@@ -1,4 +1,4 @@
-// swift-tools-version: 5.10
+// swift-tools-version: 5.9
 
 import PackageDescription
 
@@ -22,6 +22,9 @@ let package = Package(
             resources: [
                 .copy("Resources/AppIcon/AppIcon-512.png"),
                 .copy("Resources/silero_vad.onnx"),
+            ],
+            swiftSettings: [
+                .define("SUPPORTS_SPEECH_TRANSCRIBER"),
             ]
         ),
         .testTarget(

@@ -73,7 +73,8 @@ v2s will ask for permissions on first use:
 
 ## Requirements
 
-- Speech transcription and translation require macOS 26 or newer
+- **Basic speech transcription**: macOS 15 (Sequoia) or newer
+- **Full features (SpeechTranscriber / AI Summarization)**: macOS 26 or newer
 
 ## Building from Source
 
