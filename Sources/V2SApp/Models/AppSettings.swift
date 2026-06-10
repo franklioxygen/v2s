@@ -22,7 +22,7 @@ struct AppSettings: Codable {
         outputLanguageID: "zh-Hans",
         interfaceLanguageID: nil,
         overlayStyle: .default,
-        subtitleMode: .balanced,
+        subtitleMode: .follow,
         subtitleDisplayMode: .both,
         glossary: [:]
     )

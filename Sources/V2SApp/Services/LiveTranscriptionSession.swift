@@ -164,7 +164,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var modernCommittedPrefixText = ""
 
     private var microphoneCaptureSession: AVCaptureSession?
-    private var applicationAudioCapture: ApplicationAudioCapture?
+    private var audioCapture: AnyAudioCapture?
 
     private var transcriptHandler: (@MainActor (RecognizedSentence) -> Void)?
     private var partialHandler: (@MainActor (DraftSegment?) -> Void)?
@@ -273,6 +273,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             try await runOnCaptureQueue {
                 try self.startApplicationAudioCapture(descriptor: captureDescriptor)
             }
+        case .systemAudio:
+            try await runOnCaptureQueue {
+                try self.startSystemAudioCapture()
+            }
         }
     }
 
@@ -289,8 +293,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         microphoneCaptureSession?.stopRunning()
         microphoneCaptureSession = nil
 
-        applicationAudioCapture?.stop()
-        applicationAudioCapture = nil
+        audioCapture?.stop()
+        audioCapture = nil
 
         stopModernSpeechRecognizer()
         recognitionRequest?.endAudio()
@@ -348,6 +352,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
                 throw SessionError.microphonePermissionDenied
             }
         case .application:
+            break
+        case .systemAudio:
             break
         }
     }
@@ -698,7 +704,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         do {
             try capture.start()
-            applicationAudioCapture = capture
+            audioCapture = capture
         } catch let error as ApplicationAudioCapture.CaptureError {
             throw mapApplicationCaptureError(error)
         } catch {
@@ -706,6 +712,50 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
                 localized(
                     .failedToStageWithReasonFormat,
                     "start application audio capture",
+                    localizedErrorDescription(error)
+                )
+            )
+        }
+    }
+
+    private func startSystemAudioCapture() throws {
+        let capture = SystemAudioCapture(
+            queue: captureQueue,
+            audioHandler: { [weak self] buffer in
+                self?.append(audioBuffer: buffer)
+            },
+            errorHandler: { [weak self] message in
+                Task {
+                    await self?.emitError(message)
+                }
+            }
+        )
+
+        do {
+            try capture.start()
+            audioCapture = capture
+        } catch let error as SystemAudioCapture.CaptureError {
+            switch error {
+            case .missingOutputDevice:
+                throw SessionError.failedToStartCapture(
+                    localized(.failedToStageWithReasonFormat, "start system audio capture", "No output audio device found")
+                )
+            case .failed(stage: let stage, status: let status):
+                throw SessionError.failedToStartCapture(
+                    localized(.failedToStageWithReasonFormat, stage, String(status))
+                )
+            case .permissionDenied:
+                throw SessionError.audioCapturePermissionDenied
+            case .tapFormatUnavailable:
+                throw SessionError.failedToStartCapture(
+                    localized(.failedToStageWithReasonFormat, "get system audio format", "unavailable")
+                )
+            }
+        } catch {
+            throw SessionError.failedToStartCapture(
+                localized(
+                    .failedToStageWithReasonFormat,
+                    "start system audio capture",
                     localizedErrorDescription(error)
                 )
             )
@@ -2066,19 +2116,19 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     ///   • natural within-sentence pauses in Mandarin/Japanese (200–450 ms)
     /// and below clear sentence-ending silences (≥ 600 ms for most speakers).
     ///
-    /// Follow ≈ 600 ms · Balanced ≈ 630 ms · Reading ≈ 690 ms.
+    /// Follow ≈ 450 ms · Balanced ≈ 530 ms · Reading ≈ 590 ms.
     private var silenceCommitDeadlineMs: Int {
-        max(600, modeConfig.minSilenceCommitMs + 350)
+        max(400, modeConfig.minSilenceCommitMs + 250)
     }
 
     /// Require a short stable window before promoting a punctuation-ended partial.
     /// This keeps the fast path responsive without freezing a still-revisable boundary.
     private var modernBoundaryCommitStabilityDelayMs: Int {
-        max(160, min(modeConfig.minSilenceCommitMs, 240))
+        max(120, min(modeConfig.minSilenceCommitMs, 200))
     }
 
     private var vadSilenceCommitDeadlineMs: Int {
-        max(280, modeConfig.minSilenceCommitMs)
+        max(150, modeConfig.minSilenceCommitMs - 80)
     }
 
     private func scheduleSilenceCommit() {
@@ -2423,7 +2473,14 @@ extension LiveTranscriptionSession: AVCaptureAudioDataOutputSampleBufferDelegate
     }
 }
 
-private final class ApplicationAudioCapture {
+// MARK: - Audio Capture Protocol
+
+protocol AnyAudioCapture: AnyObject {
+    func start() throws
+    func stop()
+}
+
+private final class ApplicationAudioCapture: AnyAudioCapture {
     enum CaptureError: Error {
         case permissionDenied
         case missingOutputDevice
@@ -2829,5 +2886,123 @@ private extension URL {
         }
 
         return nil
+    }
+}
+
+/// Captures audio from the system output (all apps combined).
+private final class SystemAudioCapture: AnyAudioCapture {
+    enum CaptureError: LocalizedError {
+        case missingOutputDevice
+        case failed(stage: String, status: OSStatus)
+        case permissionDenied
+        case tapFormatUnavailable
+    }
+
+    private let system = AudioHardwareSystem.shared
+    private var aggregateDevice: AudioHardwareAggregateDevice?
+    private var deviceIOProcID: AudioDeviceIOProcID?
+    private var tapFormat: AVAudioFormat?
+
+    private let queue: DispatchQueue
+    private let audioHandler: (AVAudioPCMBuffer) -> Void
+    private let errorHandler: (String) -> Void
+
+    init(
+        queue: DispatchQueue,
+        audioHandler: @escaping (AVAudioPCMBuffer) -> Void,
+        errorHandler: @escaping (String) -> Void
+    ) {
+        self.queue = queue
+        self.audioHandler = audioHandler
+        self.errorHandler = errorHandler
+    }
+
+    func start() throws {
+        do {
+            guard let outputDevice = try system.defaultOutputDevice else {
+                throw CaptureError.missingOutputDevice
+            }
+
+            let outputUID = try outputDevice.uid
+            let aggregateDescription: [String: Any] = [
+                kAudioAggregateDeviceNameKey: "v2s-system-audio",
+                kAudioAggregateDeviceUIDKey: UUID().uuidString,
+                kAudioAggregateDeviceMainSubDeviceKey: outputUID,
+                kAudioAggregateDeviceIsPrivateKey: true,
+                kAudioAggregateDeviceIsStackedKey: false,
+                kAudioAggregateDeviceSubDeviceListKey: [
+                    [kAudioSubDeviceUIDKey: outputUID]
+                ]
+            ]
+
+            guard let aggregateDevice = try system.makeAggregateDevice(description: aggregateDescription) else {
+                throw CaptureError.failed(stage: "create aggregate device", status: kAudioHardwareIllegalOperationError)
+            }
+            self.aggregateDevice = aggregateDevice
+
+            // Use a 16-bit stereo format as fallback (44.1kHz, 2ch)
+            guard let tapFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 44100, channels: 2, interleaved: false) else {
+                throw CaptureError.tapFormatUnavailable
+            }
+            self.tapFormat = tapFormat
+
+            // Set up IO proc using the block-based API
+            var deviceIOProcID: AudioDeviceIOProcID?
+            let createIOProcStatus = AudioDeviceCreateIOProcIDWithBlock(
+                &deviceIOProcID,
+                aggregateDevice.id,
+                queue
+            ) { [weak self] _, inputData, _, _, _ in
+                guard let self else { return }
+                self.handleCapturedAudio(UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData)))
+            }
+
+            guard createIOProcStatus == noErr, let deviceIOProcID else {
+                throw CaptureError.failed(stage: "create the capture callback", status: createIOProcStatus)
+            }
+            self.deviceIOProcID = deviceIOProcID
+
+            let startStatus = AudioDeviceStart(aggregateDevice.id, deviceIOProcID)
+            guard startStatus == noErr else {
+                throw CaptureError.failed(stage: "start system audio capture", status: startStatus)
+            }
+        } catch {
+            stop()
+            throw error
+        }
+    }
+
+    func stop() {
+        if let aggregateDevice, let deviceIOProcID {
+            AudioDeviceStop(aggregateDevice.id, deviceIOProcID)
+            AudioDeviceDestroyIOProcID(aggregateDevice.id, deviceIOProcID)
+        }
+        deviceIOProcID = nil
+        if let aggregateDevice {
+            try? system.destroyAggregateDevice(aggregateDevice)
+        }
+        aggregateDevice = nil
+        tapFormat = nil
+    }
+
+    private func handleCapturedAudio(_ ioData: UnsafeMutableAudioBufferListPointer) {
+        guard let tapFormat else { return }
+
+        guard let firstBuffer = ioData.first,
+              let data = firstBuffer.mData else { return }
+
+        let frameCount = firstBuffer.mDataByteSize / UInt32(MemoryLayout<Float>.size)
+
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: tapFormat, frameCapacity: AVAudioFrameCount(frameCount)) else {
+            return
+        }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+
+        let source = data.assumingMemoryBound(to: Float.self)
+        if let dest = buffer.floatChannelData?[0] {
+            dest.update(from: source, count: Int(frameCount))
+        }
+
+        audioHandler(buffer)
     }
 }

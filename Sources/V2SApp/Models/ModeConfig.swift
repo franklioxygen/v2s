@@ -75,19 +75,19 @@ struct ModeConfig: Sendable {
     let minSilenceCommitMs: Int
 
     static let balanced = ModeConfig(
-        firstTokenTargetMs: 300,
-        commitSourceTargetMs: 600,
-        commitTranslationTargetMs: 900,
+        firstTokenTargetMs: 250,
+        commitSourceTargetMs: 500,
+        commitTranslationTargetMs: 750,
         maxChunkAudioSec: 3.0,
-        minSilenceCommitMs: 280
+        minSilenceCommitMs: 200
     )
 
     static let follow = ModeConfig(
-        firstTokenTargetMs: 200,
-        commitSourceTargetMs: 450,
-        commitTranslationTargetMs: 700,
-        maxChunkAudioSec: 2.2,
-        minSilenceCommitMs: 220
+        firstTokenTargetMs: 150,
+        commitSourceTargetMs: 350,
+        commitTranslationTargetMs: 500,
+        maxChunkAudioSec: 1.8,
+        minSilenceCommitMs: 150
     )
 
     static let reading = ModeConfig(

@@ -18,7 +18,7 @@ final class SourceCatalogService {
     func loadSnapshot() -> SourceCatalogSnapshot {
         SourceCatalogSnapshot(
             applications: loadApplications(),
-            microphones: loadMicrophones()
+            microphones: [InputSource.systemAudio] + loadMicrophones()
         )
     }
 
