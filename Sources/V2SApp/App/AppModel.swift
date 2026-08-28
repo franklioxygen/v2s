@@ -22,8 +22,8 @@ private struct SessionStartupFailure: Error, AppLocalizableError {
 }
 
 private enum AppBuildInfo {
-    static let marketingVersion = "0.3.37"
-    static let buildNumber = "41"
+    static let marketingVersion = "0.3.38"
+    static let buildNumber = "42"
     static let repositoryURLString = "https://github.com/franklioxygen/v2s"
     static let repositoryURL = URL(string: repositoryURLString)
 }
