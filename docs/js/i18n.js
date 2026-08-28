@@ -321,17 +321,74 @@
     return browser.startsWith("zh") ? "zh" : "en";
   }
 
+  // Use the first Chinese locale in browser preference order. A Simplified locale
+  // takes precedence over any later Traditional locale. Never persisted in localStorage.
+  function detectTraditionalVariant() {
+    const candidates = (navigator.languages && navigator.languages.length)
+      ? Array.prototype.slice.call(navigator.languages)
+      : [navigator.language];
+    for (const tag of candidates) {
+      try {
+        const locale = new Intl.Locale(tag);
+        if (locale.language !== "zh") continue;
+        const resolved = locale.maximize();
+        if (resolved.script !== "Hant") return null;
+        return resolved.region === "HK" || resolved.region === "MO" ? "hk" : "tw";
+      } catch (err) {
+        // Ignore malformed locale tags and continue through browser preferences.
+      }
+    }
+    return null;
+  }
+
   let currentLang = detectLang();
 
+  // OpenCC runtime conversion (Simplified -> Traditional), loaded lazily from CDN.
+  let converter = null;
+  let converterRequested = false;
+  const targetVariant = detectTraditionalVariant();
+
+  function loadConverter() {
+    if (!targetVariant || converterRequested || typeof document === "undefined") return;
+    converterRequested = true;
+    const script = document.createElement("script");
+    script.src = "https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/full.js";
+    script.async = true;
+    script.onload = () => {
+      try {
+        converter = window.OpenCC.Converter({
+          from: "cn",
+          to: targetVariant === "hk" ? "hk" : "twp",
+        });
+      } catch (err) {
+        converter = null;
+        return;
+      }
+      // Re-render already-rendered text in Traditional.
+      applyLang(currentLang);
+    };
+    script.onerror = () => {
+      // OpenCC failed to load: page keeps working with Simplified.
+      converter = null;
+    };
+    document.head.appendChild(script);
+  }
+
   function t(key) {
-    return getNested(strings[currentLang], key) ?? getNested(strings.en, key) ?? "";
+    const localizedStrings = currentLang === "zh" ? strings.zh : strings.en;
+    const value = getNested(localizedStrings, key) ?? getNested(strings.en, key) ?? "";
+    // All translated output (title, meta, text, attrs, hrefs) passes through here,
+    // so converting at this single point covers everything uniformly.
+    return converter && currentLang === "zh" ? converter(value) : value;
   }
 
   function applyLang(lang) {
     currentLang = lang === "zh" ? "zh" : "en";
     localStorage.setItem(STORAGE_KEY, currentLang);
 
-    const htmlLang = currentLang === "zh" ? "zh-CN" : "en";
+    const htmlLang = currentLang === "zh" && converter
+      ? (targetVariant === "hk" ? "zh-HK" : "zh-TW")
+      : currentLang === "zh" ? "zh-CN" : "en";
     document.documentElement.lang = htmlLang;
     document.documentElement.dataset.lang = currentLang;
 
@@ -391,4 +448,5 @@
   };
 
   applyLang(currentLang);
+  loadConverter();
 })(window);
