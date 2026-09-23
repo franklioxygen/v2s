@@ -15,9 +15,15 @@ WORKFLOW_RUN_POLL_SECONDS=3
 PROJECT_FILE_BACKUP=""
 VERSION_SOURCE_FILE_BACKUP=""
 ROLLBACK_ON_EXIT=0
+# How to finish or undo a release that failed after the version bump was committed.
+RECOVERY_HINT=""
 
 cleanup() {
   local exit_code=$?
+
+  if [[ $exit_code -ne 0 && -n "$RECOVERY_HINT" ]]; then
+    printf '\n%s\n' "$RECOVERY_HINT" >&2
+  fi
 
   if [[ $ROLLBACK_ON_EXIT -eq 1 && -n "$PROJECT_FILE_BACKUP" && -f "$PROJECT_FILE_BACKUP" ]]; then
     mv "$PROJECT_FILE_BACKUP" "$PROJECT_FILE"
@@ -301,13 +307,34 @@ main() {
 
   git -C "$ROOT_DIR" add "$PROJECT_FILE" "$VERSION_SOURCE_FILE"
   git -C "$ROOT_DIR" commit -m "chore(release): ${tag}"
+  # The commit now holds the bump. Restoring the backups from here on would leave the
+  # worktree behind HEAD, so later failures print how to recover instead.
+  ROLLBACK_ON_EXIT=0
+  RECOVERY_HINT="$(printf '%s\n' \
+    "The release commit for ${tag} was created locally but not pushed." \
+    "To undo it: git tag -d ${tag}; git reset --hard HEAD~1")"
+
   git -C "$ROOT_DIR" tag -a "$tag" -m "$tag"
+  RECOVERY_HINT="$(printf '%s\n' \
+    "The release commit and tag ${tag} were created locally but not pushed." \
+    "To finish:  git push origin HEAD && git push origin ${tag}" \
+    "To undo it: git tag -d ${tag}; git reset --hard HEAD~1")"
+
   git -C "$ROOT_DIR" push origin HEAD
+  RECOVERY_HINT="$(printf '%s\n' \
+    "The release commit for ${tag} is on origin, but the tag was not pushed." \
+    "To finish: git push origin ${tag}" \
+    "If no release workflow starts, run: gh workflow run ${RELEASE_WORKFLOW_NAME} --ref ${default_branch} -f tag=${tag}")"
+
   workflow_id="$(wait_for_release_workflow "$repo")"
   printf 'Release workflow is active on GitHub (id %s).\n' "$workflow_id"
 
   tag_push_started_at="$(current_utc_timestamp)"
   git -C "$ROOT_DIR" push origin "$tag"
+  RECOVERY_HINT="$(printf '%s\n' \
+    "Tag ${tag} is on origin, but no release workflow run was confirmed." \
+    "Check the Actions tab, or run: gh workflow run ${RELEASE_WORKFLOW_NAME} --ref ${default_branch} -f tag=${tag}")"
+
   run_url="$(wait_for_release_workflow_run "$repo" "$workflow_id" "$tag_push_started_at" || true)"
 
   if [[ -z "$run_url" ]]; then
@@ -317,8 +344,6 @@ main() {
     run_url="$(wait_for_release_workflow_run "$repo" "$workflow_id" "$dispatch_started_at" || true)"
     [[ -n "$run_url" ]] || fail "Release workflow did not appear after manual dispatch for ${tag}."
   fi
-
-  ROLLBACK_ON_EXIT=0
 
   printf 'Pushed %s — GitHub Actions will build and publish the release.\n' "$tag"
   printf 'Workflow: %s\n' "$run_url"
