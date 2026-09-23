@@ -96,13 +96,22 @@ final class ApplicationAudioCaptureIntegrationTests: XCTestCase {
     // Rebuilds stop the device from the capture queue while audio is flowing. With the IO
     // block on that same queue, stopping during an IO cycle deadlocked.
     func testCaptureStopsWhileAudioIsFlowing() throws {
-        let tone = try play(try writeTone(amplitude: 0.01, seconds: 10), volume: 0.05)
+        // Long enough to outlast every cycle on a slow machine; tearDown stops it.
+        let tone = try play(try writeTone(amplitude: 0.01, seconds: 40), volume: 0.05)
         let processObjectIDs = [try processObjectID(for: tone)]
         let cycled = expectation(description: "start/stop cycles finish")
         let queue = self.queue
 
         Thread.detachNewThread {
+            defer { cycled.fulfill() }
+
             for _ in 0..<25 {
+                // Without audio flowing, a stop cannot land inside an IO cycle.
+                guard tone.isRunning else {
+                    XCTFail("The tone ended before the start/stop cycles finished")
+                    return
+                }
+
                 let capture = ApplicationAudioCapture(
                     appName: "afplay",
                     processObjectIDs: processObjectIDs,
@@ -122,8 +131,6 @@ final class ApplicationAudioCaptureIntegrationTests: XCTestCase {
                 Thread.sleep(forTimeInterval: Double.random(in: 0.02...0.12))
                 queue.sync { capture.stop() }
             }
-
-            cycled.fulfill()
         }
 
         wait(for: [cycled], timeout: 30)
