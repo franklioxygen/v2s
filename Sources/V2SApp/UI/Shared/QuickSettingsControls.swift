@@ -173,9 +173,7 @@ struct SourceMultiSelectPicker: View {
                                     toggleAllInternalSources()
                                 } label: {
                                     HStack(spacing: 10) {
-                                        Image(systemName: isAllInternalSourcesSelected ? "checkmark" : "")
-                                            .frame(width: 12, alignment: .leading)
-                                            .foregroundStyle(Color.accentColor)
+                                        SelectionCheckmark(isSelected: isAllInternalSourcesSelected)
                                         Text(AppLocalization.string(.allInternalSources, languageID: interfaceLanguageID))
                                             .font(.callout)
                                             .foregroundStyle(.primary)
@@ -194,9 +192,7 @@ struct SourceMultiSelectPicker: View {
                                     toggleAllDeviceSources()
                                 } label: {
                                     HStack(spacing: 10) {
-                                        Image(systemName: isAllDeviceSourcesSelected ? "checkmark" : "")
-                                            .frame(width: 12, alignment: .leading)
-                                            .foregroundStyle(Color.accentColor)
+                                        SelectionCheckmark(isSelected: isAllDeviceSourcesSelected)
                                         Text(AppLocalization.string(.allDeviceSources, languageID: interfaceLanguageID))
                                             .font(.callout)
                                             .foregroundStyle(.primary)
@@ -221,9 +217,7 @@ struct SourceMultiSelectPicker: View {
                                     toggle(source.id)
                                 } label: {
                                     HStack(spacing: 10) {
-                                        Image(systemName: selection.contains(source.id) ? "checkmark" : "")
-                                            .frame(width: 12, alignment: .leading)
-                                            .foregroundStyle(Color.accentColor)
+                                        SelectionCheckmark(isSelected: selection.contains(source.id))
                                         Text("\(source.category.displayName(in: interfaceLanguageID)) · \(source.name)")
                                             .font(.callout)
                                             .foregroundStyle(.primary)
@@ -295,6 +289,19 @@ struct SourceMultiSelectPicker: View {
         } else {
             selection.insert(id)
         }
+    }
+}
+
+/// A checkmark column that keeps its width when the row is not selected.
+private struct SelectionCheckmark: View {
+    let isSelected: Bool
+
+    var body: some View {
+        Image(systemName: "checkmark")
+            .opacity(isSelected ? 1 : 0)
+            .accessibilityHidden(!isSelected)
+            .frame(width: 12, alignment: .leading)
+            .foregroundStyle(Color.accentColor)
     }
 }
 
