@@ -1746,8 +1746,7 @@ final class AppModel: ObservableObject {
         // into two back-to-back captions.
         while pendingCaptions.count > 3 {
             let dropped = pendingCaptions.remove(at: 1)
-            captionTranslationTasks[dropped.id]?.cancel()
-            captionTranslationTasks.removeValue(forKey: dropped.id)
+            recordSkippedCaptionInTranscript(dropped)
             updateReadyCaptionTranslation(nil, for: dropped.id)
         }
 
@@ -1762,6 +1761,36 @@ final class AppModel: ObservableObject {
         }
 
         setStatus(.running(sourceName: selectedSourceDisplayName))
+    }
+
+    /// Captions skipped on the overlay to keep up with live speech still belong in the
+    /// transcript. The skipped caption's translation keeps running and is backfilled
+    /// by applyLateCaptionTranslation when it arrives.
+    private func recordSkippedCaptionInTranscript(_ caption: QueuedCaption) {
+        // Several sentences can be enqueued before the display task shows the head
+        // caption, so record the head first to keep the transcript in spoken order.
+        if let head = pendingCaptions.first,
+           transcriptEntries.contains(where: { $0.id == head.id }) == false {
+            upsertTranscriptEntry(
+                id: head.id,
+                sourceText: head.sourceText,
+                translatedText: provisionalTranscriptTranslation(for: head)
+            )
+        }
+
+        upsertTranscriptEntry(
+            id: caption.id,
+            sourceText: caption.sourceText,
+            translatedText: provisionalTranscriptTranslation(for: caption)
+        )
+    }
+
+    private func provisionalTranscriptTranslation(for caption: QueuedCaption) -> String {
+        guard caption.sourceLanguageID != caption.targetLanguageID else {
+            return caption.sourceText
+        }
+
+        return readyCaptionTranslations[caption.id] ?? ""
     }
 
     private func refreshCaptionTranslations() {
