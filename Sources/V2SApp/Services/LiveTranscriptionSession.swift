@@ -160,8 +160,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var speechTranscriberState: AnyObject?
     private var analyzerInputContinuationState: Any?
     private var analyzerInputFormat: AVAudioFormat?
-    private var latestModernText = ""
-    private var modernCommittedPrefixText = ""
 
     private var microphoneCaptureSession: AVCaptureSession?
     private var applicationAudioCapture: ApplicationAudioCapture?
@@ -295,7 +293,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         vadEngine = nil
         lastVADProbability = 0
 
-        resetModernTranscriptionState()
         partialHandler = nil
         resetDraftState()
         Task { @MainActor [weak self] in
@@ -363,7 +360,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         recognitionBackend = .legacy
         resetAudioProcessingState()
         resetLegacyTranscriptionState()
-        resetModernTranscriptionState()
         cancelSilenceTimer()
         resetDraftState()
 
@@ -407,7 +403,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let transcriber = SpeechTranscriber(
             locale: resolvedLocale,
             transcriptionOptions: [],
-            reportingOptions: [.volatileResults, .fastResults],
+            reportingOptions: [.volatileResults],
             attributeOptions: [.audioTimeRange, .transcriptionConfidence]
         )
 
@@ -467,7 +463,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         audioConverter = nil
         audioConverterInputSignature = nil
         resetLegacyTranscriptionState()
-        resetModernTranscriptionState()
         cancelSilenceTimer()
         cancelVADSilenceTimer()
         resetDraftState()
@@ -507,7 +502,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         recognitionBackend = .legacy
         modernAudioConverter = nil
         modernAudioConverterInputSignature = nil
-        resetModernTranscriptionState()
 
         if #available(macOS 26.0, *) {
             (analyzerInputContinuationState as? AsyncStream<AnalyzerInput>.Continuation)?.finish()
@@ -594,11 +588,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         noiseFloorRMS = 0.0012
         highPassPreviousInput = 0
         highPassPreviousOutput = 0
-    }
-
-    private func resetModernTranscriptionState() {
-        latestModernText = ""
-        modernCommittedPrefixText = ""
     }
 
     private func resetLegacyTranscriptionState() {
@@ -1389,77 +1378,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         SentenceBoundaryHeuristics.sentenceRanges(in: text)
     }
 
-    private func pendingModernText(from fullText: String) -> String {
-        guard modernCommittedPrefixText.isEmpty == false else {
-            return fullText
-        }
-        if fullText.hasPrefix(modernCommittedPrefixText) {
-            return String(fullText.dropFirst(modernCommittedPrefixText.count))
-        }
-
-        let committedSentences = splitRecognizedSentences(in: modernCommittedPrefixText)
-        let nsFullText = fullText as NSString
-        let fullSentenceRanges = sentenceRanges(in: nsFullText)
-        let fullSentences = fullSentenceRanges.map {
-            nsFullText.substring(with: $0).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        guard committedSentences.isEmpty == false,
-              fullSentences.isEmpty == false else {
-            return fullText
-        }
-
-        let committedComparable = committedSentences.map(comparableCommittedSentenceText)
-        let fullComparable = fullSentences.map(comparableCommittedSentenceText)
-        let maxOverlap = min(committedComparable.count, fullComparable.count)
-
-        for overlap in stride(from: maxOverlap, through: 1, by: -1) {
-            if Array(committedComparable.suffix(overlap)) == Array(fullComparable.prefix(overlap)) {
-                let matchedRange = fullSentenceRanges[overlap - 1]
-                let nextLocation = matchedRange.location + matchedRange.length
-                guard nextLocation < nsFullText.length else {
-                    return ""
-                }
-
-                return nsFullText.substring(from: nextLocation)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        }
-
-        return fullText
-    }
-
-    private func committableModernText(in rawText: String) -> (committedRawText: String, remainingRawText: String)? {
-        let trimmedText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmedText.isEmpty == false else {
-            return nil
-        }
-
-        let nsText = rawText as NSString
-        let sentenceRanges = sentenceRanges(in: nsText)
-        guard sentenceRanges.isEmpty == false else {
-            return nil
-        }
-
-        if SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: trimmedText) {
-            return (rawText, "")
-        }
-
-        guard sentenceRanges.count >= 2,
-              let trailingSentenceRange = sentenceRanges.last,
-              trailingSentenceRange.location > 0 else {
-            return nil
-        }
-
-        let committedRawText = nsText.substring(to: trailingSentenceRange.location)
-        let remainingRawText = nsText.substring(from: trailingSentenceRange.location)
-        guard committedRawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
-            return nil
-        }
-
-        return (committedRawText, remainingRawText)
-    }
-
     private func hasLikelyPunctuationBoundary(
         afterSegmentAt index: Int,
         in formattedText: NSString,
@@ -1658,7 +1576,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         // Reset the converter — new request may have a different nativeAudioFormat.
         resetAudioProcessingState()
         resetLegacyTranscriptionState()
-        resetModernTranscriptionState()
         resetDraftState()
         Task { await emitPartialDraft(nil) }
     }
@@ -1704,20 +1621,16 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
     @available(macOS 26.0, *)
     private func processModernRecognitionResult(_ result: SpeechTranscriber.Result) {
-        let now = Date()
-        lastRecognitionResultTime = now
-        let fullText = normalizedTranscriberText(result.text)
-        let pendingRawText = pendingModernText(from: fullText)
-        let text = pendingRawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        lastRecognitionResultTime = Date()
+        let text = normalizedTranscriberText(result.text)
 
+        // Only finalized results are committed. Volatile results are interim guesses
+        // that the transcriber keeps revising, so they drive the draft line only.
         if result.isFinal {
             let identity = modernResultIdentity(for: result)
             guard identity != lastModernCommittedResultIdentity else { return }
             lastModernCommittedResultIdentity = identity
 
-            cancelSilenceTimer()
-            cancelVADSilenceTimer()
-            resetModernTranscriptionState()
             let committedDraftID = currentDraftId
             resetDraftState()
 
@@ -1740,48 +1653,11 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
 
         guard text.isEmpty == false else {
-            latestModernText = ""
-            cancelSilenceTimer()
-            cancelVADSilenceTimer()
             Task { await emitPartialDraft(nil) }
             return
         }
 
-        observeDraftText(text, at: now)
-        latestModernText = pendingRawText
-        if let split = committableModernText(in: pendingRawText),
-           split.remainingRawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: text),
-           canFastCommitModernBoundary(at: now) {
-            let committedText = split.committedRawText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard committedText.isEmpty == false else {
-                latestModernText = ""
-                Task { await emitPartialDraft(nil) }
-                return
-            }
-
-            cancelSilenceTimer()
-            cancelVADSilenceTimer()
-            modernCommittedPrefixText += split.committedRawText
-            latestModernText = split.remainingRawText
-            let committedDraftID = currentDraftId
-            resetDraftState()
-            Task {
-                await emitCommittedSequence(
-                    [
-                        CommittedEmission(
-                            text: committedText,
-                            promotionSegmentID: committedDraftID
-                        )
-                    ],
-                    clearDraftAfter: true
-                )
-            }
-            return
-        }
-
         emitDraftUpdate(from: result, text: text)
-        scheduleSilenceCommit()
     }
 
     private func observeDraftText(_ text: String, at now: Date) {
@@ -1804,50 +1680,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
 
         return (silenceMs, stabilityScore)
-    }
-
-    private func canFastCommitModernBoundary(at now: Date) -> Bool {
-        Int(now.timeIntervalSince(lastDraftTextChangeTime) * 1000) >= modernBoundaryCommitStabilityDelayMs
-    }
-
-    private func canVADCommitModernDraft(_ rawText: String, at now: Date) -> Bool {
-        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard text.isEmpty == false else {
-            return false
-        }
-
-        guard shouldHoldModernVADCommit(for: text) == false else {
-            return false
-        }
-
-        let stableForMs = Int(now.timeIntervalSince(lastDraftTextChangeTime) * 1000)
-        let minimumStableMs = max(vadSilenceCommitDeadlineMs, 260)
-        guard stableForMs >= minimumStableMs else {
-            return false
-        }
-
-        let maxDraftLength = text.containsCJKCharacters ? 14 : 28
-        return text.count <= maxDraftLength
-    }
-
-    private func shouldHoldModernVADCommit(for text: String) -> Bool {
-        guard SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: text) == false else {
-            return false
-        }
-
-        if SentenceBoundaryHeuristics.endsWithLikelyNonTerminalAbbreviation(in: text) {
-            return true
-        }
-
-        switch activeHeuristicLanguage {
-        case .japanese:
-            return Self.modernVADDeferredJapaneseCommitSuffixes.contains(where: { text.hasSuffix($0) })
-        case .english:
-            let normalized = text.lowercased()
-            return Self.modernVADDeferredEnglishCommitSuffixes.contains(where: { normalized.hasSuffix($0) })
-        case .other:
-            return false
-        }
     }
 
     private var activeHeuristicLanguage: RecognitionHeuristicLanguage {
@@ -2002,12 +1834,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         max(600, modeConfig.minSilenceCommitMs + 350)
     }
 
-    /// Require a short stable window before promoting a punctuation-ended partial.
-    /// This keeps the fast path responsive without freezing a still-revisable boundary.
-    private var modernBoundaryCommitStabilityDelayMs: Int {
-        max(160, min(modeConfig.minSilenceCommitMs, 240))
-    }
-
     private var vadSilenceCommitDeadlineMs: Int {
         max(280, modeConfig.minSilenceCommitMs)
     }
@@ -2025,8 +1851,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
     /// Schedules a fast commit based on Silero VAD detecting speech offset.
     /// Uses the mode's minSilenceCommitMs (100–200 ms) — much faster than the
-    /// ASR-inactivity timer (700+ ms).
+    /// ASR-inactivity timer (700+ ms). Legacy backend only: SpeechAnalyzer commits
+    /// finalized results exclusively.
     private func scheduleVADSilenceCommit() {
+        guard recognitionBackend == .legacy else { return }
         scheduleSilenceCommit(trigger: .vadOffset, afterMs: vadSilenceCommitDeadlineMs)
     }
 
@@ -2071,49 +1899,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             vadSilenceCommitTimer = nil
         }
 
-        if recognitionBackend == .speechAnalyzer {
-            let committedRawText: String
-            let remainingRawText: String
-
-            switch trigger {
-            case .asrInactivity:
-                guard let split = committableModernText(in: latestModernText) else {
-                    return
-                }
-                committedRawText = split.committedRawText
-                remainingRawText = split.remainingRawText
-            case .vadOffset:
-                let now = Date()
-                guard canVADCommitModernDraft(latestModernText, at: now) else {
-                    return
-                }
-                committedRawText = latestModernText
-                remainingRawText = ""
-            }
-
-            let text = committedRawText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard text.isEmpty == false else {
-                latestModernText = remainingRawText
-                return
-            }
-
-            modernCommittedPrefixText += committedRawText
-            latestModernText = remainingRawText
-            let committedDraftID = currentDraftId
-            resetDraftState()
-            Task {
-                await emitCommittedSequence(
-                    [
-                        CommittedEmission(
-                            text: text,
-                            promotionSegmentID: committedDraftID
-                        )
-                    ],
-                    clearDraftAfter: remainingRawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
-            }
-            return
-        }
+        // SpeechAnalyzer commits only finalized results; see processModernRecognitionResult.
+        guard recognitionBackend == .legacy else { return }
 
         let segments = latestSegments
         let formattedText = latestFormattedText
@@ -2679,13 +2466,6 @@ private extension LiveTranscriptionSession {
     ]
     static let japaneseDialogueClauseLeadingPhrases = [
         "俺", "私", "僕", "うん", "いや", "や", "でも", "じゃ", "ただいま", "おかえり", "ありがとう", "ごめん"
-    ]
-    static let modernVADDeferredJapaneseCommitSuffixes = [
-        "けど", "けれど", "けれども", "から", "ので", "のに", "とか", "って",
-        "で", "て", "が", "を", "に", "へ", "と", "し"
-    ]
-    static let modernVADDeferredEnglishCommitSuffixes = [
-        " and", " or", " but", " so", " because", " if", " when", " that", " to"
     ]
     static let committedComparisonTrimCharacterSet = CharacterSet.whitespacesAndNewlines
         .union(.punctuationCharacters)
