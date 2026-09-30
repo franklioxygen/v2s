@@ -166,6 +166,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var modernAnalyzerTask: Task<Void, Never>?
     private var modernResultsTask: Task<Void, Never>?
     private var lastModernCommittedResultIdentity: String?
+    /// Latest sentence boundary the transcriber was asked to finalize through.
+    private var modernFinalizationRequestedThrough: CMTime?
     private var speechAnalyzerState: AnyObject?
     private var speechTranscriberState: AnyObject?
     private var analyzerInputContinuationState: Any?
@@ -445,6 +447,18 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         return supportedIdentifiers.contains(resolved.identifier) ? resolved : nil
     }
 
+    /// The transcriber a live session runs. Asset checks build theirs here too, so they
+    /// ask for the same configuration the session will use.
+    @available(macOS 26.0, *)
+    static func makeSpeechTranscriber(locale: Locale) -> SpeechTranscriber {
+        SpeechTranscriber(
+            locale: locale,
+            transcriptionOptions: [],
+            reportingOptions: [.volatileResults],
+            attributeOptions: [.audioTimeRange, .transcriptionConfidence]
+        )
+    }
+
     private func configureModernSpeechRecognizer(localeIdentifier: String) async throws -> Bool {
         guard #available(macOS 26.0, *), SpeechTranscriber.isAvailable else {
             return false
@@ -465,12 +479,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             return false
         }
 
-        let transcriber = SpeechTranscriber(
-            locale: resolvedLocale,
-            transcriptionOptions: [],
-            reportingOptions: [.volatileResults],
-            attributeOptions: [.audioTimeRange, .transcriptionConfidence]
-        )
+        let transcriber = Self.makeSpeechTranscriber(locale: resolvedLocale)
 
         try await ensureSpeechAnalyzerAssetsIfNeeded(for: transcriber, locale: resolvedLocale)
 
@@ -532,8 +541,9 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         cancelVADSilenceTimer()
         resetDraftState()
         lastModernCommittedResultIdentity = nil
+        modernFinalizationRequestedThrough = nil
 
-        // Initialize Silero VAD engine for draft confidence / silence scoring only.
+        // Silero VAD finds speech offsets, which ask the transcriber to finalize.
         do {
             vadEngine = try SileroVADEngine()
         } catch {
@@ -564,6 +574,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         modernResultsTask?.cancel()
         modernResultsTask = nil
         lastModernCommittedResultIdentity = nil
+        modernFinalizationRequestedThrough = nil
         recognitionBackend = .legacy
         modernAudioConverter = nil
         modernAudioConverterInputSignature = nil
@@ -592,6 +603,9 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
                 return
             }
 
+            // No finalized result will arrive for the draft the analyzer was revising,
+            // so it is the best text there is: commit it rather than drop it.
+            self.commitPendingModernDraft()
             self.stopModernSpeechRecognizer()
 
             do {
@@ -1960,16 +1974,22 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
     @available(macOS 26.0, *)
     private func processModernRecognitionResult(_ result: SpeechTranscriber.Result) {
-        lastRecognitionResultTime = Date()
+        // A result already in flight when the analyzer failed over must not reach the
+        // legacy recognizer's draft state.
+        guard recognitionBackend == .speechAnalyzer else { return }
         let text = normalizedTranscriberText(result.text)
 
         // Only finalized results are committed. Volatile results are interim guesses
-        // that the transcriber keeps revising, so they drive the draft line only.
+        // that the transcriber keeps revising, so they drive the draft line only; pauses
+        // and long drafts ask the transcriber to finalize instead of committing them.
         if result.isFinal {
             let identity = modernResultIdentity(for: result)
             guard identity != lastModernCommittedResultIdentity else { return }
             lastModernCommittedResultIdentity = identity
 
+            // The inactivity timer guarded the draft just committed. Left running, it
+            // could finalize the next utterance before its first result arrives.
+            cancelSilenceTimer()
             let committedDraftID = currentDraftId
             resetDraftState()
 
@@ -1992,11 +2012,145 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
 
         guard text.isEmpty == false else {
+            cancelSilenceTimer()
             Task { await emitPartialDraft(nil) }
             return
         }
 
+        let draftChanged = text != lastDraftText
         emitDraftUpdate(from: result, text: text)
+
+        // Re-armed only when the text moves: a transcriber that repeats the same
+        // volatile text through a pause, or stops hearing audio, still finalizes it.
+        if draftChanged {
+            scheduleSilenceCommit()
+        }
+
+        finalizeCompletedSentencesInLongDraft(result)
+    }
+
+    /// Continuous speech never pauses long enough for the timers, so a long draft
+    /// finalizes its completed sentences and keeps only the unfinished tail volatile.
+    @available(macOS 26.0, *)
+    private func finalizeCompletedSentencesInLongDraft(_ result: SpeechTranscriber.Result) {
+        guard CMTimeGetSeconds(result.range.duration) >= modeConfig.maxChunkAudioSec,
+              let boundary = completedSentenceBoundary(in: result.text) else {
+            return
+        }
+
+        if let requested = modernFinalizationRequestedThrough,
+           CMTimeCompare(boundary, requested) <= 0 {
+            return
+        }
+        modernFinalizationRequestedThrough = boundary
+        requestModernFinalization(through: boundary)
+    }
+
+    /// Asks the transcriber to finalize its volatile results through `time`, or through
+    /// all audio taken so far when `time` is nil. The finalized text arrives as an
+    /// `isFinal` result, which processModernRecognitionResult commits.
+    private func requestModernFinalization(through time: CMTime?) {
+        guard #available(macOS 26.0, *),
+              recognitionBackend == .speechAnalyzer,
+              let analyzer = speechAnalyzerState as? SpeechAnalyzer else {
+            return
+        }
+
+        Task {
+            try? await analyzer.finalize(through: time)
+        }
+    }
+
+    /// Commits the current SpeechAnalyzer draft as it stands. Only for when the analyzer
+    /// is going away, since no finalized result will follow for it.
+    private func commitPendingModernDraft() {
+        let text = lastDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let committedDraftID = currentDraftId
+        resetDraftState()
+
+        guard text.isEmpty == false else {
+            Task { await emitPartialDraft(nil) }
+            return
+        }
+
+        Task {
+            await emitCommittedSequence(
+                [
+                    CommittedEmission(
+                        text: text,
+                        promotionSegmentID: committedDraftID
+                    )
+                ],
+                clearDraftAfter: true
+            )
+        }
+    }
+
+    @available(macOS 26.0, *)
+    private func completedSentenceBoundary(in text: AttributedString) -> CMTime? {
+        let runs = text.runs.map { run in
+            (text: String(text[run.range].characters), audioEnd: run.audioTimeRange?.end)
+        }
+        return Self.completedSentenceBoundary(in: runs)
+    }
+
+    /// Returns the audio time at which the last completed sentence ends, when more
+    /// speech follows it. Nil when the text holds no complete sentence, or nothing
+    /// after its last one.
+    static func completedSentenceBoundary(in runs: [(text: String, audioEnd: CMTime?)]) -> CMTime? {
+        var prefix = ""
+        var lastAudioEnd: CMTime?
+        var boundary: CMTime?
+        var hasSpeechAfterBoundary = false
+
+        for (index, run) in runs.enumerated() {
+            prefix += run.text
+            if let audioEnd = run.audioEnd, audioEnd.isNumeric {
+                lastAudioEnd = audioEnd
+            }
+            guard run.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+                continue
+            }
+
+            let nextText = runs.dropFirst(index + 1)
+                .first { $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }?
+                .text
+            if let lastAudioEnd,
+               SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: prefix, followedBy: nextText) {
+                boundary = lastAudioEnd
+                hasSpeechAfterBoundary = false
+            } else {
+                hasSpeechAfterBoundary = true
+            }
+        }
+
+        return hasSpeechAfterBoundary ? boundary : nil
+    }
+
+    /// Whether a speech offset should leave the draft volatile. A draft that ends on a
+    /// conjunction, particle or abbreviation is likely mid-sentence, and finalizing it
+    /// would split the caption at a breath pause. The inactivity timer still finalizes
+    /// it if the pause lasts.
+    static func shouldDeferModernVADFinalization(of rawText: String, languageCode: String?) -> Bool {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.isEmpty == false,
+              SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: text) == false else {
+            return false
+        }
+
+        if SentenceBoundaryHeuristics.endsWithLikelyNonTerminalAbbreviation(in: text) {
+            return true
+        }
+
+        switch languageCode {
+        case "ja":
+            return modernVADDeferredJapaneseSuffixes.contains(where: { text.hasSuffix($0) })
+        case "en":
+            let normalized = " " + text.lowercased()
+            return modernVADDeferredEnglishSuffixes.contains(where: { normalized.hasSuffix($0) })
+        default:
+            return false
+        }
     }
 
     private func observeDraftText(_ text: String, at now: Date) {
@@ -2189,11 +2343,9 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     // MARK: - VAD-based silence commit
 
     /// Schedules a fast commit based on Silero VAD detecting speech offset.
-    /// Uses the mode's minSilenceCommitMs (100–200 ms) — much faster than the
-    /// ASR-inactivity timer (700+ ms). Legacy backend only: SpeechAnalyzer commits
-    /// finalized results exclusively.
+    /// Uses the mode's minSilenceCommitMs, floored at 280 ms (280–340 ms) — much faster
+    /// than the ASR-inactivity timer (600+ ms).
     private func scheduleVADSilenceCommit() {
-        guard recognitionBackend == .legacy else { return }
         scheduleSilenceCommit(trigger: .vadOffset, afterMs: vadSilenceCommitDeadlineMs)
     }
 
@@ -2238,8 +2390,16 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             vadSilenceCommitTimer = nil
         }
 
-        // SpeechAnalyzer commits only finalized results; see processModernRecognitionResult.
-        guard recognitionBackend == .legacy else { return }
+        // SpeechAnalyzer commits only finalized results, so a pause asks the transcriber
+        // to finalize now instead of committing the volatile draft here.
+        if recognitionBackend == .speechAnalyzer {
+            if trigger == .vadOffset,
+               Self.shouldDeferModernVADFinalization(of: lastDraftText, languageCode: activeLanguageCode) {
+                return
+            }
+            requestModernFinalization(through: nil)
+            return
+        }
 
         let segments = latestSegments
         let formattedText = latestFormattedText
@@ -3361,6 +3521,13 @@ private extension LiveTranscriptionSession {
     ]
     static let japaneseDialogueClauseLeadingPhrases = [
         "俺", "私", "僕", "うん", "いや", "や", "でも", "じゃ", "ただいま", "おかえり", "ありがとう", "ごめん"
+    ]
+    static let modernVADDeferredJapaneseSuffixes = [
+        "けど", "けれど", "けれども", "から", "ので", "のに", "とか", "って",
+        "で", "て", "が", "を", "に", "へ", "と", "し"
+    ]
+    static let modernVADDeferredEnglishSuffixes = [
+        " and", " or", " but", " so", " because", " if", " when", " that", " to"
     ]
     static let committedComparisonTrimCharacterSet = CharacterSet.whitespacesAndNewlines
         .union(.punctuationCharacters)
