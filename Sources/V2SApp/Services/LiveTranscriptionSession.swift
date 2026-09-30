@@ -2081,8 +2081,22 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             return
         }
 
-        Task {
-            try? await analyzer.finalize(through: time)
+        Task { [weak self] in
+            do {
+                try await analyzer.finalize(through: time)
+            } catch {
+                // A failed long-draft request must not block the next request for the
+                // same boundary, so the next long result can ask again.
+                guard let time else { return }
+                self?.captureQueue.async { [weak self] in
+                    guard let self,
+                          let requested = self.modernFinalizationRequestedThrough,
+                          CMTimeCompare(requested, time) == 0 else {
+                        return
+                    }
+                    self.modernFinalizationRequestedThrough = nil
+                }
+            }
         }
     }
 
