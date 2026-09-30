@@ -165,7 +165,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var interfaceLanguageID = "en"
     private var modernAnalyzerTask: Task<Void, Never>?
     private var modernResultsTask: Task<Void, Never>?
-    private var lastModernCommittedResultIdentity: String?
+    private var modernResultLedger = TranscriberResultLedger()
+    /// Latest volatile SpeechTranscriber.Result, which supplies draft confidence and
+    /// timing when finalization arrives without a result of its own.
+    private var latestModernVolatileResult: Any?
     /// Latest sentence boundary the transcriber was asked to finalize through.
     private var modernFinalizationRequestedThrough: CMTime?
     private var speechAnalyzerState: AnyObject?
@@ -491,6 +494,12 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
         try await analyzer.setContext(context)
 
+        let analyzerID = ObjectIdentifier(analyzer)
+        await analyzer.setVolatileRangeChangedHandler { [weak self] range, changedStart, _ in
+            guard changedStart else { return }
+            self?.scheduleModernFinalization(afterVolatileRangeMovedTo: range, analyzerID: analyzerID)
+        }
+
         let preferredFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
             compatibleWith: [transcriber],
             considering: processingFormat
@@ -540,7 +549,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         cancelSilenceTimer()
         cancelVADSilenceTimer()
         resetDraftState()
-        lastModernCommittedResultIdentity = nil
+        modernResultLedger = TranscriberResultLedger()
+        latestModernVolatileResult = nil
         modernFinalizationRequestedThrough = nil
 
         // Silero VAD finds speech offsets, which ask the transcriber to finalize.
@@ -573,7 +583,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         modernAnalyzerTask = nil
         modernResultsTask?.cancel()
         modernResultsTask = nil
-        lastModernCommittedResultIdentity = nil
+        modernResultLedger = TranscriberResultLedger()
+        latestModernVolatileResult = nil
         modernFinalizationRequestedThrough = nil
         recognitionBackend = .legacy
         modernAudioConverter = nil
@@ -1977,56 +1988,69 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         // A result already in flight when the analyzer failed over must not reach the
         // legacy recognizer's draft state.
         guard recognitionBackend == .speechAnalyzer else { return }
-        let text = normalizedTranscriberText(result.text)
 
-        // Only finalized results are committed. Volatile results are interim guesses
-        // that the transcriber keeps revising, so they drive the draft line only; pauses
-        // and long drafts ask the transcriber to finalize instead of committing them.
-        if result.isFinal {
-            let identity = modernResultIdentity(for: result)
-            guard identity != lastModernCommittedResultIdentity else { return }
-            lastModernCommittedResultIdentity = identity
+        // Only final text is committed. Volatile results are interim guesses that the
+        // transcriber keeps revising, so they drive the draft line only; pauses and long
+        // drafts ask the transcriber to finalize instead of committing them. The ledger
+        // judges finality by resultsFinalizationTime, because a volatile result can be
+        // finalized without ever being reissued with isFinal set.
+        if result.isFinal == false {
+            latestModernVolatileResult = result
+        }
+        let runs = result.text.runs.map { run in
+            (text: String(result.text[run.range].characters), audioRange: run.audioTimeRange)
+        }
+        let finalizedText = modernResultLedger.apply(
+            TranscriberResultLedger.pieces(from: runs, resultRange: result.range),
+            range: result.range,
+            resultsFinalizationTime: result.resultsFinalizationTime
+        )
+        publishModernTranscript(finalizedText: finalizedText)
 
-            // The inactivity timer guarded the draft just committed. Left running, it
+        if result.isFinal == false {
+            finalizeCompletedSentencesInLongDraft(result)
+        }
+    }
+
+    /// Commits text the ledger found final and shows the text still volatile.
+    @available(macOS 26.0, *)
+    private func publishModernTranscript(finalizedText: String?) {
+        let draftText = modernResultLedger.draftText
+        let draftChanged = draftText != lastDraftText
+        let committedDraftID = currentDraftId
+        if finalizedText != nil {
+            resetDraftState()
+        }
+
+        if draftText.isEmpty {
+            // Nothing is left for the inactivity timer to finalize. Left running, it
             // could finalize the next utterance before its first result arrives.
             cancelSilenceTimer()
-            let committedDraftID = currentDraftId
-            resetDraftState()
+        } else if let result = latestModernVolatileResult as? SpeechTranscriber.Result {
+            emitDraftUpdate(from: result, text: draftText)
 
-            if text.isEmpty == false {
-                Task {
-                    await emitCommittedSequence(
-                        [
-                            CommittedEmission(
-                                text: text,
-                                promotionSegmentID: committedDraftID
-                            )
-                        ],
-                        clearDraftAfter: true
-                    )
-                }
-            } else {
-                Task { await emitPartialDraft(nil) }
+            // Re-armed only when the draft moves: a transcriber that repeats the same
+            // volatile text through a pause, or stops hearing audio, still finalizes it.
+            if draftChanged || finalizedText != nil {
+                scheduleSilenceCommit()
             }
-            return
         }
 
-        guard text.isEmpty == false else {
-            cancelSilenceTimer()
+        if let finalizedText {
+            Task {
+                await emitCommittedSequence(
+                    [
+                        CommittedEmission(
+                            text: finalizedText,
+                            promotionSegmentID: committedDraftID
+                        )
+                    ],
+                    clearDraftAfter: draftText.isEmpty
+                )
+            }
+        } else if draftText.isEmpty {
             Task { await emitPartialDraft(nil) }
-            return
         }
-
-        let draftChanged = text != lastDraftText
-        emitDraftUpdate(from: result, text: text)
-
-        // Re-armed only when the text moves: a transcriber that repeats the same
-        // volatile text through a pause, or stops hearing audio, still finalizes it.
-        if draftChanged {
-            scheduleSilenceCommit()
-        }
-
-        finalizeCompletedSentencesInLongDraft(result)
     }
 
     /// Continuous speech never pauses long enough for the timers, so a long draft
@@ -2047,8 +2071,9 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     }
 
     /// Asks the transcriber to finalize its volatile results through `time`, or through
-    /// all audio taken so far when `time` is nil. The finalized text arrives as an
-    /// `isFinal` result, which processModernRecognitionResult commits.
+    /// all audio taken so far when `time` is nil. Changed text arrives as final results;
+    /// text the finalization left unchanged is committed once the volatile range moves
+    /// past it (see scheduleModernFinalization).
     private func requestModernFinalization(through time: CMTime?) {
         guard #available(macOS 26.0, *),
               recognitionBackend == .speechAnalyzer,
@@ -2061,10 +2086,47 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Handles the analyzer's volatile range moving forward. Results before it are final,
+    /// but finalization that leaves a result unchanged need not reissue it, so this can be
+    /// the only sign that a draft is final. Results published up to this point may still
+    /// be in the results stream, so the ledger hears of it only after they have had time
+    /// to land; any that arrive first are taken as they are.
+    private func scheduleModernFinalization(
+        afterVolatileRangeMovedTo volatileRange: CMTimeRange,
+        analyzerID: ObjectIdentifier
+    ) {
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+
+            // An empty volatile range means every result sent so far is final; its start
+            // may not say where they end, so the pending text's end stands in for it.
+            var finalizedThrough = volatileRange.start
+            if CMTimeCompare(volatileRange.start, volatileRange.end) >= 0,
+               let pendingEnd = self.modernResultLedger.pendingEnd {
+                finalizedThrough = CMTimeMaximum(finalizedThrough, pendingEnd)
+            }
+
+            self.captureQueue.asyncAfter(
+                deadline: .now() + .milliseconds(Self.modernFinalizationDeliveryGraceMs)
+            ) { [weak self] in
+                guard let self,
+                      self.recognitionBackend == .speechAnalyzer,
+                      self.speechAnalyzerState.map(ObjectIdentifier.init) == analyzerID,
+                      let finalizedText = self.modernResultLedger.finalize(through: finalizedThrough) else {
+                    return
+                }
+
+                if #available(macOS 26.0, *) {
+                    self.publishModernTranscript(finalizedText: finalizedText)
+                }
+            }
+        }
+    }
+
     /// Commits the current SpeechAnalyzer draft as it stands. Only for when the analyzer
     /// is going away, since no finalized result will follow for it.
     private func commitPendingModernDraft() {
-        let text = lastDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = modernResultLedger.removePending()
         let committedDraftID = currentDraftId
         resetDraftState()
 
@@ -2243,13 +2305,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     }
 
     @available(macOS 26.0, *)
-    private func normalizedTranscriberText(_ text: AttributedString) -> String {
-        String(text.characters)
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    @available(macOS 26.0, *)
     private func transcriberAverageConfidence(_ text: AttributedString) -> Float {
         var total: Double = 0
         var count = 0
@@ -2274,13 +2329,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
 
         return nil
-    }
-
-    @available(macOS 26.0, *)
-    private func modernResultIdentity(for result: SpeechTranscriber.Result) -> String {
-        let startMs = cmTimeMilliseconds(result.range.start)
-        let durationMs = cmTimeMilliseconds(result.range.duration)
-        return "\(startMs):\(durationMs):\(normalizedTranscriberText(result.text))"
     }
 
     private func draftLengthFitScore(for text: String) -> Float {
@@ -2635,6 +2683,146 @@ extension LiveTranscriptionSession: AVCaptureAudioDataOutputSampleBufferDelegate
         from connection: AVCaptureConnection
     ) {
         append(sampleBuffer: sampleBuffer)
+    }
+}
+
+/// Follows SpeechTranscriber results by audio range and releases text once it is final.
+///
+/// Finality comes from the finalization time, not from `isFinal` alone. A volatile
+/// result is not guaranteed to be reissued as final: a later result's
+/// `resultsFinalizationTime`, or the analyzer's volatile range moving past it, can
+/// finalize it without a word, as happens when finalization leaves it unchanged. So
+/// volatile text is held here until finalization passes it.
+struct TranscriberResultLedger {
+    /// One run of transcribed text and the audio it covers.
+    struct Piece: Equatable {
+        let text: String
+        let range: CMTimeRange
+    }
+
+    /// Volatile text, one entry per result, in audio order.
+    private var pending: [[Piece]] = []
+    /// Results are final up to, but not including, this time.
+    private(set) var finalizedThrough = CMTime.negativeInfinity
+
+    /// The volatile text as the draft line should read it.
+    var draftText: String {
+        Self.joined(pending.map(Self.text(of:)))
+    }
+
+    /// Where the volatile text ends, or nil when there is none.
+    var pendingEnd: CMTime? {
+        pending.last?.last?.range.end
+    }
+
+    /// Takes one result and returns the text that became final with it.
+    mutating func apply(_ pieces: [Piece], range: CMTimeRange, resultsFinalizationTime: CMTime) -> String? {
+        // Everything this result covers is already final: it repeats one already taken.
+        guard CMTimeCompare(range.end, finalizedThrough) > 0 else {
+            return nil
+        }
+
+        // A result replaces what earlier results said about the same audio; what they
+        // said about audio on either side of it still stands.
+        if CMTimeCompare(range.start, range.end) < 0 {
+            pending = pending
+                .flatMap { entry in
+                    [
+                        entry.filter { CMTimeCompare($0.range.end, range.start) <= 0 },
+                        entry.filter { CMTimeCompare($0.range.start, range.end) >= 0 }
+                    ]
+                }
+                .filter { $0.isEmpty == false }
+        }
+
+        let freshPieces = pieces.filter { CMTimeCompare($0.range.end, finalizedThrough) > 0 }
+        if Self.text(of: freshPieces).isEmpty == false {
+            pending.append(freshPieces)
+            pending.sort { CMTimeCompare($0[0].range.start, $1[0].range.start) < 0 }
+        }
+
+        return finalize(through: resultsFinalizationTime)
+    }
+
+    /// Treats all audio before `time` as final and returns the text that became final.
+    mutating func finalize(through time: CMTime) -> String? {
+        guard time.isNumeric, CMTimeCompare(time, finalizedThrough) > 0 else {
+            return nil
+        }
+        finalizedThrough = time
+
+        var finalizedTexts: [String] = []
+        pending = pending.compactMap { entry in
+            let finalCount = entry.prefix { CMTimeCompare($0.range.end, time) <= 0 }.count
+            guard finalCount > 0 else {
+                return entry
+            }
+
+            finalizedTexts.append(Self.text(of: Array(entry.prefix(finalCount))))
+            let volatileRest = Array(entry.dropFirst(finalCount))
+            return volatileRest.isEmpty ? nil : volatileRest
+        }
+
+        let finalizedText = Self.joined(finalizedTexts)
+        return finalizedText.isEmpty ? nil : finalizedText
+    }
+
+    /// Drops the volatile text and returns it.
+    mutating func removePending() -> String {
+        let text = draftText
+        pending.removeAll()
+        return text
+    }
+
+    /// Gives each run of a result an audio range. A run without one, often punctuation,
+    /// takes the range of the timed run before it, or of the first timed run when it
+    /// leads the text. Ranges are kept inside the result's own range.
+    static func pieces(
+        from runs: [(text: String, audioRange: CMTimeRange?)],
+        resultRange: CMTimeRange
+    ) -> [Piece] {
+        func timed(_ range: CMTimeRange?) -> CMTimeRange? {
+            guard let range, range.start.isNumeric, range.end.isNumeric else {
+                return nil
+            }
+            guard resultRange.start.isNumeric, resultRange.end.isNumeric else {
+                return range
+            }
+
+            let start = CMTimeMaximum(range.start, resultRange.start)
+            let end = CMTimeMaximum(CMTimeMinimum(range.end, resultRange.end), start)
+            return CMTimeRange(start: start, end: end)
+        }
+
+        var currentRange = runs.lazy.compactMap { timed($0.audioRange) }.first ?? resultRange
+        return runs.map { run in
+            if let range = timed(run.audioRange) {
+                currentRange = range
+            }
+            return Piece(text: run.text, range: currentRange)
+        }
+    }
+
+    private static func text(of pieces: [Piece]) -> String {
+        pieces.map(\.text).joined()
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Joins text from separate results, with a space between them unless either side
+    /// is CJK.
+    private static func joined(_ texts: [String]) -> String {
+        var joinedText = ""
+        for text in texts where text.isEmpty == false {
+            if let last = joinedText.last,
+               let first = text.first,
+               String(last).containsCJKCharacters == false,
+               String(first).containsCJKCharacters == false {
+                joinedText += " "
+            }
+            joinedText += text
+        }
+        return joinedText
     }
 }
 
@@ -3522,6 +3710,9 @@ private extension LiveTranscriptionSession {
     static let japaneseDialogueClauseLeadingPhrases = [
         "俺", "私", "僕", "うん", "いや", "や", "でも", "じゃ", "ただいま", "おかえり", "ありがとう", "ごめん"
     ]
+    /// How long results already published get to arrive through the results stream
+    /// before a volatile-range move finalizes the text they would have replaced.
+    static let modernFinalizationDeliveryGraceMs = 400
     static let modernVADDeferredJapaneseSuffixes = [
         "けど", "けれど", "けれども", "から", "ので", "のに", "とか", "って",
         "で", "て", "が", "を", "に", "へ", "と", "し"
