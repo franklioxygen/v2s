@@ -1,13 +1,29 @@
 import Combine
 import Foundation
 import AppKit
+import os.log
 import Speech
 import SwiftUI
 import Translation
 
+private extension Logger {
+    static let session = Logger(subsystem: "com.franklioxygen.v2s", category: "session")
+}
+
+/// A recognition failure that arrived while its own source was still starting, folded
+/// back into that source's startup failure. The message is already localized by the
+/// session that produced it.
+private struct SessionStartupFailure: Error, AppLocalizableError {
+    let message: String
+
+    func localizedDescription(languageID: String) -> String {
+        message
+    }
+}
+
 private enum AppBuildInfo {
-    static let marketingVersion = "0.3.32"
-    static let buildNumber = "36"
+    static let marketingVersion = "0.3.39"
+    static let buildNumber = "43"
     static let repositoryURLString = "https://github.com/franklioxygen/v2s"
     static let repositoryURL = URL(string: repositoryURLString)
 }
@@ -18,10 +34,12 @@ final class AppModel: ObservableObject {
     private let sourceCatalogService: SourceCatalogService
     private let translationCoordinator = TranslationCoordinator()
     private let glossaryService = GlossaryService()
-    private let entityCache = EntityCache()
     private let speedMonitor = SpeedMonitor()
     private var liveTranscriptionSession: LiveTranscriptionSession?
     private var liveTranscriptionSessions: [LiveTranscriptionSession] = []
+    // Sources whose capture actually started. A multi-source session tolerates inputs
+    // that fail to open, so this can be a subset of `selectedSources` while running.
+    private var activeSources: [InputSource] = []
     private var captionDisplayTask: Task<Void, Never>?
     private var captionTranslationTasks: [UUID: Task<Void, Never>] = [:]
     private var pendingCaptions: [QueuedCaption] = []
@@ -35,6 +53,8 @@ final class AppModel: ObservableObject {
     private var draftClearTask: Task<Void, Never>?
     private var committedCaptionArchiveTask: Task<Void, Never>?
     private var languageResourcePreparationTask: Task<Void, Never>?
+    private var languageCatalogRefreshTask: Task<Void, Never>?
+    private var isRefreshingLanguageCatalogs = false
     private var activeDraftSourceLanguageID: String?
     private var activeDraftTargetLanguageID: String?
     private var lastDraftSourceID: String?
@@ -45,8 +65,9 @@ final class AppModel: ObservableObject {
     private var draftClearGeneration: Int = 0
     private var displayedCaptionLastVisualUpdateAt = Date.distantPast
     private var displayedCaptionLastVisualUpdateWasLateTranslation = false
-    // Revision tracking: captionID → (committedTranslation, committedAt, revisionCount)
-    private var translationRevisions: [UUID: (text: String, committedAt: Date, count: Int)] = [:]
+    // Committed translation per caption; late translations may only replace
+    // displayed text that still matches what this pipeline committed.
+    private var translationRevisions: [UUID: String] = [:]
     private var recentRecognizedCaptionTexts: [RecentRecognizedCaption] = []
     private var recentArchivedCaption: RecentArchivedCaption?
     private var finalizedDraftPromotionIDs: [(id: UUID, time: Date)] = []
@@ -59,6 +80,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var statusMessage = ""
     @Published private(set) var overlayState: OverlayPreviewState?
     @Published private(set) var languageResourceStatuses: [LanguageResourceStatus] = []
+    @Published private(set) var speechLanguageOptions = LanguageCatalog.speechInput
+    /// Speech languages this Mac can recognize without sending audio to Apple.
+    @Published private(set) var onDeviceSpeechLanguageIDs: Set<String> = []
+    @Published private(set) var translationLanguageOptions = LanguageCatalog.common
     @Published private(set) var translationHostConfiguration: TranslationSession.Configuration?
     @Published private(set) var transcriptEntries: [TranscriptEntry] = []
     @Published private(set) var transcriptGeneration: Int = 0
@@ -88,7 +113,9 @@ final class AppModel: ObservableObject {
         didSet {
             persistSettings()
             syncOverlayPreviewIfNeeded()
-            scheduleSelectedLanguageResourcePreparation(openSystemSettingsIfNeeded: true)
+            if isRefreshingLanguageCatalogs == false {
+                scheduleSelectedLanguageResourcePreparation(openSystemSettingsIfNeeded: true)
+            }
         }
     }
 
@@ -96,7 +123,7 @@ final class AppModel: ObservableObject {
         didSet {
             persistSettings()
             syncOverlayPreviewIfNeeded()
-            if sessionState != .running {
+            if sessionState != .running, isRefreshingLanguageCatalogs == false {
                 scheduleSelectedLanguageResourcePreparation(openSystemSettingsIfNeeded: true)
             }
         }
@@ -106,7 +133,7 @@ final class AppModel: ObservableObject {
         didSet {
             persistSettings()
             syncOverlayPreviewIfNeeded()
-            if sessionState != .running {
+            if sessionState != .running, isRefreshingLanguageCatalogs == false {
                 scheduleSelectedLanguageResourcePreparation(openSystemSettingsIfNeeded: true)
             }
         }
@@ -116,10 +143,12 @@ final class AppModel: ObservableObject {
         didSet {
             persistSettings()
             syncOverlayPreviewIfNeeded()
-            scheduleSelectedLanguageResourcePreparation(
-                refreshTranslations: liveTranscriptionSession != nil,
-                openSystemSettingsIfNeeded: true
-            )
+            if isRefreshingLanguageCatalogs == false {
+                scheduleSelectedLanguageResourcePreparation(
+                    refreshTranslations: liveTranscriptionSession != nil,
+                    openSystemSettingsIfNeeded: true
+                )
+            }
         }
     }
 
@@ -173,11 +202,9 @@ final class AppModel: ObservableObject {
             initialSelectedSourceIDs = [selectedSourceID]
         }
         self.selectedSourceIDs = initialSelectedSourceIDs
-        self.sourceLanguageOverrides = settings.sourceLanguageOverrides.mapValues {
-            LanguageCatalog.supportedSpeechInputLanguageID(for: $0)
-        }
+        self.sourceLanguageOverrides = settings.sourceLanguageOverrides
         self.sourceOutputLanguageOverrides = settings.sourceOutputLanguageOverrides
-        self.inputLanguageID = LanguageCatalog.supportedSpeechInputLanguageID(for: settings.inputLanguageID)
+        self.inputLanguageID = settings.inputLanguageID
         self.outputLanguageID = settings.outputLanguageID
         self.usesSystemInterfaceLanguage = settings.interfaceLanguageID == nil
         self.interfaceLanguageID = LanguageCatalog.preferredInterfaceLanguageID(
@@ -194,6 +221,10 @@ final class AppModel: ObservableObject {
         translationCoordinator.onConfigurationChange = { [weak self] configuration in
             self?.translationHostConfiguration = configuration
         }
+        translationCoordinator.localeIdentifierForLanguageID = { [weak self] languageID in
+            self?.translationLocaleIdentifier(for: languageID)
+                ?? LanguageCatalog.translationLocaleIdentifier(for: languageID)
+        }
 
         isBootstrapping = false
         applyStatusMessage()
@@ -201,6 +232,7 @@ final class AppModel: ObservableObject {
             persistSettings()
         }
         refreshSources()
+        refreshSupportedLanguageOptions()
     }
 
     convenience init() {
@@ -228,18 +260,28 @@ final class AppModel: ObservableObject {
     }
 
     var selectedSourceDisplayName: String {
-        let names = selectedSources.map(\.name)
-        switch names.count {
+        sourceDisplayName(for: selectedSources)
+    }
+
+    /// Name for the sources that are actually capturing, falling back to the selection
+    /// while no session is running. Status text uses this so a session that started
+    /// with only some of the selected inputs does not claim to be using all of them.
+    private var activeSourceDisplayName: String {
+        activeSources.isEmpty ? selectedSourceDisplayName : sourceDisplayName(for: activeSources)
+    }
+
+    private func sourceDisplayName(for sources: [InputSource]) -> String {
+        switch sources.count {
         case 0:
             return localized(.selectedSource)
         case 1:
-            return names[0]
+            return sources[0].name
         default:
-            if selectedSources.count == allSources.count, allSources.isEmpty == false {
+            if sources.count == allSources.count, allSources.isEmpty == false {
                 return localized(.allSources)
             }
             return AppLocalization.multipleSourcesText(
-                count: names.count,
+                count: sources.count,
                 languageID: resolvedInterfaceLanguageID
             )
         }
@@ -255,7 +297,7 @@ final class AppModel: ObservableObject {
 
     func setLanguageID(_ languageID: String, for source: InputSource) {
         var overrides = sourceLanguageOverrides
-        let normalizedLanguageID = LanguageCatalog.supportedSpeechInputLanguageID(for: languageID)
+        let normalizedLanguageID = supportedSpeechInputLanguageID(languageID)
         if normalizedLanguageID == inputLanguageID {
             overrides.removeValue(forKey: source.id)
         } else {
@@ -499,7 +541,7 @@ final class AppModel: ObservableObject {
         }
 
         if sessionState == .running {
-            setStatus(.running(sourceName: selectedSourceDisplayName))
+            setStatus(.running(sourceName: activeSourceDisplayName))
         } else {
             setStatus(availableSources.isEmpty ? .noInputSourcesDetected : .ready)
         }
@@ -516,6 +558,8 @@ final class AppModel: ObservableObject {
     }
 
     func startSession() async {
+        // Finish releasing any earlier capture resources before opening replacements.
+        await stopLiveTranscriptionSessionsAndWait()
         refreshSources()
 
         let selectedSources = self.selectedSources
@@ -537,11 +581,10 @@ final class AppModel: ObservableObject {
         let previousTranscriptEntries = transcriptEntries
         let previousTranscriptInputLanguageID = transcriptInputLanguageID
         let previousTranscriptOutputLanguageID = transcriptOutputLanguageID
-        let selectedInputLanguageIDs = Set(selectedSources.map { languageID(for: $0) })
-        let selectedOutputLanguageIDs = Set(selectedSources.map { outputLanguageIDForSource($0) })
+        let selectedTranscriptLanguages = transcriptLanguageIDs(for: selectedSources)
         resetTranscript(
-            sourceLanguageID: selectedInputLanguageIDs.count == 1 ? selectedInputLanguageIDs.first! : inputLanguageID,
-            targetLanguageID: selectedOutputLanguageIDs.count == 1 ? selectedOutputLanguageIDs.first! : outputLanguageID
+            sourceLanguageID: selectedTranscriptLanguages.source,
+            targetLanguageID: selectedTranscriptLanguages.target
         )
 
         isOverlayVisible = true
@@ -556,15 +599,25 @@ final class AppModel: ObservableObject {
         let config = ModeConfig.config(for: subtitleMode)
         let recognitionHints = recognitionContextualStrings()
         var startedSessions: [LiveTranscriptionSession] = []
+        var startedSources: [InputSource] = []
+        var startupFailures: [Error] = []
+        // Every source can raise one, and several can land in the window between two
+        // startup attempts, so they accumulate rather than overwrite each other.
+        var fatalSessionErrors: [(message: String, sessionID: ObjectIdentifier, sourceName: String)] = []
+        var isStartingSession = true
 
-        do {
-            for source in selectedSources {
-                let sourceLanguageID = languageID(for: source)
-                let targetLanguageID = outputLanguageIDForSource(source)
-                let session = LiveTranscriptionSession()
+        for source in selectedSources {
+            let sourceLanguageID = languageID(for: source)
+            let targetLanguageID = outputLanguageIDForSource(source)
+            let session = LiveTranscriptionSession()
+            // Identity only. Capturing the session in the handler it is about to own
+            // would retain it for the session's own lifetime.
+            let sessionID = ObjectIdentifier(session)
+
+            do {
                 try await session.start(
                     source: source,
-                    localeIdentifier: LanguageCatalog.speechLocaleIdentifier(for: sourceLanguageID),
+                    localeIdentifier: speechLocaleIdentifier(for: sourceLanguageID),
                     interfaceLanguageID: resolvedInterfaceLanguageID,
                     modeConfig: config,
                     contextualStrings: recognitionHints,
@@ -592,38 +645,133 @@ final class AppModel: ObservableObject {
                             sourceText: message,
                             sourceName: source.name
                         )
+                    },
+                    fatalErrorHandler: { [weak self] message in
+                        guard let self else { return }
+                        // While startSession() owns the state machine it decides what a
+                        // fatal error means: a source that never finished starting is
+                        // only that source's failure, not the whole session's. Recording
+                        // the origin lets it tell those apart. Afterwards the failure is
+                        // live and ends the session immediately.
+                        guard isStartingSession else {
+                            self.handleFatalSessionError(message, sourceName: source.name)
+                            return
+                        }
+                        fatalSessionErrors.append((message, sessionID, source.name))
                     }
                 )
+
                 startedSessions.append(session)
+                startedSources.append(source)
+            } catch {
+                // A multi-source session is usable as long as at least one input starts.
+                // Release any resources staged by this source and continue trying the
+                // remaining selections instead of turning a partial failure into a
+                // global "Unable to start" state.
+                await session.stopAndWait()
+                startupFailures.append(error)
             }
 
+            // Recognition tasks can fail fatally while this iteration is suspended, on
+            // either the success or the failure path, and more than one can land here.
+            let pendingFatalErrors = fatalSessionErrors
+            fatalSessionErrors.removeAll()
+
+            // A source that did start has died. Stop the siblings here — the handler
+            // cannot, because startSession() has not published them yet — and report the
+            // failure rather than overwriting it with .running below. This wins over any
+            // tolerable failure in the same batch, whatever order they arrived in.
+            if let fatal = pendingFatalErrors.first(where: { fatal in
+                startedSessions.contains(where: { ObjectIdentifier($0) == fatal.sessionID })
+            }) {
+                isStartingSession = false
+                for startedSession in startedSessions {
+                    startedSession.stop()
+                }
+                handleFatalSessionError(fatal.message, sourceName: fatal.sourceName)
+                return
+            }
+
+            // What is left came from sources that never opened their capture, so they are
+            // not part of the session: record them and carry on with the selections that
+            // have not been tried yet.
+            for fatal in pendingFatalErrors {
+                startupFailures.append(SessionStartupFailure(message: fatal.message))
+            }
+        }
+
+        isStartingSession = false
+
+        if startedSessions.isEmpty == false {
             liveTranscriptionSessions = startedSessions
             liveTranscriptionSession = startedSessions.first
+            activeSources = startedSources
+
+            // Sources that never opened must not describe the transcript. Retag it from
+            // the inputs that actually run, so a lone survivor's language is not left
+            // masked by the mixed-selection fallback that summarization reads.
+            let activeTranscriptLanguages = transcriptLanguageIDs(for: startedSources)
+            updateTranscriptLanguages(
+                sourceLanguageID: activeTranscriptLanguages.source,
+                targetLanguageID: activeTranscriptLanguages.target
+            )
 
             sessionState = .running
-            setStatus(.running(sourceName: selectedSourceName))
-        } catch {
-            for session in startedSessions {
-                session.stop()
+            let activeSourceName = activeSourceDisplayName
+            setStatus(.running(sourceName: activeSourceName))
+
+            // Inputs that never opened are tolerated, but not hidden: log every failure
+            // and show the first one in the overlay so a partially started session is
+            // recognizable. Leave the overlay alone once real audio has replaced the
+            // placeholder, which can happen while a later source is still starting.
+            for failure in startupFailures {
+                Logger.session.error("Input source failed to start: \(self.localizedErrorDescription(failure))")
             }
-            resetLiveTextPipeline()
-            liveTranscriptionSession = nil
-            liveTranscriptionSessions.removeAll()
-            restoreTranscript(
-                entries: previousTranscriptEntries,
-                sourceLanguageID: previousTranscriptInputLanguageID,
-                targetLanguageID: previousTranscriptOutputLanguageID
-            )
-            sessionState = .error
-            let localizedError = localizedErrorDescription(error)
-            setStatus(.custom(localizedError))
-            overlayState = OverlayPreviewState(
-                translatedText: unableToStartText,
-                sourceText: localizedError,
-                sourceName: selectedSourceName
-            )
-            overlayHistoryScrollOffset = 0
+            if let failure = startupFailures.first,
+               overlayState?.translatedText == listeningPlaceholderText {
+                overlayState = OverlayPreviewState(
+                    translatedText: listeningPlaceholderText,
+                    sourceText: localizedErrorDescription(failure),
+                    sourceName: activeSourceName
+                )
+                overlayHistoryScrollOffset = 0
+            }
+            return
         }
+
+        resetLiveTextPipeline()
+        liveTranscriptionSession = nil
+        liveTranscriptionSessions.removeAll()
+        activeSources.removeAll()
+        restoreTranscript(
+            entries: previousTranscriptEntries,
+            sourceLanguageID: previousTranscriptInputLanguageID,
+            targetLanguageID: previousTranscriptOutputLanguageID
+        )
+        sessionState = .error
+        let localizedError = startupFailures.first.map(localizedErrorDescription)
+            ?? unableToStartText
+        setStatus(.custom(localizedError))
+        overlayState = OverlayPreviewState(
+            translatedText: unableToStartText,
+            sourceText: localizedError,
+            sourceName: selectedSourceName
+        )
+        overlayHistoryScrollOffset = 0
+    }
+
+    /// Ends a running session after one of its inputs failed unrecoverably. One input
+    /// failing ends the logical session, so its siblings stop before the global
+    /// "capture stopped" state is shown.
+    private func handleFatalSessionError(_ message: String, sourceName: String) {
+        stopLiveTranscriptionSessions()
+        sessionState = .error
+        setStatus(.custom(message))
+        overlayState = OverlayPreviewState(
+            translatedText: captureStoppedText,
+            sourceText: message,
+            sourceName: sourceName
+        )
     }
 
     func stopSession() {
@@ -636,15 +784,33 @@ final class AppModel: ObservableObject {
     }
 
     private func stopLiveTranscriptionSessions() {
-        if liveTranscriptionSessions.isEmpty {
-            liveTranscriptionSession?.stop()
-        } else {
-            for session in liveTranscriptionSessions {
-                session.stop()
-            }
+        let sessions = takeLiveTranscriptionSessions()
+        for session in sessions {
+            session.stop()
         }
+    }
+
+    private func stopLiveTranscriptionSessionsAndWait() async {
+        let sessions = takeLiveTranscriptionSessions()
+        for session in sessions {
+            await session.stopAndWait()
+        }
+    }
+
+    /// Detaches the current sessions atomically on the main actor. The returned strong
+    /// references keep them alive until their callers have scheduled or completed stop.
+    private func takeLiveTranscriptionSessions() -> [LiveTranscriptionSession] {
+        let sessions: [LiveTranscriptionSession]
+        if liveTranscriptionSessions.isEmpty {
+            sessions = liveTranscriptionSession.map { [$0] } ?? []
+        } else {
+            sessions = liveTranscriptionSessions
+        }
+
         liveTranscriptionSessions.removeAll()
         liveTranscriptionSession = nil
+        activeSources.removeAll()
+        return sessions
     }
 
     func showOverlayPreview() {
@@ -735,6 +901,118 @@ final class AppModel: ObservableObject {
 
     func languageName(for identifier: String) -> String {
         LanguageCatalog.displayName(for: identifier, in: resolvedInterfaceLanguageID)
+    }
+
+    func supportedSpeechInputLanguageID(_ identifier: String) -> String {
+        speechLanguageOptions.contains(where: { $0.id == identifier }) ? identifier : "en"
+    }
+
+    /// Names the selected speech languages that this Mac can only recognize through
+    /// Apple's servers, or nil when everything selected stays on device.
+    var serverSpeechRecognitionNotice: String? {
+        let selectedLanguageIDs = selectedSources.isEmpty
+            ? [inputLanguageID]
+            : selectedSources.map { languageID(for: $0) }
+
+        let serverLanguageIDs = Set(selectedLanguageIDs).subtracting(onDeviceSpeechLanguageIDs)
+        guard serverLanguageIDs.isEmpty == false else {
+            return nil
+        }
+
+        let names = serverLanguageIDs
+            .map { languageName(for: $0) }
+            .sorted()
+            .joined(separator: ", ")
+
+        return localized(.speechUsesAppleServersFormat, names)
+    }
+
+    private func speechLocaleIdentifier(for languageID: String) -> String {
+        speechLanguageOptions.first(where: { $0.id == languageID })?.localeIdentifier
+            ?? LanguageCatalog.speechLocaleIdentifier(for: languageID)
+    }
+
+    private func translationLocaleIdentifier(for languageID: String) -> String {
+        translationLanguageOptions.first(where: { $0.id == languageID })?.localeIdentifier
+            ?? LanguageCatalog.translationLocaleIdentifier(for: languageID)
+    }
+
+    private func refreshSupportedLanguageOptions() {
+        languageCatalogRefreshTask?.cancel()
+        languageCatalogRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            let resolvedSpeechCatalog = await self.loadSupportedSpeechLanguageOptions()
+            let resolvedSpeechOptions = resolvedSpeechCatalog.options
+            let resolvedTranslationOptions = await self.loadSupportedTranslationLanguageOptions()
+            guard Task.isCancelled == false else { return }
+
+            isRefreshingLanguageCatalogs = true
+            defer { isRefreshingLanguageCatalogs = false }
+
+            if resolvedSpeechOptions.isEmpty == false {
+                speechLanguageOptions = resolvedSpeechOptions
+                onDeviceSpeechLanguageIDs = resolvedSpeechCatalog.onDeviceLanguageIDs
+                let supportedIDs = Set(resolvedSpeechOptions.map(\.id))
+                sourceLanguageOverrides = sourceLanguageOverrides.filter {
+                    supportedIDs.contains($0.value)
+                }
+                if supportedIDs.contains(inputLanguageID) == false {
+                    inputLanguageID = resolvedSpeechOptions.first(where: { $0.id == "en" })?.id
+                        ?? resolvedSpeechOptions[0].id
+                }
+            }
+
+            if resolvedTranslationOptions.isEmpty == false {
+                translationLanguageOptions = resolvedTranslationOptions
+                let supportedIDs = Set(resolvedTranslationOptions.map(\.id))
+                sourceOutputLanguageOverrides = sourceOutputLanguageOverrides.filter {
+                    supportedIDs.contains($0.value)
+                }
+                if supportedIDs.contains(outputLanguageID) == false {
+                    outputLanguageID = resolvedTranslationOptions.first(where: { $0.id == "en" })?.id
+                        ?? resolvedTranslationOptions[0].id
+                }
+            }
+        }
+    }
+
+    private func loadSupportedSpeechLanguageOptions() async -> SpeechLanguageCatalog {
+        var locales: [Locale] = []
+        // Locales that can be recognized without leaving the Mac. A language keeps only
+        // one locale, so these have to outrank the rest — otherwise a variant with no
+        // local model could win a language and push the whole session onto Apple's
+        // speech service.
+        var onDeviceLocaleIdentifiers: Set<String> = []
+
+        if #available(macOS 26.0, *), SpeechTranscriber.isAvailable {
+            let modernLocales = await SpeechTranscriber.supportedLocales
+            locales.append(contentsOf: modernLocales)
+            onDeviceLocaleIdentifiers.formUnion(modernLocales.map(\.identifier))
+        }
+
+        // The modern Speech stack is unavailable on some Macs (notably Intel models),
+        // but the legacy recognizer can still support additional locales through
+        // Apple's speech service. Keep those locales selectable and let the session
+        // prefer on-device recognition whenever the legacy recognizer offers it.
+        for locale in SFSpeechRecognizer.supportedLocales() {
+            locales.append(locale)
+            if SFSpeechRecognizer(locale: locale)?.supportsOnDeviceRecognition == true {
+                onDeviceLocaleIdentifiers.insert(locale.identifier)
+            }
+        }
+
+        let options = LanguageCatalog.options(for: locales, preferring: onDeviceLocaleIdentifiers)
+        let onDeviceLanguageIDs = options
+            .filter { $0.localeIdentifier.map(onDeviceLocaleIdentifiers.contains) ?? false }
+            .map(\.id)
+
+        return SpeechLanguageCatalog(options: options, onDeviceLanguageIDs: Set(onDeviceLanguageIDs))
+    }
+
+    private func loadSupportedTranslationLanguageOptions() async -> [LanguageOption] {
+        guard #available(macOS 15.0, *) else { return [] }
+        return LanguageCatalog.options(for: await LanguageAvailability().supportedLanguages)
     }
 
     private func preferredPrimarySourceID(for selectedSourceIDs: Set<String>) -> String? {
@@ -900,15 +1178,25 @@ final class AppModel: ObservableObject {
     private func prepareSpeechRecognitionResourceIfNeeded(
         for languageID: String
     ) async -> LanguageResourceSystemSettingsDestination? {
-        guard #available(macOS 26.0, *) else {
+        guard #available(macOS 26.0, *), SpeechTranscriber.isAvailable else {
+            // There are no modern speech assets to prepare when SpeechTranscriber is
+            // unavailable. The session will use SFSpeechRecognizer instead.
+            removeLanguageResourceStatus(id: "speech:\(languageID)")
             return nil
         }
 
         let title = localized(.speechTitleFormat, languageName(for: languageID))
         let statusID = "speech:\(languageID)"
-        let requestedLocale = Locale(identifier: LanguageCatalog.speechLocaleIdentifier(for: languageID))
+        let requestedLocale = Locale(identifier: speechLocaleIdentifier(for: languageID))
+        let resolvedLocale = await LiveTranscriptionSession.modernSpeechLocale(equivalentTo: requestedLocale)
+        let hasLegacyRecognizer = SFSpeechRecognizer(locale: requestedLocale) != nil
 
-        guard let resolvedLocale = await SpeechTranscriber.supportedLocale(equivalentTo: requestedLocale) else {
+        guard let resolvedLocale else {
+            if hasLegacyRecognizer {
+                removeLanguageResourceStatus(id: statusID)
+                return nil
+            }
+
             upsertLanguageResourceStatus(
                 LanguageResourceStatus(
                     id: statusID,
@@ -932,6 +1220,10 @@ final class AppModel: ObservableObject {
             )
             removeLanguageResourceStatus(id: statusID)
         } catch is CancellationError {
+            removeLanguageResourceStatus(id: statusID)
+        } catch LanguageResourcePreparationError.unsupportedSpeechLanguage where hasLegacyRecognizer {
+            // Apple ships no modern assets for this language on this Mac. The session
+            // falls back to SFSpeechRecognizer, so this must not block starting.
             removeLanguageResourceStatus(id: statusID)
         } catch {
             upsertLanguageResourceStatus(
@@ -1312,8 +1604,12 @@ final class AppModel: ObservableObject {
             return .unsupported
         }
 
-        let sourceLanguage = Locale.Language(identifier: sourceLanguageID)
-        let targetLanguage = Locale.Language(identifier: targetLanguageID)
+        let sourceLanguage = Locale.Language(
+            identifier: translationLocaleIdentifier(for: sourceLanguageID)
+        )
+        let targetLanguage = Locale.Language(
+            identifier: translationLocaleIdentifier(for: targetLanguageID)
+        )
         let availability = LanguageAvailability()
         return await availability.status(from: sourceLanguage, to: targetLanguage)
     }
@@ -1499,23 +1795,16 @@ final class AppModel: ObservableObject {
                 return
             }
 
-            let translated = await withTaskGroup(of: String?.self, returning: String?.self) { group in
-                group.addTask {
-                    try? await self.translationCoordinator.translate(
-                        text,
-                        from: sourceLanguageID,
-                        to: targetLanguageID
-                    )
-                }
-                // Draft translation should feel live; drop stale work quickly.
-                group.addTask {
-                    try? await Task.sleep(nanoseconds: 700_000_000)
-                    return nil
-                }
-                let result = await group.next() ?? nil
-                group.cancelAll()
-                return result
-            }
+            // Runs until it completes or a newer draft supersedes it — the next
+            // scheduleDraftTranslation call cancels this task, and the staleness
+            // guards below drop results whose draft is no longer visible. A slow
+            // translation that lands while the draft is still current is more
+            // useful applied late than discarded on a fixed deadline.
+            let translated = try? await translationCoordinator.translate(
+                text,
+                from: sourceLanguageID,
+                to: targetLanguageID
+            )
 
             guard !Task.isCancelled,
                   liveTranscriptionSession != nil,
@@ -1763,7 +2052,7 @@ final class AppModel: ObservableObject {
             sessionState = .running
         }
 
-        setStatus(.running(sourceName: selectedSourceDisplayName))
+        setStatus(.running(sourceName: activeSourceDisplayName))
     }
 
     /// Writes the caption to the transcript as soon as it is recognized, so sentences
@@ -1782,7 +2071,7 @@ final class AppModel: ObservableObject {
         let initialTranslation = initialCaptionTranslation(for: caption) ?? ""
         if initialTranslation.isEmpty == false {
             // Let the final translation replace the draft translation when it arrives.
-            translationRevisions[caption.id] = (text: initialTranslation, committedAt: Date(), count: 0)
+            translationRevisions[caption.id] = initialTranslation
         }
 
         upsertTranscriptEntry(
@@ -1953,7 +2242,6 @@ final class AppModel: ObservableObject {
         translationCoordinator.reset()
 
         Task {
-            await entityCache.reset()
             await speedMonitor.reset()
         }
     }
@@ -2084,7 +2372,7 @@ final class AppModel: ObservableObject {
                 translatedText: resolvedTranslation
             )
             if resolvedTranslation.isEmpty == false {
-                translationRevisions[caption.id] = (text: resolvedTranslation, committedAt: Date(), count: 0)
+                translationRevisions[caption.id] = resolvedTranslation
             } else {
                 translationRevisions.removeValue(forKey: caption.id)
             }
@@ -2465,7 +2753,7 @@ final class AppModel: ObservableObject {
         }
 
         if didApplyTranslation {
-            translationRevisions[captionID] = (text: translatedText, committedAt: Date(), count: 0)
+            translationRevisions[captionID] = translatedText
         }
 
         if didApplyDisplayedTranslation {
@@ -2522,7 +2810,7 @@ final class AppModel: ObservableObject {
             return true
         }
 
-        return translationRevisions[captionID]?.text == currentText
+        return translationRevisions[captionID] == currentText
     }
 
     private func resumeCaptionTranslationWaiter(
@@ -2648,35 +2936,28 @@ final class AppModel: ObservableObject {
         return comparableSource.count >= Self.sameLanguageTranslationSuppressionMinimumLength
     }
 
-    /// Checks whether a candidate revised translation is a "light edit" (Levenshtein ratio ≤ 0.18)
-    /// and applies it to the displayed overlay within the allowed 1-revision window.
-    private func maybeApplyRevision(captionId: UUID, revised: String) {
-        guard var entry = translationRevisions[captionId],
-              entry.count < 1,
-              Date().timeIntervalSince(entry.committedAt) < 1.0 else { return }
+    /// Language metadata for a transcript fed by `sources`. A mixed selection has no
+    /// single language, so it falls back to the global pair.
+    private func transcriptLanguageIDs(for sources: [InputSource]) -> (source: String, target: String) {
+        let inputIDs = Set(sources.map { languageID(for: $0) })
+        let outputIDs = Set(sources.map { outputLanguageIDForSource($0) })
+        return (
+            inputIDs.count == 1 ? inputIDs.first! : inputLanguageID,
+            outputIDs.count == 1 ? outputIDs.first! : outputLanguageID
+        )
+    }
 
-        let ratio = levenshteinDistanceRatio(entry.text, revised)
-        guard ratio <= 0.18 else { return }
-
-        entry.text = revised
-        entry.count += 1
-        translationRevisions[captionId] = entry
-
-        if displayedCaption?.id == captionId {
-            updateCommittedOverlay(
-                translatedText: revised,
-                sourceText: displayedCaption?.sourceText ?? revised,
-                lateTranslation: true
-            )
+    /// Retags an existing transcript without discarding it, for when the set of inputs
+    /// feeding it turns out to be narrower than the selection it was reset for.
+    private func updateTranscriptLanguages(sourceLanguageID: String, targetLanguageID: String) {
+        guard transcriptInputLanguageID != sourceLanguageID
+            || transcriptOutputLanguageID != targetLanguageID else {
+            return
         }
 
-        if let sourceText = transcriptEntries.first(where: { $0.id == captionId })?.sourceText {
-            upsertTranscriptEntry(
-                id: captionId,
-                sourceText: sourceText,
-                translatedText: revised
-            )
-        }
+        transcriptInputLanguageID = sourceLanguageID
+        transcriptOutputLanguageID = targetLanguageID
+        transcriptGeneration &+= 1
     }
 
     private func resetTranscript(sourceLanguageID: String, targetLanguageID: String) {
@@ -3030,6 +3311,11 @@ struct TranscriptEntry: Identifiable, Equatable {
     var translatedText: String
 }
 
+private struct SpeechLanguageCatalog {
+    let options: [LanguageOption]
+    let onDeviceLanguageIDs: Set<String>
+}
+
 private enum LanguageResourcePreparationError: LocalizedError, AppLocalizableError {
     case unsupportedSpeechLanguage
     case speechDownloadTimedOut
@@ -3077,580 +3363,6 @@ struct LanguageResourceStatus: Identifiable, Equatable {
     let detail: String
     let progress: Double?
     let isError: Bool
-}
-
-@MainActor
-private final class TranslationCoordinator: ObservableObject {
-    private static let runnerIdleTimeout: TimeInterval = 0.35
-
-    private struct LanguagePair: Equatable {
-        let source: String
-        let target: String
-    }
-
-    enum Priority {
-        /// Captions on screen or about to be shown, and live drafts.
-        case normal
-        /// Transcript-only work that runs only when no normal request is waiting.
-        case background
-    }
-
-    private enum PendingOperation {
-        case prepare(
-            id: UUID,
-            generation: Int,
-            pair: LanguagePair,
-            continuation: CheckedContinuation<Void, Error>
-        )
-        case translate(
-            id: UUID,
-            generation: Int,
-            pair: LanguagePair,
-            text: String,
-            priority: Priority,
-            continuation: CheckedContinuation<String, Error>
-        )
-
-        var id: UUID {
-            switch self {
-            case .prepare(let id, _, _, _), .translate(let id, _, _, _, _, _):
-                return id
-            }
-        }
-
-        var generation: Int {
-            switch self {
-            case .prepare(_, let generation, _, _), .translate(_, let generation, _, _, _, _):
-                return generation
-            }
-        }
-
-        var pair: LanguagePair {
-            switch self {
-            case .prepare(_, _, let pair, _), .translate(_, _, let pair, _, _, _):
-                return pair
-            }
-        }
-
-        var priority: Priority {
-            switch self {
-            case .prepare:
-                return .normal
-            case .translate(_, _, _, _, let priority, _):
-                return priority
-            }
-        }
-    }
-
-    private enum OperationWaitResult {
-        case signaled
-        case timedOut
-    }
-
-    enum ServiceError: LocalizedError, AppLocalizableError {
-        case unavailableOnSystem
-        case unsupportedPair(String, String)
-
-        func localizedDescription(languageID: String) -> String {
-            switch self {
-            case .unavailableOnSystem:
-                return AppLocalization.string(.translationRequiresMacOS15OrNewer, languageID: languageID)
-            case .unsupportedPair(let source, let target):
-                return AppLocalization.string(
-                    .translationUnsupportedFromToFormat,
-                    languageID: languageID,
-                    source,
-                    target
-                )
-            }
-        }
-
-        var errorDescription: String? {
-            localizedDescription(languageID: "en")
-        }
-    }
-
-    var onConfigurationChange: ((TranslationSession.Configuration?) -> Void)?
-
-    private(set) var configuration: TranslationSession.Configuration? {
-        didSet {
-            onConfigurationChange?(configuration)
-        }
-    }
-
-    private var currentPair: LanguagePair?
-    private var pendingOperations: [PendingOperation] = []
-    private var activeRunnerID: UUID?
-    private var activeOperationID: UUID?
-    private var cancelledOperationIDs: Set<UUID> = []
-    private var generation: Int = 0
-    private var runnerAvailabilityWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
-    private var operationSignalWaiters: [UUID: CheckedContinuation<OperationWaitResult, Never>] = [:]
-    fileprivate var consecutiveTimeouts: Int = 0
-
-    func prepareIfNeeded(
-        from sourceIdentifier: String,
-        to targetIdentifier: String
-    ) async throws {
-        guard sourceIdentifier != targetIdentifier else {
-            return
-        }
-
-        let pair = LanguagePair(source: sourceIdentifier, target: targetIdentifier)
-        let requestGeneration = generation
-        let status = try await availabilityStatus(for: pair)
-        guard requestGeneration == generation else {
-            throw CancellationError()
-        }
-
-        guard status != .installed else {
-            return
-        }
-
-        let operationID = UUID()
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                enqueue(
-                    .prepare(
-                        id: operationID,
-                        generation: requestGeneration,
-                        pair: pair,
-                        continuation: continuation
-                    )
-                )
-            }
-        } onCancel: {
-            Task { @MainActor in
-                self.cancelOperation(id: operationID)
-            }
-        }
-    }
-
-    func translate(
-        _ text: String,
-        from sourceIdentifier: String,
-        to targetIdentifier: String,
-        priority: Priority = .normal
-    ) async throws -> String {
-        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmedText.isEmpty == false else {
-            return ""
-        }
-
-        guard sourceIdentifier != targetIdentifier else {
-            return trimmedText
-        }
-
-        let pair = LanguagePair(source: sourceIdentifier, target: targetIdentifier)
-        let requestGeneration = generation
-        _ = try await availabilityStatus(for: pair)
-        guard requestGeneration == generation else {
-            throw CancellationError()
-        }
-
-        let operationID = UUID()
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                enqueue(
-                    .translate(
-                        id: operationID,
-                        generation: requestGeneration,
-                        pair: pair,
-                        text: trimmedText,
-                        priority: priority,
-                        continuation: continuation
-                    )
-                )
-            }
-        } onCancel: {
-            Task { @MainActor in
-                self.cancelOperation(id: operationID)
-            }
-        }
-    }
-
-    @available(macOS 15.0, *)
-    func run(using session: TranslationSession) async {
-        let runnerID = UUID()
-
-        while Task.isCancelled == false {
-            if activeRunnerID == nil {
-                activeRunnerID = runnerID
-                break
-            }
-
-            if activeRunnerID == runnerID {
-                break
-            }
-
-            await waitForRunnerAvailability(runnerID: runnerID)
-        }
-
-        guard Task.isCancelled == false else {
-            return
-        }
-
-        let runnerGeneration = generation
-
-        defer {
-            if activeRunnerID == runnerID {
-                activeRunnerID = nil
-                signalRunnerAvailabilityWaiters()
-                if generation == runnerGeneration, let nextIndex = nextPendingOperationIndex() {
-                    activate(pair: pendingOperations[nextIndex].pair)
-                }
-            }
-        }
-
-        guard runnerGeneration == generation else {
-            return
-        }
-
-        guard let anchoredPair = currentPair else {
-            return
-        }
-
-        while Task.isCancelled == false {
-            guard runnerGeneration == generation else {
-                return
-            }
-
-            guard let operation = await nextOperation(
-                for: anchoredPair,
-                generation: runnerGeneration,
-                idleTimeout: Self.runnerIdleTimeout
-            ) else {
-                return
-            }
-
-            activeOperationID = operation.id
-
-            switch operation {
-            case .prepare(let id, _, _, let continuation):
-                do {
-                    try await session.prepareTranslation()
-                    finishOperation(id: id, continuation: continuation)
-                } catch {
-                    finishOperation(id: id, continuation: continuation, error: error)
-                }
-
-            case .translate(let id, _, _, let text, _, let continuation):
-                do {
-                    let response = try await session.translate(text)
-                    let translatedText = response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    finishOperation(
-                        id: id,
-                        continuation: continuation,
-                        result: translatedText.isEmpty ? text : translatedText
-                    )
-                } catch {
-                    finishOperation(id: id, continuation: continuation, error: error)
-                }
-            }
-        }
-    }
-
-    func reset() {
-        generation &+= 1
-        cancelOutstandingOperations()
-        currentPair = nil
-        configuration = nil
-    }
-
-    /// Invalidate the current TranslationSession so SwiftUI's `.translationTask()`
-    /// provides a fresh session. Use this to recover from a stuck translation state
-    /// without requiring a full app restart.
-    func invalidateSession() {
-        configuration?.invalidate()
-        activeRunnerID = nil
-        signalRunnerAvailabilityWaiters()
-        configuration = nil
-    }
-
-    /// Full recovery: invalidate the stuck session, reset all state, then immediately
-    /// create a fresh configuration for the given language pair so a new runner can start.
-    /// The old runner (stuck in session.translate()) will see a generation mismatch and exit.
-    func recoverSession(source: String, target: String) {
-        var oldConfig = configuration
-        // Bump generation so the stuck runner exits when it finally returns
-        generation &+= 1
-        cancelOutstandingOperations()
-
-        // Invalidate the old session so SwiftUI provides a fresh one
-        oldConfig?.invalidate()
-
-        // Immediately create a new configuration for the current pair
-        // so SwiftUI's .translationTask() fires with a new session
-        currentPair = LanguagePair(source: source, target: target)
-        configuration = TranslationSession.Configuration(
-            source: Locale.Language(identifier: source),
-            target: Locale.Language(identifier: target)
-        )
-    }
-
-    private func enqueue(_ operation: PendingOperation) {
-        activate(pair: operation.pair)
-        pendingOperations.append(operation)
-        signalOperationWaiters()
-    }
-
-    private func activate(pair: LanguagePair) {
-        if activeRunnerID != nil, currentPair != pair {
-            return
-        }
-
-        if currentPair != pair || configuration == nil {
-            currentPair = pair
-            configuration = TranslationSession.Configuration(
-                source: Locale.Language(identifier: pair.source),
-                target: Locale.Language(identifier: pair.target)
-            )
-            return
-        }
-
-        if activeRunnerID == nil {
-            // Each TranslationSession is view-anchored and should be refreshed
-            // once the previous runner has drained and exited.
-            configuration?.invalidate()
-        }
-    }
-
-    private func cancelOperation(id: UUID) {
-        if let index = pendingOperations.firstIndex(where: { $0.id == id }) {
-            let operation = pendingOperations.remove(at: index)
-            cancel(operation)
-            return
-        }
-
-        if activeOperationID == id {
-            cancelledOperationIDs.insert(id)
-        }
-    }
-
-    private func cancelOutstandingOperations() {
-        cancelledOperationIDs.removeAll()
-        if let activeOperationID {
-            cancelledOperationIDs.insert(activeOperationID)
-        }
-
-        for operation in pendingOperations {
-            cancel(operation)
-        }
-
-        pendingOperations.removeAll()
-        activeRunnerID = nil
-        activeOperationID = nil
-        consecutiveTimeouts = 0
-        signalRunnerAvailabilityWaiters()
-        signalOperationWaiters()
-    }
-
-    private func cancel(_ operation: PendingOperation) {
-        switch operation {
-        case .prepare(_, _, _, let continuation):
-            continuation.resume(throwing: CancellationError())
-        case .translate(_, _, _, _, _, let continuation):
-            continuation.resume(throwing: CancellationError())
-        }
-    }
-
-    /// First queued operation to run: normal requests go ahead of background ones.
-    private func nextPendingOperationIndex(
-        where matches: (PendingOperation) -> Bool = { _ in true }
-    ) -> Int? {
-        pendingOperations.firstIndex { matches($0) && $0.priority == .normal }
-            ?? pendingOperations.firstIndex(where: matches)
-    }
-
-    @available(macOS 15.0, *)
-    private func nextOperation(
-        for pair: LanguagePair,
-        generation: Int,
-        idleTimeout: TimeInterval
-    ) async -> PendingOperation? {
-        let deadline = Date().addingTimeInterval(idleTimeout)
-
-        while Task.isCancelled == false {
-            guard generation == self.generation else {
-                return nil
-            }
-
-            if let index = nextPendingOperationIndex(where: {
-                $0.pair == pair && $0.generation == generation
-            }) {
-                // Only background work is left for this pair: hand the session to another
-                // pair's normal work first. The runner exit activates that pair.
-                if pendingOperations[index].priority == .background,
-                   pendingOperations.contains(where: { $0.priority == .normal && $0.generation == generation }) {
-                    return nil
-                }
-                return pendingOperations.remove(at: index)
-            }
-
-            if await waitForOperationSignal(for: pair, generation: generation, until: deadline) == .timedOut {
-                return nil
-            }
-        }
-
-        return nil
-    }
-
-    private func waitForRunnerAvailability(runnerID: UUID) async {
-        let waiterID = UUID()
-
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                if activeRunnerID == nil || activeRunnerID == runnerID {
-                    continuation.resume()
-                    return
-                }
-
-                runnerAvailabilityWaiters[waiterID] = continuation
-            }
-        } onCancel: {
-            Task { @MainActor [weak self] in
-                self?.resumeRunnerAvailabilityWaiter(id: waiterID)
-            }
-        }
-    }
-
-    private func resumeRunnerAvailabilityWaiter(id: UUID) {
-        guard let continuation = runnerAvailabilityWaiters.removeValue(forKey: id) else {
-            return
-        }
-
-        continuation.resume()
-    }
-
-    private func signalRunnerAvailabilityWaiters() {
-        let waiters = runnerAvailabilityWaiters
-        runnerAvailabilityWaiters.removeAll()
-
-        for continuation in waiters.values {
-            continuation.resume()
-        }
-    }
-
-    private func waitForOperationSignal(
-        for pair: LanguagePair,
-        generation: Int,
-        until deadline: Date
-    ) async -> OperationWaitResult {
-        guard deadline.timeIntervalSinceNow > 0 else {
-            return .timedOut
-        }
-
-        let waiterID = UUID()
-        let timeoutTask = Task { @MainActor [weak self] in
-            let remaining = max(0, deadline.timeIntervalSinceNow)
-            if remaining > 0 {
-                do {
-                    try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
-                } catch {
-                    return
-                }
-            }
-
-            self?.resumeOperationWaiter(id: waiterID, result: .timedOut)
-        }
-
-        return await withTaskCancellationHandler {
-            let result = await withCheckedContinuation { (continuation: CheckedContinuation<OperationWaitResult, Never>) in
-                guard self.generation == generation else {
-                    continuation.resume(returning: .signaled)
-                    return
-                }
-
-                if self.pendingOperations.contains(where: { $0.pair == pair && $0.generation == generation }) {
-                    continuation.resume(returning: .signaled)
-                    return
-                }
-
-                self.operationSignalWaiters[waiterID] = continuation
-            }
-
-            timeoutTask.cancel()
-            return result
-        } onCancel: {
-            timeoutTask.cancel()
-            Task { @MainActor [weak self] in
-                self?.resumeOperationWaiter(id: waiterID, result: .timedOut)
-            }
-        }
-    }
-
-    private func resumeOperationWaiter(id: UUID, result: OperationWaitResult) {
-        guard let continuation = operationSignalWaiters.removeValue(forKey: id) else {
-            return
-        }
-
-        continuation.resume(returning: result)
-    }
-
-    private func signalOperationWaiters() {
-        let waiters = operationSignalWaiters
-        operationSignalWaiters.removeAll()
-
-        for continuation in waiters.values {
-            continuation.resume(returning: .signaled)
-        }
-    }
-
-    private func finishOperation(
-        id: UUID,
-        continuation: CheckedContinuation<Void, Error>,
-        error: Error? = nil
-    ) {
-        activeOperationID = nil
-
-        if cancelledOperationIDs.remove(id) != nil {
-            continuation.resume(throwing: CancellationError())
-            return
-        }
-
-        if let error {
-            continuation.resume(throwing: error)
-        } else {
-            continuation.resume()
-        }
-    }
-
-    private func finishOperation(
-        id: UUID,
-        continuation: CheckedContinuation<String, Error>,
-        result: String? = nil,
-        error: Error? = nil
-    ) {
-        activeOperationID = nil
-
-        if cancelledOperationIDs.remove(id) != nil {
-            continuation.resume(throwing: CancellationError())
-            return
-        }
-
-        if let error {
-            continuation.resume(throwing: error)
-        } else {
-            continuation.resume(returning: result ?? "")
-        }
-    }
-
-    private func availabilityStatus(for pair: LanguagePair) async throws -> LanguageAvailability.Status {
-        guard #available(macOS 15.0, *) else {
-            throw ServiceError.unavailableOnSystem
-        }
-
-        let sourceLanguage = Locale.Language(identifier: pair.source)
-        let targetLanguage = Locale.Language(identifier: pair.target)
-        let availability = LanguageAvailability()
-        let availabilityStatus = await availability.status(from: sourceLanguage, to: targetLanguage)
-
-        guard availabilityStatus != .unsupported else {
-            throw ServiceError.unsupportedPair(pair.source, pair.target)
-        }
-
-        return availabilityStatus
-    }
 }
 
 extension View {

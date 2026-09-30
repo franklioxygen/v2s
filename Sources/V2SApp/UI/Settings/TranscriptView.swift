@@ -1,9 +1,6 @@
 import AppKit
 import Combine
 import SwiftUI
-#if canImport(FoundationModels)
-import FoundationModels
-#endif
 
 // MARK: - TranscriptWindowController
 
@@ -231,19 +228,12 @@ struct TranscriptView: View {
             isSummarizeEnabled = false
             return
         }
-#if canImport(FoundationModels)
-        guard #available(macOS 26.0, *) else {
-            isSummarizeEnabled = false
-            summarizeError = model.localized(.summarizationRequiresMacOS26)
-            return
-        }
-
         summarizeGeneration &+= 1
         let generation = summarizeGeneration
         isSummarizing = true
         summarizeTask = Task {
             do {
-                let result = try await Self.runFoundationModelSummarization(
+                let result = try await TranscriptSummarizer.summarize(
                     text: text,
                     languageID: languageID
                 )
@@ -265,41 +255,5 @@ struct TranscriptView: View {
                 }
             }
         }
-#else
-        isSummarizeEnabled = false
-        summarizeError = model.localized(.summarizationRequiresMacOS26)
-#endif
     }
-
-#if canImport(FoundationModels)
-    @available(macOS 26.0, *)
-    private static func runFoundationModelSummarization(
-        text: String,
-        languageID: String
-    ) async throws -> String {
-        let session = LanguageModelSession()
-        let prompt = summarizationPrompt(text: text, languageID: languageID)
-        let response = try await session.respond(to: prompt)
-        return response.content.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    @available(macOS 26.0, *)
-    private static func summarizationPrompt(text: String, languageID: String) -> String {
-        let languageName = summaryLanguageName(for: languageID)
-        return """
-        Provide a concise summary of the following transcript.
-        The summary must be written in \(languageName) (\(languageID)).
-        Preserve the key points and do not translate the summary into any other language.
-
-        Transcript:
-        \(text)
-        """
-    }
-
-    @available(macOS 26.0, *)
-    private static func summaryLanguageName(for languageID: String) -> String {
-        Locale(identifier: "en").localizedString(forIdentifier: languageID)
-            ?? LanguageCatalog.displayName(for: languageID)
-    }
-#endif
 }

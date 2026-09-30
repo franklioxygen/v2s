@@ -53,6 +53,23 @@ jobs:
             -derivedDataPath .build/release \
             build
 
+      - name: Verify universal binary
+        run: |
+          APP_BINARY=".build/release/Build/Products/Release/v2s.app/Contents/MacOS/v2s"
+          ARCHS="$(lipo -archs "$APP_BINARY")"
+          echo "Built architectures: $ARCHS"
+
+          for required in arm64 x86_64; do
+            case " $ARCHS " in
+              *" $required "*)
+                ;;
+              *)
+                echo "::error::Release binary is missing the $required slice"
+                exit 1
+                ;;
+            esac
+          done
+
       - name: Package app
         id: package
         run: |
@@ -124,3 +141,55 @@ jobs:
               --generate-notes \
               --verify-tag
           fi
+
+      - name: Update Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_REPO: franklioxygen/homebrew-v2s
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not set; skipping Homebrew tap update."
+            exit 0
+          fi
+
+          SHA256="$(awk '{print $1}' "${{ steps.package.outputs.checksum }}")"
+          if [ -z "$SHA256" ]; then
+            echo "::error::Could not read the release checksum"
+            exit 1
+          fi
+
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+
+          # Republishing an older tag must not downgrade the cask users install.
+          TAPPED_VERSION=""
+          if [ -f tap/Casks/v2s.rb ]; then
+            TAPPED_VERSION="$(sed -n 's/^  version "\(.*\)"$/\1/p' tap/Casks/v2s.rb | head -1)"
+          fi
+          if [ -n "$TAPPED_VERSION" ] && [ "$TAPPED_VERSION" != "$VERSION" ]; then
+            NEWEST="$(printf '%s\n%s\n' "$TAPPED_VERSION" "$VERSION" | sort -V | tail -1)"
+            if [ "$NEWEST" != "$VERSION" ]; then
+              echo "Tap already has ${TAPPED_VERSION}, which is newer than ${VERSION}; skipping."
+              exit 0
+            fi
+          fi
+
+          mkdir -p tap/Casks
+          sed \
+            -e "s/__VERSION__/${VERSION}/g" \
+            -e "s/__SHA256__/${SHA256}/g" \
+            packaging/homebrew/v2s.rb.template > tap/Casks/v2s.rb
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/v2s.rb
+
+          if git diff --cached --quiet; then
+            echo "Cask already up to date."
+            exit 0
+          fi
+
+          git commit -m "v2s ${VERSION}"
+          git push

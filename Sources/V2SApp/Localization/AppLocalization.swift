@@ -52,6 +52,8 @@ enum AppTextKey: String {
     case textOutline
     case outlineColor
     case attachToSource
+    case invisibleInRecording
+    case invisibleInRecordingHint
     case subtitleColor
     case backgroundColor
     case resetColors
@@ -112,6 +114,7 @@ enum AppTextKey: String {
     case speechTitleFormat
     case translationTitleFormat
     case speechNotAvailableOnMacOS
+    case speechUsesAppleServersFormat
     case downloadingSpeechResources
     case translationNotSupportedPairOnMacOS
     case downloadingTranslationResources
@@ -122,7 +125,6 @@ enum AppTextKey: String {
     case translationResourceDownloadTimedOut
     case translationRequiresMacOS15OrNewer
     case translationUnsupportedFromToFormat
-    case sileroVadUnavailableWithoutOnnx
     case speechPermissionDenied
     case microphonePermissionDenied
     case appAudioCapturePermissionDenied
@@ -131,6 +133,7 @@ enum AppTextKey: String {
     case missingMicrophoneDevice
     case missingApplicationFormat
     case applicationNotProducingAudioFormat
+    case applicationAudioLostFormat
     case failedToStartCaptureFormat
     case sileroVadUnavailableFallbackFormat
     case speechRecognitionStoppedFormat
@@ -145,10 +148,8 @@ enum AppTextKey: String {
     case failedToConvertCapturedAudioForSpeechRecognition
     case failedToAllocateSpeechAnalyzerAudioBuffer
     case failedToConvertCapturedAudioForSpeechAnalyzer
-    case noOutputAudioDeviceForAppCapture
     case selectedAppAudioFormatCouldNotBePrepared
     case failedToStageWithReasonFormat
-    case failedToReadCapturedAudioStreamFormat
     case scrollToLatestSubtitle
     case resetOverlaySize
     case transcript
@@ -171,12 +172,12 @@ enum AppTextKey: String {
 enum AppLocalization {
     static func resolvedInterfaceLanguageID(storedIdentifier: String?) -> String {
         if let storedIdentifier,
-           LanguageCatalog.common.contains(where: { $0.id == storedIdentifier }) {
+           LanguageCatalog.interface.contains(where: { $0.id == storedIdentifier }) {
             return storedIdentifier
         }
 
         return Bundle.preferredLocalizations(
-            from: LanguageCatalog.common.map(\.id),
+            from: LanguageCatalog.interface.map(\.id),
             forPreferences: Locale.preferredLanguages
         ).first ?? "en"
     }
@@ -334,6 +335,8 @@ enum AppLocalization {
             "textOutline": "Text Outline",
             "outlineColor": "Outline Color",
             "attachToSource": "Attach to Source",
+            "invisibleInRecording": "Invisible in Recording",
+            "invisibleInRecordingHint": "Subtitles stay on your screen but are left out of screen recordings, screenshots, and shared screens.",
             "subtitleColor": "Subtitle Color",
             "backgroundColor": "Background Color",
             "resetColors": "Reset Colors",
@@ -394,6 +397,7 @@ enum AppLocalization {
             "speechTitleFormat": "Speech · %@",
             "translationTitleFormat": "Translation · %@ → %@",
             "speechNotAvailableOnMacOS": "Speech recognition is not available for this language on this macOS version.",
+            "speechUsesAppleServersFormat": "This Mac has no on-device speech model for %@, so Apple's servers handle recognition.",
             "downloadingSpeechResources": "Downloading on-device speech recognition resources...",
             "translationNotSupportedPairOnMacOS": "Translation is not supported for this language pair on this macOS version.",
             "downloadingTranslationResources": "Downloading on-device translation resources...",
@@ -404,7 +408,6 @@ enum AppLocalization {
             "translationResourceDownloadTimedOut": "Automatic translation resource download timed out.",
             "translationRequiresMacOS15OrNewer": "Translation requires macOS 15 or newer.",
             "translationUnsupportedFromToFormat": "Translation is not supported from %@ to %@.",
-            "sileroVadUnavailableWithoutOnnx": "Silero VAD is unavailable because this build does not include the ONNX runtime dependency.",
             "speechPermissionDenied": "Speech recognition permission was denied.",
             "microphonePermissionDenied": "Microphone permission was denied.",
             "appAudioCapturePermissionDenied": "App audio capture permission was denied. Allow v2s to capture audio from other apps, then reopen the app.",
@@ -413,6 +416,7 @@ enum AppLocalization {
             "missingMicrophoneDevice": "The selected microphone is no longer available.",
             "missingApplicationFormat": "The selected app, %@, is no longer available.",
             "applicationNotProducingAudioFormat": "%@ is not producing app audio yet. Start playback in the app, then try again.",
+            "applicationAudioLostFormat": "Lost the audio from %@ and could not reconnect. Click Start to try again.",
             "failedToStartCaptureFormat": "%@",
             "sileroVadUnavailableFallbackFormat": "Silero VAD unavailable: %@. Falling back to ASR-based silence detection.",
             "speechRecognitionStoppedFormat": "Speech recognition stopped: %@",
@@ -427,10 +431,8 @@ enum AppLocalization {
             "failedToConvertCapturedAudioForSpeechRecognition": "Failed to convert captured audio for speech recognition",
             "failedToAllocateSpeechAnalyzerAudioBuffer": "Failed to allocate a SpeechAnalyzer audio buffer.",
             "failedToConvertCapturedAudioForSpeechAnalyzer": "Failed to convert captured audio for SpeechAnalyzer",
-            "noOutputAudioDeviceForAppCapture": "No output audio device is available for app capture.",
             "selectedAppAudioFormatCouldNotBePrepared": "The selected app's audio format could not be prepared for capture.",
             "failedToStageWithReasonFormat": "Failed to %@: %@",
-            "failedToReadCapturedAudioStreamFormat": "Failed to read the captured audio stream for %@.",
             "scrollToLatestSubtitle": "Scroll to latest subtitle",
             "resetOverlaySize": "Reset overlay size",
             "transcript": "Transcript",
@@ -496,6 +498,8 @@ enum AppLocalization {
             "textOutline": "文字描边",
             "outlineColor": "描边颜色",
             "attachToSource": "附着到源应用",
+            "invisibleInRecording": "录屏中隐藏",
+            "invisibleInRecordingHint": "字幕仍显示在你的屏幕上，但不会出现在录屏、截图和屏幕共享中。",
             "subtitleColor": "字幕颜色",
             "backgroundColor": "背景颜色",
             "resetColors": "重置颜色",
@@ -556,6 +560,7 @@ enum AppLocalization {
             "speechTitleFormat": "语音识别 · %@",
             "translationTitleFormat": "翻译 · %@ → %@",
             "speechNotAvailableOnMacOS": "当前 macOS 版本不支持此语言的语音识别。",
+            "speechUsesAppleServersFormat": "本机没有%@的本地语音模型，识别将由 Apple 服务器完成。",
             "downloadingSpeechResources": "正在下载本地语音识别资源...",
             "translationNotSupportedPairOnMacOS": "当前 macOS 版本不支持此语言对的翻译。",
             "downloadingTranslationResources": "正在下载本地翻译资源...",
@@ -566,7 +571,6 @@ enum AppLocalization {
             "translationResourceDownloadTimedOut": "自动下载翻译资源超时。",
             "translationRequiresMacOS15OrNewer": "翻译功能需要 macOS 15 或更高版本。",
             "translationUnsupportedFromToFormat": "当前不支持从 %@ 翻译到 %@。",
-            "sileroVadUnavailableWithoutOnnx": "当前构建未包含 ONNX Runtime 依赖，因此 Silero VAD 不可用。",
             "speechPermissionDenied": "语音识别权限被拒绝。",
             "microphonePermissionDenied": "麦克风权限被拒绝。",
             "appAudioCapturePermissionDenied": "应用音频采集权限被拒绝。请允许 v2s 采集其他应用的音频，然后重新打开应用。",
@@ -575,6 +579,7 @@ enum AppLocalization {
             "missingMicrophoneDevice": "所选麦克风已不可用。",
             "missingApplicationFormat": "所选应用 %@ 已不可用。",
             "applicationNotProducingAudioFormat": "%@ 目前还没有输出应用音频。请先在应用中开始播放，再重试。",
+            "applicationAudioLostFormat": "%@ 的音频已中断，且无法重新连接。请点击“开始”重试。",
             "failedToStartCaptureFormat": "%@",
             "sileroVadUnavailableFallbackFormat": "Silero VAD 不可用：%@。将回退到基于 ASR 的静音检测。",
             "speechRecognitionStoppedFormat": "语音识别已停止：%@",
@@ -589,10 +594,8 @@ enum AppLocalization {
             "failedToConvertCapturedAudioForSpeechRecognition": "无法将采集音频转换为语音识别格式",
             "failedToAllocateSpeechAnalyzerAudioBuffer": "无法分配 SpeechAnalyzer 音频缓冲区。",
             "failedToConvertCapturedAudioForSpeechAnalyzer": "无法将采集音频转换为 SpeechAnalyzer 格式",
-            "noOutputAudioDeviceForAppCapture": "应用采集没有可用的输出音频设备。",
             "selectedAppAudioFormatCouldNotBePrepared": "无法为采集准备所选应用的音频格式。",
             "failedToStageWithReasonFormat": "无法%@：%@",
-            "failedToReadCapturedAudioStreamFormat": "无法读取 %@ 的采集音频流。",
             "scrollToLatestSubtitle": "滚动到最新字幕",
             "resetOverlaySize": "重置字幕窗大小",
             "transcript": "字幕记录",
@@ -658,6 +661,8 @@ enum AppLocalization {
             "textOutline": "Contorno del texto",
             "outlineColor": "Color del contorno",
             "attachToSource": "Vincular a la fuente",
+            "invisibleInRecording": "Invisible en grabaciones",
+            "invisibleInRecordingHint": "Los subtítulos siguen en tu pantalla, pero no aparecen en grabaciones de pantalla, capturas ni pantallas compartidas.",
             "subtitleColor": "Color del subtítulo",
             "backgroundColor": "Color de fondo",
             "resetColors": "Restablecer colores",
@@ -718,6 +723,7 @@ enum AppLocalization {
             "speechTitleFormat": "Reconocimiento de voz · %@",
             "translationTitleFormat": "Traducción · %@ → %@",
             "speechNotAvailableOnMacOS": "El reconocimiento de voz no está disponible para este idioma en esta versión de macOS.",
+            "speechUsesAppleServersFormat": "Este Mac no tiene un modelo de voz en el dispositivo para %@, así que el reconocimiento se realiza en los servidores de Apple.",
             "downloadingSpeechResources": "Descargando recursos de reconocimiento de voz en el dispositivo...",
             "translationNotSupportedPairOnMacOS": "La traducción no es compatible con este par de idiomas en esta versión de macOS.",
             "downloadingTranslationResources": "Descargando recursos de traducción en el dispositivo...",
@@ -728,7 +734,6 @@ enum AppLocalization {
             "translationResourceDownloadTimedOut": "Se agotó el tiempo de descarga automática del recurso de traducción.",
             "translationRequiresMacOS15OrNewer": "La traducción requiere macOS 15 o superior.",
             "translationUnsupportedFromToFormat": "La traducción no es compatible de %@ a %@.",
-            "sileroVadUnavailableWithoutOnnx": "Silero VAD no está disponible porque esta compilación no incluye la dependencia ONNX Runtime.",
             "speechPermissionDenied": "Se denegó el permiso de reconocimiento de voz.",
             "microphonePermissionDenied": "Se denegó el permiso del micrófono.",
             "appAudioCapturePermissionDenied": "Se denegó el permiso para capturar el audio de aplicaciones. Permite que v2s capture audio de otras apps y vuelve a abrir la app.",
@@ -737,6 +742,7 @@ enum AppLocalization {
             "missingMicrophoneDevice": "El micrófono seleccionado ya no está disponible.",
             "missingApplicationFormat": "La app seleccionada, %@, ya no está disponible.",
             "applicationNotProducingAudioFormat": "%@ aún no está produciendo audio de la app. Inicia la reproducción y vuelve a intentarlo.",
+            "applicationAudioLostFormat": "Se perdió el audio de %@ y no se pudo volver a conectar. Haz clic en Iniciar para volver a intentarlo.",
             "failedToStartCaptureFormat": "%@",
             "sileroVadUnavailableFallbackFormat": "Silero VAD no disponible: %@. Se usará detección de silencio basada en ASR.",
             "speechRecognitionStoppedFormat": "El reconocimiento de voz se detuvo: %@",
@@ -751,10 +757,8 @@ enum AppLocalization {
             "failedToConvertCapturedAudioForSpeechRecognition": "No se pudo convertir el audio capturado para reconocimiento de voz",
             "failedToAllocateSpeechAnalyzerAudioBuffer": "No se pudo asignar un búfer de audio para SpeechAnalyzer.",
             "failedToConvertCapturedAudioForSpeechAnalyzer": "No se pudo convertir el audio capturado para SpeechAnalyzer",
-            "noOutputAudioDeviceForAppCapture": "No hay un dispositivo de salida de audio disponible para la captura de apps.",
             "selectedAppAudioFormatCouldNotBePrepared": "No se pudo preparar el formato de audio de la app seleccionada para la captura.",
             "failedToStageWithReasonFormat": "No se pudo %@: %@",
-            "failedToReadCapturedAudioStreamFormat": "No se pudo leer el flujo de audio capturado de %@.",
             "scrollToLatestSubtitle": "Ir al subtítulo más reciente",
             "resetOverlaySize": "Restablecer tamaño del overlay",
             "transcript": "Transcripción",
@@ -820,6 +824,8 @@ enum AppLocalization {
             "textOutline": "Textkontur",
             "outlineColor": "Konturfarbe",
             "attachToSource": "An Quelle anheften",
+            "invisibleInRecording": "In Aufnahmen unsichtbar",
+            "invisibleInRecordingHint": "Untertitel bleiben auf deinem Bildschirm sichtbar, erscheinen aber nicht in Bildschirmaufnahmen, Screenshots oder geteilten Bildschirmen.",
             "subtitleColor": "Untertitelfarbe",
             "backgroundColor": "Hintergrundfarbe",
             "resetColors": "Farben zurücksetzen",
@@ -880,6 +886,7 @@ enum AppLocalization {
             "speechTitleFormat": "Spracherkennung · %@",
             "translationTitleFormat": "Übersetzung · %@ → %@",
             "speechNotAvailableOnMacOS": "Spracherkennung ist für diese Sprache in dieser macOS-Version nicht verfügbar.",
+            "speechUsesAppleServersFormat": "Für %@ gibt es auf diesem Mac kein lokales Sprachmodell, daher übernehmen Apples Server die Erkennung.",
             "downloadingSpeechResources": "On-Device-Ressourcen für Spracherkennung werden heruntergeladen...",
             "translationNotSupportedPairOnMacOS": "Übersetzung wird für dieses Sprachpaar in dieser macOS-Version nicht unterstützt.",
             "downloadingTranslationResources": "On-Device-Übersetzungsressourcen werden heruntergeladen...",
@@ -890,7 +897,6 @@ enum AppLocalization {
             "translationResourceDownloadTimedOut": "Der automatische Download der Übersetzungsressource hat das Zeitlimit überschritten.",
             "translationRequiresMacOS15OrNewer": "Übersetzung erfordert macOS 15 oder neuer.",
             "translationUnsupportedFromToFormat": "Übersetzung von %@ nach %@ wird nicht unterstützt.",
-            "sileroVadUnavailableWithoutOnnx": "Silero VAD ist nicht verfügbar, weil dieser Build die ONNX-Runtime-Abhängigkeit nicht enthält.",
             "speechPermissionDenied": "Die Berechtigung für Spracherkennung wurde verweigert.",
             "microphonePermissionDenied": "Die Mikrofonberechtigung wurde verweigert.",
             "appAudioCapturePermissionDenied": "Die Berechtigung zur App-Audioaufnahme wurde verweigert. Erlaube v2s, Audio aus anderen Apps aufzunehmen, und öffne die App dann erneut.",
@@ -899,6 +905,7 @@ enum AppLocalization {
             "missingMicrophoneDevice": "Das ausgewählte Mikrofon ist nicht mehr verfügbar.",
             "missingApplicationFormat": "Die ausgewählte App %@ ist nicht mehr verfügbar.",
             "applicationNotProducingAudioFormat": "%@ gibt noch kein App-Audio aus. Starte die Wiedergabe in der App und versuche es erneut.",
+            "applicationAudioLostFormat": "Der Ton von %@ ist abgebrochen und konnte nicht wiederhergestellt werden. Klicke auf „Starten“, um es erneut zu versuchen.",
             "failedToStartCaptureFormat": "%@",
             "sileroVadUnavailableFallbackFormat": "Silero VAD nicht verfügbar: %@. Es wird auf ASR-basierte Stilleerkennung zurückgegriffen.",
             "speechRecognitionStoppedFormat": "Spracherkennung wurde gestoppt: %@",
@@ -913,10 +920,8 @@ enum AppLocalization {
             "failedToConvertCapturedAudioForSpeechRecognition": "Erfasstes Audio konnte nicht für die Spracherkennung konvertiert werden",
             "failedToAllocateSpeechAnalyzerAudioBuffer": "Ein Audiopuffer für SpeechAnalyzer konnte nicht reserviert werden.",
             "failedToConvertCapturedAudioForSpeechAnalyzer": "Erfasstes Audio konnte nicht für SpeechAnalyzer konvertiert werden",
-            "noOutputAudioDeviceForAppCapture": "Für die App-Aufnahme ist kein Audioausgabegerät verfügbar.",
             "selectedAppAudioFormatCouldNotBePrepared": "Das Audioformat der ausgewählten App konnte nicht für die Aufnahme vorbereitet werden.",
             "failedToStageWithReasonFormat": "%@ fehlgeschlagen: %@",
-            "failedToReadCapturedAudioStreamFormat": "Der erfasste Audiostream von %@ konnte nicht gelesen werden.",
             "scrollToLatestSubtitle": "Zum neuesten Untertitel scrollen",
             "resetOverlaySize": "Overlay-Größe zurücksetzen",
             "transcript": "Transkript",
@@ -982,6 +987,8 @@ enum AppLocalization {
             "textOutline": "文字の縁取り",
             "outlineColor": "縁取りの色",
             "attachToSource": "ソースに追従",
+            "invisibleInRecording": "録画に映さない",
+            "invisibleInRecordingHint": "字幕は画面に表示されたまま、画面収録・スクリーンショット・画面共有には映りません。",
             "subtitleColor": "字幕の色",
             "backgroundColor": "背景色",
             "resetColors": "色をリセット",
@@ -1042,6 +1049,7 @@ enum AppLocalization {
             "speechTitleFormat": "音声認識 · %@",
             "translationTitleFormat": "翻訳 · %@ → %@",
             "speechNotAvailableOnMacOS": "この macOS バージョンでは、この言語の音声認識は利用できません。",
+            "speechUsesAppleServersFormat": "この Mac には%@のオンデバイス音声モデルがないため、認識は Apple のサーバーで行われます。",
             "downloadingSpeechResources": "オンデバイス音声認識リソースをダウンロード中...",
             "translationNotSupportedPairOnMacOS": "この macOS バージョンでは、この言語ペアの翻訳はサポートされていません。",
             "downloadingTranslationResources": "オンデバイス翻訳リソースをダウンロード中...",
@@ -1052,7 +1060,6 @@ enum AppLocalization {
             "translationResourceDownloadTimedOut": "翻訳リソースの自動ダウンロードがタイムアウトしました。",
             "translationRequiresMacOS15OrNewer": "翻訳には macOS 15 以降が必要です。",
             "translationUnsupportedFromToFormat": "%@ から %@ への翻訳はサポートされていません。",
-            "sileroVadUnavailableWithoutOnnx": "このビルドには ONNX Runtime 依存関係が含まれていないため、Silero VAD は利用できません。",
             "speechPermissionDenied": "音声認識の権限が拒否されました。",
             "microphonePermissionDenied": "マイクの権限が拒否されました。",
             "appAudioCapturePermissionDenied": "アプリ音声の収集権限が拒否されました。v2s が他のアプリの音声を取得できるようにした後、アプリを再度開いてください。",
@@ -1061,6 +1068,7 @@ enum AppLocalization {
             "missingMicrophoneDevice": "選択したマイクは利用できなくなりました。",
             "missingApplicationFormat": "選択したアプリ %@ は利用できなくなりました。",
             "applicationNotProducingAudioFormat": "%@ はまだアプリ音声を出力していません。アプリで再生を開始してから、もう一度試してください。",
+            "applicationAudioLostFormat": "%@ の音声が途切れ、再接続できませんでした。「開始」をクリックしてもう一度試してください。",
             "failedToStartCaptureFormat": "%@",
             "sileroVadUnavailableFallbackFormat": "Silero VAD は利用できません: %@。ASR ベースの無音検出にフォールバックします。",
             "speechRecognitionStoppedFormat": "音声認識が停止しました: %@",
@@ -1075,10 +1083,8 @@ enum AppLocalization {
             "failedToConvertCapturedAudioForSpeechRecognition": "キャプチャ音声を音声認識用に変換できませんでした",
             "failedToAllocateSpeechAnalyzerAudioBuffer": "SpeechAnalyzer 用のオーディオバッファを確保できませんでした。",
             "failedToConvertCapturedAudioForSpeechAnalyzer": "キャプチャ音声を SpeechAnalyzer 用に変換できませんでした",
-            "noOutputAudioDeviceForAppCapture": "アプリキャプチャに利用できる出力オーディオデバイスがありません。",
             "selectedAppAudioFormatCouldNotBePrepared": "選択したアプリの音声フォーマットをキャプチャ用に準備できませんでした。",
             "failedToStageWithReasonFormat": "%@ に失敗しました: %@",
-            "failedToReadCapturedAudioStreamFormat": "%@ のキャプチャ音声ストリームを読み取れませんでした。",
             "scrollToLatestSubtitle": "最新の字幕へ移動",
             "resetOverlaySize": "オーバーレイのサイズをリセット",
             "transcript": "トランスクリプト",
@@ -1144,6 +1150,8 @@ enum AppLocalization {
             "textOutline": "Contour du texte",
             "outlineColor": "Couleur du contour",
             "attachToSource": "Attacher à la source",
+            "invisibleInRecording": "Invisible à l'enregistrement",
+            "invisibleInRecordingHint": "Les sous-titres restent affichés sur votre écran mais n'apparaissent pas dans les enregistrements, les captures et les partages d'écran.",
             "subtitleColor": "Couleur des sous-titres",
             "backgroundColor": "Couleur de fond",
             "resetColors": "Réinitialiser les couleurs",
@@ -1204,6 +1212,7 @@ enum AppLocalization {
             "speechTitleFormat": "Reconnaissance vocale · %@",
             "translationTitleFormat": "Traduction · %@ → %@",
             "speechNotAvailableOnMacOS": "La reconnaissance vocale n'est pas disponible pour cette langue sur cette version de macOS.",
+            "speechUsesAppleServersFormat": "Ce Mac n'a pas de modèle vocal local pour %@, la reconnaissance est donc effectuée sur les serveurs d'Apple.",
             "downloadingSpeechResources": "Téléchargement des ressources de reconnaissance vocale sur l'appareil...",
             "translationNotSupportedPairOnMacOS": "La traduction n'est pas prise en charge pour cette paire de langues sur cette version de macOS.",
             "downloadingTranslationResources": "Téléchargement des ressources de traduction sur l'appareil...",
@@ -1214,7 +1223,6 @@ enum AppLocalization {
             "translationResourceDownloadTimedOut": "Le téléchargement automatique de la ressource de traduction a expiré.",
             "translationRequiresMacOS15OrNewer": "La traduction nécessite macOS 15 ou une version ultérieure.",
             "translationUnsupportedFromToFormat": "La traduction de %@ vers %@ n'est pas prise en charge.",
-            "sileroVadUnavailableWithoutOnnx": "Silero VAD n'est pas disponible, car cette compilation n'inclut pas la dépendance ONNX Runtime.",
             "speechPermissionDenied": "L'autorisation de reconnaissance vocale a été refusée.",
             "microphonePermissionDenied": "L'autorisation du microphone a été refusée.",
             "appAudioCapturePermissionDenied": "L'autorisation de capture audio des apps a été refusée. Autorisez v2s à capturer l'audio des autres apps, puis rouvrez l'app.",
@@ -1223,6 +1231,7 @@ enum AppLocalization {
             "missingMicrophoneDevice": "Le microphone sélectionné n'est plus disponible.",
             "missingApplicationFormat": "L'app sélectionnée, %@, n'est plus disponible.",
             "applicationNotProducingAudioFormat": "%@ ne produit pas encore d'audio d'app. Lancez la lecture dans l'app, puis réessayez.",
+            "applicationAudioLostFormat": "L'audio de %@ a été perdu et la reconnexion a échoué. Cliquez sur Démarrer pour réessayer.",
             "failedToStartCaptureFormat": "%@",
             "sileroVadUnavailableFallbackFormat": "Silero VAD indisponible : %@. Retour à une détection de silence basée sur l'ASR.",
             "speechRecognitionStoppedFormat": "La reconnaissance vocale s'est arrêtée : %@",
@@ -1237,10 +1246,8 @@ enum AppLocalization {
             "failedToConvertCapturedAudioForSpeechRecognition": "Impossible de convertir l'audio capturé pour la reconnaissance vocale",
             "failedToAllocateSpeechAnalyzerAudioBuffer": "Impossible d'allouer un tampon audio pour SpeechAnalyzer.",
             "failedToConvertCapturedAudioForSpeechAnalyzer": "Impossible de convertir l'audio capturé pour SpeechAnalyzer",
-            "noOutputAudioDeviceForAppCapture": "Aucun périphérique de sortie audio n'est disponible pour la capture d'app.",
             "selectedAppAudioFormatCouldNotBePrepared": "Le format audio de l'app sélectionnée n'a pas pu être préparé pour la capture.",
             "failedToStageWithReasonFormat": "Impossible de %@ : %@",
-            "failedToReadCapturedAudioStreamFormat": "Impossible de lire le flux audio capturé pour %@.",
             "scrollToLatestSubtitle": "Aller au sous-titre le plus récent",
             "resetOverlaySize": "Réinitialiser la taille de l'overlay",
             "transcript": "Transcription",
@@ -1306,6 +1313,8 @@ enum AppLocalization {
             "textOutline": "텍스트 외곽선",
             "outlineColor": "외곽선 색상",
             "attachToSource": "소스에 부착",
+            "invisibleInRecording": "녹화에 표시 안 함",
+            "invisibleInRecordingHint": "자막은 화면에 계속 표시되지만 화면 기록, 스크린샷, 화면 공유에는 나타나지 않습니다.",
             "subtitleColor": "자막 색상",
             "backgroundColor": "배경 색상",
             "resetColors": "색상 재설정",
@@ -1366,6 +1375,7 @@ enum AppLocalization {
             "speechTitleFormat": "음성 인식 · %@",
             "translationTitleFormat": "번역 · %@ → %@",
             "speechNotAvailableOnMacOS": "이 macOS 버전에서는 해당 언어의 음성 인식을 사용할 수 없습니다.",
+            "speechUsesAppleServersFormat": "이 Mac에는 %@의 온디바이스 음성 모델이 없어 인식은 Apple 서버에서 처리됩니다.",
             "downloadingSpeechResources": "온디바이스 음성 인식 리소스를 다운로드하는 중...",
             "translationNotSupportedPairOnMacOS": "이 macOS 버전에서는 해당 언어 쌍 번역을 지원하지 않습니다.",
             "downloadingTranslationResources": "온디바이스 번역 리소스를 다운로드하는 중...",
@@ -1376,7 +1386,6 @@ enum AppLocalization {
             "translationResourceDownloadTimedOut": "자동 번역 리소스 다운로드 시간이 초과되었습니다.",
             "translationRequiresMacOS15OrNewer": "번역 기능은 macOS 15 이상이 필요합니다.",
             "translationUnsupportedFromToFormat": "%@ 에서 %@ 로의 번역은 지원되지 않습니다.",
-            "sileroVadUnavailableWithoutOnnx": "이 빌드에는 ONNX Runtime 의존성이 포함되어 있지 않아 Silero VAD 를 사용할 수 없습니다.",
             "speechPermissionDenied": "음성 인식 권한이 거부되었습니다.",
             "microphonePermissionDenied": "마이크 권한이 거부되었습니다.",
             "appAudioCapturePermissionDenied": "앱 오디오 캡처 권한이 거부되었습니다. v2s 가 다른 앱의 오디오를 캡처할 수 있도록 허용한 뒤 앱을 다시 여세요.",
@@ -1385,6 +1394,7 @@ enum AppLocalization {
             "missingMicrophoneDevice": "선택한 마이크를 더 이상 사용할 수 없습니다.",
             "missingApplicationFormat": "선택한 앱 %@ 을(를) 더 이상 사용할 수 없습니다.",
             "applicationNotProducingAudioFormat": "%@ 에서 아직 앱 오디오가 나오지 않습니다. 앱에서 재생을 시작한 뒤 다시 시도하세요.",
+            "applicationAudioLostFormat": "%@ 의 오디오가 끊겼고 다시 연결하지 못했습니다. 시작을 클릭해 다시 시도하세요.",
             "failedToStartCaptureFormat": "%@",
             "sileroVadUnavailableFallbackFormat": "Silero VAD 를 사용할 수 없음: %@. ASR 기반 무음 감지로 대체합니다.",
             "speechRecognitionStoppedFormat": "음성 인식이 중지되었습니다: %@",
@@ -1399,10 +1409,8 @@ enum AppLocalization {
             "failedToConvertCapturedAudioForSpeechRecognition": "캡처된 오디오를 음성 인식용으로 변환할 수 없습니다",
             "failedToAllocateSpeechAnalyzerAudioBuffer": "SpeechAnalyzer 용 오디오 버퍼를 할당할 수 없습니다.",
             "failedToConvertCapturedAudioForSpeechAnalyzer": "캡처된 오디오를 SpeechAnalyzer 용으로 변환할 수 없습니다",
-            "noOutputAudioDeviceForAppCapture": "앱 캡처에 사용할 수 있는 출력 오디오 장치가 없습니다.",
             "selectedAppAudioFormatCouldNotBePrepared": "선택한 앱의 오디오 형식을 캡처용으로 준비할 수 없습니다.",
             "failedToStageWithReasonFormat": "%@ 실패: %@",
-            "failedToReadCapturedAudioStreamFormat": "%@ 의 캡처된 오디오 스트림을 읽을 수 없습니다.",
             "scrollToLatestSubtitle": "최신 자막으로 이동",
             "resetOverlaySize": "오버레이 크기 재설정",
             "transcript": "기록",
@@ -1468,6 +1476,8 @@ enum AppLocalization {
             "textOutline": "حد النص",
             "outlineColor": "لون الحد",
             "attachToSource": "ربط بالمصدر",
+            "invisibleInRecording": "غير مرئي في التسجيل",
+            "invisibleInRecordingHint": "تبقى الترجمة ظاهرة على شاشتك لكنها لا تظهر في تسجيلات الشاشة أو لقطاتها أو مشاركة الشاشة.",
             "subtitleColor": "لون الترجمة",
             "backgroundColor": "لون الخلفية",
             "resetColors": "إعادة ضبط الألوان",
@@ -1528,6 +1538,7 @@ enum AppLocalization {
             "speechTitleFormat": "التعرّف على الكلام · %@",
             "translationTitleFormat": "الترجمة · %@ → %@",
             "speechNotAvailableOnMacOS": "التعرّف على الكلام غير متاح لهذه اللغة على هذا الإصدار من macOS.",
+            "speechUsesAppleServersFormat": "لا يتوفر على هذا الـ Mac نموذج صوتي محلي للغة %@، لذا تتم المعالجة على خوادم Apple.",
             "downloadingSpeechResources": "جارٍ تنزيل موارد التعرّف على الكلام على الجهاز...",
             "translationNotSupportedPairOnMacOS": "الترجمة غير مدعومة لهذا الزوج اللغوي على هذا الإصدار من macOS.",
             "downloadingTranslationResources": "جارٍ تنزيل موارد الترجمة على الجهاز...",
@@ -1538,7 +1549,6 @@ enum AppLocalization {
             "translationResourceDownloadTimedOut": "انتهت مهلة تنزيل مورد الترجمة تلقائيًا.",
             "translationRequiresMacOS15OrNewer": "الترجمة تتطلب macOS 15 أو أحدث.",
             "translationUnsupportedFromToFormat": "الترجمة من %@ إلى %@ غير مدعومة.",
-            "sileroVadUnavailableWithoutOnnx": "\u{200F}Silero VAD غير متاح لأن هذا البناء لا يتضمن اعتماد ONNX Runtime.",
             "speechPermissionDenied": "تم رفض إذن التعرّف على الكلام.",
             "microphonePermissionDenied": "تم رفض إذن الميكروفون.",
             "appAudioCapturePermissionDenied": "تم رفض إذن التقاط صوت التطبيقات. اسمح لـ v2s بالتقاط الصوت من التطبيقات الأخرى ثم أعد فتح التطبيق.",
@@ -1547,6 +1557,7 @@ enum AppLocalization {
             "missingMicrophoneDevice": "لم يعد الميكروفون المحدد متاحًا.",
             "missingApplicationFormat": "لم يعد التطبيق المحدد %@ متاحًا.",
             "applicationNotProducingAudioFormat": "%@ لا يُخرج صوت التطبيق بعد. ابدأ التشغيل في التطبيق ثم حاول مرة أخرى.",
+            "applicationAudioLostFormat": "انقطع صوت %@ وتعذّرت إعادة الاتصال. انقر على ابدأ لإعادة المحاولة.",
             "failedToStartCaptureFormat": "%@",
             "sileroVadUnavailableFallbackFormat": "\u{200F}Silero VAD غير متاح: %@. سيتم الرجوع إلى اكتشاف الصمت المعتمد على ASR.",
             "speechRecognitionStoppedFormat": "تم إيقاف التعرّف على الكلام: %@",
@@ -1561,10 +1572,8 @@ enum AppLocalization {
             "failedToConvertCapturedAudioForSpeechRecognition": "تعذر تحويل الصوت الملتقط للتعرّف على الكلام",
             "failedToAllocateSpeechAnalyzerAudioBuffer": "تعذر تخصيص مخزن صوتي لـ SpeechAnalyzer.",
             "failedToConvertCapturedAudioForSpeechAnalyzer": "تعذر تحويل الصوت الملتقط لـ SpeechAnalyzer",
-            "noOutputAudioDeviceForAppCapture": "لا يوجد جهاز إخراج صوتي متاح لالتقاط صوت التطبيق.",
             "selectedAppAudioFormatCouldNotBePrepared": "تعذر تجهيز تنسيق الصوت الخاص بالتطبيق المحدد للالتقاط.",
             "failedToStageWithReasonFormat": "تعذر %@: %@",
-            "failedToReadCapturedAudioStreamFormat": "تعذر قراءة دفق الصوت الملتقط لـ %@.",
             "scrollToLatestSubtitle": "الانتقال إلى أحدث ترجمة",
             "resetOverlaySize": "إعادة تعيين حجم التراكب",
             "transcript": "النص المكتوب",
@@ -1630,6 +1639,8 @@ enum AppLocalization {
             "textOutline": "Contorno do texto",
             "outlineColor": "Cor do contorno",
             "attachToSource": "Fixar na fonte",
+            "invisibleInRecording": "Invisível em gravações",
+            "invisibleInRecordingHint": "As legendas continuam na sua tela, mas ficam de fora de gravações, capturas e compartilhamentos de tela.",
             "subtitleColor": "Cor da legenda",
             "backgroundColor": "Cor de fundo",
             "resetColors": "Redefinir cores",
@@ -1690,6 +1701,7 @@ enum AppLocalization {
             "speechTitleFormat": "Reconhecimento de fala · %@",
             "translationTitleFormat": "Tradução · %@ → %@",
             "speechNotAvailableOnMacOS": "O reconhecimento de fala não está disponível para este idioma nesta versão do macOS.",
+            "speechUsesAppleServersFormat": "Este Mac não tem um modelo de voz no dispositivo para %@, então o reconhecimento é feito nos servidores da Apple.",
             "downloadingSpeechResources": "Baixando recursos de reconhecimento de fala no dispositivo...",
             "translationNotSupportedPairOnMacOS": "A tradução não é compatível com este par de idiomas nesta versão do macOS.",
             "downloadingTranslationResources": "Baixando recursos de tradução no dispositivo...",
@@ -1700,7 +1712,6 @@ enum AppLocalization {
             "translationResourceDownloadTimedOut": "O download automático do recurso de tradução expirou.",
             "translationRequiresMacOS15OrNewer": "A tradução requer macOS 15 ou mais recente.",
             "translationUnsupportedFromToFormat": "A tradução de %@ para %@ não é compatível.",
-            "sileroVadUnavailableWithoutOnnx": "O Silero VAD não está disponível porque esta compilação não inclui a dependência do ONNX Runtime.",
             "speechPermissionDenied": "A permissão de reconhecimento de fala foi negada.",
             "microphonePermissionDenied": "A permissão do microfone foi negada.",
             "appAudioCapturePermissionDenied": "A permissão de captura de áudio de apps foi negada. Permita que o v2s capture áudio de outros apps e reabra o app.",
@@ -1709,6 +1720,7 @@ enum AppLocalization {
             "missingMicrophoneDevice": "O microfone selecionado não está mais disponível.",
             "missingApplicationFormat": "O app selecionado, %@, não está mais disponível.",
             "applicationNotProducingAudioFormat": "%@ ainda não está produzindo áudio do app. Inicie a reprodução no app e tente novamente.",
+            "applicationAudioLostFormat": "O áudio de %@ foi perdido e não foi possível reconectar. Clique em Iniciar para tentar novamente.",
             "failedToStartCaptureFormat": "%@",
             "sileroVadUnavailableFallbackFormat": "Silero VAD indisponível: %@. Usando detecção de silêncio baseada em ASR.",
             "speechRecognitionStoppedFormat": "O reconhecimento de fala foi interrompido: %@",
@@ -1723,10 +1735,8 @@ enum AppLocalization {
             "failedToConvertCapturedAudioForSpeechRecognition": "Não foi possível converter o áudio capturado para reconhecimento de fala",
             "failedToAllocateSpeechAnalyzerAudioBuffer": "Não foi possível alocar um buffer de áudio para SpeechAnalyzer.",
             "failedToConvertCapturedAudioForSpeechAnalyzer": "Não foi possível converter o áudio capturado para SpeechAnalyzer",
-            "noOutputAudioDeviceForAppCapture": "Nenhum dispositivo de saída de áudio está disponível para captura de apps.",
             "selectedAppAudioFormatCouldNotBePrepared": "Não foi possível preparar o formato de áudio do app selecionado para captura.",
             "failedToStageWithReasonFormat": "Falha ao %@: %@",
-            "failedToReadCapturedAudioStreamFormat": "Não foi possível ler o fluxo de áudio capturado de %@.",
             "scrollToLatestSubtitle": "Ir para a legenda mais recente",
             "resetOverlaySize": "Redefinir tamanho da sobreposição",
             "transcript": "Transcrição",
@@ -1792,6 +1802,8 @@ enum AppLocalization {
             "textOutline": "Контур текста",
             "outlineColor": "Цвет контура",
             "attachToSource": "Привязать к источнику",
+            "invisibleInRecording": "Скрыть при записи",
+            "invisibleInRecordingHint": "Субтитры остаются на вашем экране, но не попадают в записи экрана, снимки и демонстрацию экрана.",
             "subtitleColor": "Цвет субтитров",
             "backgroundColor": "Цвет фона",
             "resetColors": "Сбросить цвета",
@@ -1852,6 +1864,7 @@ enum AppLocalization {
             "speechTitleFormat": "Распознавание речи · %@",
             "translationTitleFormat": "Перевод · %@ → %@",
             "speechNotAvailableOnMacOS": "Распознавание речи недоступно для этого языка в этой версии macOS.",
+            "speechUsesAppleServersFormat": "На этом Mac нет локальной модели распознавания для %@, поэтому распознавание выполняется на серверах Apple.",
             "downloadingSpeechResources": "Загрузка локальных ресурсов распознавания речи...",
             "translationNotSupportedPairOnMacOS": "Перевод для этой языковой пары не поддерживается в этой версии macOS.",
             "downloadingTranslationResources": "Загрузка локальных ресурсов перевода...",
@@ -1862,7 +1875,6 @@ enum AppLocalization {
             "translationResourceDownloadTimedOut": "Время автоматической загрузки ресурса перевода истекло.",
             "translationRequiresMacOS15OrNewer": "Перевод требует macOS 15 или новее.",
             "translationUnsupportedFromToFormat": "Перевод с %@ на %@ не поддерживается.",
-            "sileroVadUnavailableWithoutOnnx": "Silero VAD недоступен, потому что эта сборка не включает зависимость ONNX Runtime.",
             "speechPermissionDenied": "Доступ к распознаванию речи запрещен.",
             "microphonePermissionDenied": "Доступ к микрофону запрещен.",
             "appAudioCapturePermissionDenied": "Доступ к захвату звука приложений запрещен. Разрешите v2s захватывать звук из других приложений и снова откройте приложение.",
@@ -1871,6 +1883,7 @@ enum AppLocalization {
             "missingMicrophoneDevice": "Выбранный микрофон больше недоступен.",
             "missingApplicationFormat": "Выбранное приложение %@ больше недоступно.",
             "applicationNotProducingAudioFormat": "%@ пока не воспроизводит звук приложения. Запустите воспроизведение и попробуйте снова.",
+            "applicationAudioLostFormat": "Звук из %@ пропал, и переподключиться не удалось. Нажмите «Запустить», чтобы повторить попытку.",
             "failedToStartCaptureFormat": "%@",
             "sileroVadUnavailableFallbackFormat": "Silero VAD недоступен: %@. Используется определение тишины на основе ASR.",
             "speechRecognitionStoppedFormat": "Распознавание речи остановлено: %@",
@@ -1885,10 +1898,8 @@ enum AppLocalization {
             "failedToConvertCapturedAudioForSpeechRecognition": "Не удалось преобразовать захваченный звук для распознавания речи",
             "failedToAllocateSpeechAnalyzerAudioBuffer": "Не удалось выделить аудиобуфер для SpeechAnalyzer.",
             "failedToConvertCapturedAudioForSpeechAnalyzer": "Не удалось преобразовать захваченный звук для SpeechAnalyzer",
-            "noOutputAudioDeviceForAppCapture": "Для захвата звука приложения нет доступного выходного аудиоустройства.",
             "selectedAppAudioFormatCouldNotBePrepared": "Не удалось подготовить аудиоформат выбранного приложения для захвата.",
             "failedToStageWithReasonFormat": "Не удалось %@: %@",
-            "failedToReadCapturedAudioStreamFormat": "Не удалось прочитать захваченный аудиопоток для %@.",
             "scrollToLatestSubtitle": "Прокрутить к последнему субтитру",
             "resetOverlaySize": "Сбросить размер оверлея",
             "transcript": "Транскрипция",

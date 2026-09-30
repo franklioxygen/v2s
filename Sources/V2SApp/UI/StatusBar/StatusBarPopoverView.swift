@@ -23,6 +23,7 @@ struct StatusBarPopoverView: View {
             footerSection
         }
         .frame(width: 340)
+        .background(.regularMaterial)
         .environment(\.locale, model.interfaceLocale)
         .v2sTranslationHost(model: model)
         .onChange(of: model.sessionState) { _, newState in
@@ -107,14 +108,21 @@ struct StatusBarPopoverView: View {
             SettingsControlRow(label: model.localized(.defaultInputLanguage)) {
                 CommonLanguageMenuPicker(
                     interfaceLanguageID: model.resolvedInterfaceLanguageID,
-                    options: LanguageCatalog.speechInput,
+                    options: model.speechLanguageOptions,
                     selection: model.inputLanguageSelectionBinding
                 )
                 .disabled(model.isLanguagePairLocked)
             }
+            if let notice = model.serverSpeechRecognitionNotice {
+                Label(notice, systemImage: "icloud")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             SettingsControlRow(label: model.localized(.defaultSubtitleLanguage)) {
                 CommonLanguageMenuPicker(
                     interfaceLanguageID: model.resolvedInterfaceLanguageID,
+                    options: model.translationLanguageOptions,
                     selection: model.outputLanguageSelectionBinding
                 )
                 .disabled(model.isLanguagePairLocked)
@@ -216,7 +224,7 @@ struct StatusBarPopoverView: View {
             if model.selectedSources.isEmpty == false {
                 Text(model.selectedSourceDisplayName)
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
         }
@@ -314,6 +322,6 @@ struct VersionLink: View {
     private var versionLabel: some View {
         Text(verbatim: versionText)
             .font(font)
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(.secondary)
     }
 }

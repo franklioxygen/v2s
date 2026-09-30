@@ -107,6 +107,7 @@ struct SettingsView: View {
                     SettingsControlRow(label: model.localized(.interfaceLanguage)) {
                         CommonLanguageMenuPicker(
                             interfaceLanguageID: model.resolvedInterfaceLanguageID,
+                            options: LanguageCatalog.interface,
                             selection: model.interfaceLanguageSelectionBinding
                         )
                     }
@@ -134,15 +135,22 @@ struct SettingsView: View {
                     SettingsControlRow(label: model.localized(.defaultInputLanguage)) {
                         CommonLanguageMenuPicker(
                             interfaceLanguageID: model.resolvedInterfaceLanguageID,
-                            options: LanguageCatalog.speechInput,
+                            options: model.speechLanguageOptions,
                             selection: model.inputLanguageSelectionBinding
                         )
                         .disabled(model.isLanguagePairLocked)
+                    }
+                    if let notice = model.serverSpeechRecognitionNotice {
+                        Label(notice, systemImage: "icloud")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Divider()
                     SettingsControlRow(label: model.localized(.defaultSubtitleLanguage)) {
                         CommonLanguageMenuPicker(
                             interfaceLanguageID: model.resolvedInterfaceLanguageID,
+                            options: model.translationLanguageOptions,
                             selection: model.outputLanguageSelectionBinding
                         )
                         .disabled(model.isLanguagePairLocked)
@@ -259,6 +267,16 @@ struct SettingsView: View {
                             .toggleStyle(.switch)
                             .labelsHidden()
                     }
+                    Divider()
+                    settingsRow(model.localized(.invisibleInRecording)) {
+                        Toggle("", isOn: invisibleInRecordingBinding)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+                    Text(model.localized(.invisibleInRecordingHint))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 settingsCard {
                     sectionHeader(model.localized(.subtitleColor), icon: "paintpalette")
@@ -464,6 +482,10 @@ struct SettingsView: View {
         overlayBinding(\.attachToSource)
     }
 
+    private var invisibleInRecordingBinding: Binding<Bool> {
+        overlayBinding(\.invisibleInRecording)
+    }
+
     private var translatedFontBinding: Binding<Double> {
         overlayBinding(\.translatedFontSize)
     }
@@ -484,7 +506,7 @@ struct SettingsView: View {
                     SettingsControlRow(label: model.localized(.inputLanguage)) {
                         DefaultableLanguageMenuPicker(
                             interfaceLanguageID: model.resolvedInterfaceLanguageID,
-                            options: LanguageCatalog.speechInput,
+                            options: model.speechLanguageOptions,
                             defaultTitle: model.localized(
                                 .useDefaultFormat,
                                 model.languageName(for: model.inputLanguageID)
@@ -496,6 +518,7 @@ struct SettingsView: View {
                     SettingsControlRow(label: model.localized(.subtitleLanguage)) {
                         DefaultableLanguageMenuPicker(
                             interfaceLanguageID: model.resolvedInterfaceLanguageID,
+                            options: model.translationLanguageOptions,
                             defaultTitle: model.localized(
                                 .useDefaultFormat,
                                 model.languageName(for: model.outputLanguageID)

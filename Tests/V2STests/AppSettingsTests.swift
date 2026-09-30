@@ -65,4 +65,42 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(decoded.interfaceLanguageID, "en")
         XCTAssertEqual(decoded.glossary, ["CEO": "Chief Executive Officer"])
     }
+
+    func testInvisibleInRecordingDefaultsToOffForSettingsSavedBeforeTheToggleExisted() throws {
+        let json = """
+        {
+          "selectedSourceID": "mic-1",
+          "inputLanguageID": "en",
+          "outputLanguageID": "ja",
+          "overlayStyle": {
+            "translatedFontSize": 20,
+            "sourceFontSize": 16,
+            "backgroundOpacity": 0.7,
+            "topInset": 12,
+            "widthRatio": 0.82,
+            "minWidth": 720,
+            "maxWidth": 1440,
+            "clickThrough": true,
+            "translatedFirst": true
+          },
+          "subtitleMode": "balanced",
+          "subtitleDisplayMode": "both",
+          "glossary": {}
+        }
+        """
+
+        let settings = try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
+
+        XCTAssertFalse(settings.overlayStyle.invisibleInRecording)
+    }
+
+    func testInvisibleInRecordingSurvivesAnEncodeDecodeRoundTrip() throws {
+        var style = OverlayStyle.default
+        style.invisibleInRecording = true
+
+        let data = try JSONEncoder().encode(style)
+        let decoded = try JSONDecoder().decode(OverlayStyle.self, from: data)
+
+        XCTAssertTrue(decoded.invisibleInRecording)
+    }
 }
