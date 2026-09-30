@@ -47,6 +47,16 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.delegate = self
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 340, height: 500)
+        applySystemAppearance()
+    }
+
+    /// Pins the popover to the system light/dark appearance.
+    ///
+    /// Left unset, the popover's glass backdrop derives its appearance from
+    /// whatever sits behind it, so a bright wallpaper makes the content draw in
+    /// light mode while the system is in dark mode.
+    private func applySystemAppearance() {
+        popover.appearance = NSApp.effectiveAppearance
     }
 
     private func bindModel() {
@@ -95,6 +105,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             popover.performClose(sender)
         } else {
             model.refreshSources()
+            applySystemAppearance()
             popover.contentViewController = NSHostingController(
                 rootView: StatusBarPopoverView(
                     model: model,

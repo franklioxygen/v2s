@@ -38,32 +38,57 @@
 - Menu bar app built for always-available subtitle access.
 - Live subtitle overlay with translated text on the first line and source text on the second.
 - Audio source selection for microphones and running macOS apps.
-- On-device speech transcription powered by Apple SpeechAnalyzer.
+- Speech transcription powered by Apple's Speech frameworks, preferring on-device recognition.
 - On-device translation powered by Apple Translation.
-- Transcript summarization powered by Apple Intelligence for quick overview of conversations.
+- Transcript summarization powered by Apple Intelligence, falling back to an on-device extractive summary when Apple Intelligence is unavailable.
 - Overlay styling controls so the subtitle bar stays readable on top of real work.
 
-## Input Languages
+## Input and Subtitle Languages
 
-v2s only lists input languages supported by Apple's SpeechAnalyzer/SpeechTranscriber path. Regional variants are not exposed in the UI; v2s chooses a default supported region for each language.
-
-Supported input languages: Cantonese, Chinese (Simplified), English, French, German, Italian, Japanese, Korean, Portuguese, and Spanish.
+v2s asks Apple's Speech and Translation frameworks which languages the current Mac supports, so the choices automatically follow OS and model updates. Regional variants are collapsed in the UI, while meaningful script variants such as Simplified and Traditional Chinese remain separate. Apple Translation availability is also checked for each source/destination pair before a session starts.
 
 ## Privacy
 
 - No account, cloud backend, analytics, or telemetry.
-- Audio and subtitle text never leave your Mac through v2s.
+- v2s has no cloud backend and does not send audio or subtitle text to its own servers.
 - Translation uses Apple's on-device Translation framework. Some language packs may need to be downloaded first through System Settings.
-- Speech recognition uses Apple's on-device SpeechAnalyzer/SpeechTranscriber resources for the listed input languages.
+- Speech recognition prefers Apple's on-device models, and v2s picks a language variant that has a local model whenever one exists.
+- Some languages have no on-device model on a given Mac — this is common on Intel Macs, and for languages outside the modern Speech stack. Those run through Apple's server-based recognition, which needs a network connection, is subject to Apple's service quotas, and sends captured speech to Apple under Apple's privacy terms.
+- Voice activity detection runs the [Silero VAD](THIRD_PARTY_NOTICES.md) model through Apple's system Core ML framework; v2s bundles no third-party inference runtime, and the [conversion is reproducible](scripts/convert_silero_vad_coreml.py).
 
 ## Getting Started
 
+### Install with Homebrew
+
+```bash
+brew install --cask franklioxygen/v2s/v2s
+```
+
+v2s is not notarized by Apple yet, so macOS quarantines it after download. Clear
+the flag once, then launch the app:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/v2s.app
+```
+
+If you already have `v2s.app` in your Applications folder from a manual install,
+add `--adopt` so Homebrew takes over the existing copy instead of refusing to
+overwrite it.
+
+Updates arrive through the in-app updater. To let Homebrew handle them instead,
+run `brew upgrade --cask --greedy v2s`.
+
+### Install manually
+
 1. Download the latest `.app.zip` from [Releases](https://github.com/franklioxygen/v2s/releases).
 2. Unzip and move `v2s.app` to your Applications folder.
-3. Launch v2s — it appears as an icon in your menu bar.
-4. Select an input source (a running app or microphone).
-5. Choose your input and subtitle languages.
-6. Click **Start**.
+
+### First run
+
+1. Launch v2s — it appears as an icon in your menu bar.
+2. Select an input source (a running app or microphone).
+3. Choose your input and subtitle languages.
+4. Click **Start**.
 
 v2s will ask for permissions on first use:
 
@@ -74,6 +99,7 @@ v2s will ask for permissions on first use:
 ## Requirements
 
 - Speech transcription and translation require macOS 26 or newer
+- Apple silicon and Intel Macs are supported. Which speech languages are available, and whether they recognize on device, depends on the Mac and the selected language.
 
 ## Building from Source
 
@@ -87,6 +113,12 @@ Or from the terminal:
 
 ```bash
 xcodebuild -project v2s.xcodeproj -scheme v2s -configuration Debug build
+```
+
+To build specifically for an Intel Mac:
+
+```bash
+swift build -c release --arch x86_64
 ```
 
 ## License

@@ -1,0 +1,27 @@
+cask "v2s" do
+  version "__VERSION__"
+  sha256 "__SHA256__"
+
+  url "https://github.com/franklioxygen/v2s/releases/download/v#{version}/v2s-#{version}.app.zip"
+  name "v2s"
+  desc "Live bilingual subtitles for meetings, calls, streams, and videos"
+  homepage "https://github.com/franklioxygen/v2s"
+
+  livecheck do
+    url :url
+    strategy :github_latest
+  end
+
+  auto_updates true
+  depends_on macos: :sequoia
+
+  app "v2s.app"
+
+  zap trash: [
+    "~/Library/Application Support/v2s",
+    "~/Library/Caches/com.franklioxygen.v2s",
+    "~/Library/HTTPStorages/com.franklioxygen.v2s",
+    "~/Library/Preferences/com.franklioxygen.v2s.plist",
+    "~/Library/Saved Application State/com.franklioxygen.v2s.savedState",
+  ]
+end

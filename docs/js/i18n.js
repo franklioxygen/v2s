@@ -6,7 +6,7 @@
       meta: {
         title: "v2s — Live bilingual subtitles for macOS",
         description:
-          "v2s — live bilingual subtitles for meetings, calls, streams, and videos on macOS. On-device speech and translation, menu bar workflow, zero cloud.",
+          "v2s — live bilingual subtitles for meetings, calls, streams, and videos on macOS. Local-first speech, on-device translation, and a lightweight menu bar workflow.",
       },
       a11y: {
         skip: "Skip to content",
@@ -26,9 +26,9 @@
         download: "Download",
       },
       hero: {
-        badgeOnDevice: "100% on-device",
+        badgeOnDevice: "Local-first",
         badgeMac: "macOS 26+",
-        title: "v2s: Live bilingual subtitles, never uploaded to the cloud.",
+        title: "v2s: Live bilingual subtitles, private by design.",
         lead:
           "v2s turns microphone or app audio into a clean two-line subtitle bar for meetings, calls, streams, and videos. Hear the original language, read the translation, and stay on the window you already use.",
         ctaDownload: "Download for macOS",
@@ -42,7 +42,7 @@
       highlights: {
         h1Title: "Private by design",
         h1Body:
-          "No account, analytics, or cloud backend. Audio and subtitles stay on your Mac through Apple's on-device frameworks.",
+          "No account, analytics, or v2s cloud backend. Translation is on-device; speech stays local whenever the selected language supports it.",
         h2Title: "Menu bar first",
         h2Body:
           "Always one click away. Start, stop, and tune languages without leaving your meeting or player fullscreen.",
@@ -89,30 +89,42 @@
         imgAlt: "v2s settings and menu bar interface",
       },
       inputLangs: {
-        eyebrow: "Input languages",
-        title: "Ten languages on the Apple speech path.",
+        eyebrow: "Input and subtitle languages",
+        title: "Language choices matched to your Mac.",
         lead:
-          "v2s lists only languages supported by SpeechAnalyzer/SpeechTranscriber. Regional variants are collapsed to Apple's default locale per language.",
-        noteBefore: "Subtitle (output) languages follow Apple Translation availability on your Mac. ",
+          "v2s asks Apple's Speech and Translation frameworks what your current Mac supports. Available choices vary by macOS version, hardware, and installed or downloadable Apple language models.",
+        inputExamples: "Common speech-input examples:",
+        outputExamples: "Additional subtitle-output examples:",
+        noteBefore: "The app shows the exact choices available on your Mac and validates each translation pair before starting. ",
         readmeLink: "Read the full README →",
         readmeHref: "https://github.com/franklioxygen/v2s/blob/main/README.md",
         chipCantonese: "Cantonese",
         chipZh: "Chinese (Simplified)",
+        chipZhHant: "Chinese (Traditional)",
         chipEn: "English",
         chipFr: "French",
         chipDe: "German",
+        chipAr: "Arabic",
+        chipNl: "Dutch",
+        chipHi: "Hindi",
+        chipId: "Indonesian",
         chipIt: "Italian",
         chipJa: "Japanese",
         chipKo: "Korean",
         chipPt: "Portuguese",
+        chipRu: "Russian",
         chipEs: "Spanish",
+        chipTh: "Thai",
+        chipTr: "Turkish",
+        chipUk: "Ukrainian",
+        chipVi: "Vietnamese",
       },
       privacy: {
         eyebrow: "Privacy",
-        title: "Your meeting stays on your machine.",
+        title: "Local-first, with transparent fallbacks.",
         li1: "No account, cloud backend, analytics, or telemetry",
-        li2: "Audio and subtitle text never leave your Mac through v2s",
-        li3: "Speech and translation use Apple's on-device frameworks",
+        li2: "v2s never sends audio or subtitle text to its own servers",
+        li3: "Translation is on-device; speech uses Apple's service only for languages with no local model",
         li4: "Permissions requested only for speech, mic, or app audio capture",
       },
       quickStart: {
@@ -154,7 +166,7 @@
       meta: {
         title: "v2s — macOS 实时双语字幕",
         description:
-          "v2s — 适用于会议、通话、直播和视频的 macOS 实时双语字幕。本地语音与翻译、菜单栏工作流、零云端。",
+          "v2s — 适用于会议、通话、直播和视频的 macOS 实时双语字幕。本地优先语音识别、本地翻译与轻量菜单栏工作流。",
       },
       a11y: {
         skip: "跳到正文",
@@ -174,9 +186,9 @@
         download: "下载",
       },
       hero: {
-        badgeOnDevice: "100% 本地处理",
+        badgeOnDevice: "本地优先",
         badgeMac: "macOS 26+",
-        title: "v2s: 实时双语字幕，绝不上传云端。",
+        title: "v2s：重视隐私的实时双语字幕。",
         lead:
           "v2s 将麦克风或应用音频转换为简洁的双行字幕条，适用于会议、通话、直播和视频。一边听原语言，一边读翻译，无需切换窗口。",
         ctaDownload: "下载 macOS 版",
@@ -189,7 +201,7 @@
       },
       highlights: {
         h1Title: "隐私优先",
-        h1Body: "无需账号、分析或云端后台。音频与字幕通过 Apple 本地框架留在你的 Mac 上。",
+        h1Body: "无需账号、分析或 v2s 云端后台。翻译在本地完成；所选语言支持时，语音识别也在本地完成。",
         h2Title: "菜单栏即用",
         h2Body: "始终一键可达。开始、停止与语言设置，无需离开会议或播放器全屏。",
         h3Title: "自选音频源",
@@ -225,29 +237,41 @@
         imgAlt: "v2s 设置界面与菜单栏",
       },
       inputLangs: {
-        eyebrow: "输入语言",
-        title: "Apple 语音路径支持的十种语言。",
-        lead: "v2s 仅列出 SpeechAnalyzer/SpeechTranscriber 支持的语言；地区变体合并为 Apple 的默认区域。",
-        noteBefore: "字幕（输出）语言取决于 Mac 上 Apple Translation 的可用性。 ",
+        eyebrow: "输入与字幕语言",
+        title: "语言选项与你的 Mac 相匹配。",
+        lead: "v2s 会向 Apple 的 Speech 与 Translation 框架查询当前 Mac 的实际支持情况。可用选项会因 macOS 版本、硬件以及已安装或可下载的 Apple 语言模型而异。",
+        inputExamples: "常见语音输入语言示例：",
+        outputExamples: "其他字幕输出语言示例：",
+        noteBefore: "应用会显示当前 Mac 上实际可用的选项，并在开始前验证所选翻译语言组合。 ",
         readmeLink: "阅读完整 README →",
         readmeHref: "https://github.com/franklioxygen/v2s/blob/main/README.zh-CN.md",
         chipCantonese: "粤语",
         chipZh: "简体中文",
+        chipZhHant: "繁体中文",
         chipEn: "英语",
         chipFr: "法语",
         chipDe: "德语",
+        chipAr: "阿拉伯语",
+        chipNl: "荷兰语",
+        chipHi: "印地语",
+        chipId: "印度尼西亚语",
         chipIt: "意大利语",
         chipJa: "日语",
         chipKo: "韩语",
         chipPt: "葡萄牙语",
+        chipRu: "俄语",
         chipEs: "西班牙语",
+        chipTh: "泰语",
+        chipTr: "土耳其语",
+        chipUk: "乌克兰语",
+        chipVi: "越南语",
       },
       privacy: {
         eyebrow: "隐私保护",
-        title: "会议内容留在你的机器上。",
+        title: "本地优先，回退逻辑透明。",
         li1: "无需账号、云端后台、分析或遥测",
-        li2: "音频与字幕文本不会通过 v2s 离开 Mac",
-        li3: "语音与翻译使用 Apple 本地框架",
+        li2: "v2s 不会把音频或字幕文本发送到自己的服务器",
+        li3: "翻译在本地完成；只有在语言没有本地模型时，语音识别才会使用 Apple 服务",
         li4: "仅在需要时请求语音、麦克风或应用音频捕获权限",
       },
       quickStart: {
@@ -297,17 +321,74 @@
     return browser.startsWith("zh") ? "zh" : "en";
   }
 
+  // Use the first Chinese locale in browser preference order. A Simplified locale
+  // takes precedence over any later Traditional locale. Never persisted in localStorage.
+  function detectTraditionalVariant() {
+    const candidates = (navigator.languages && navigator.languages.length)
+      ? Array.prototype.slice.call(navigator.languages)
+      : [navigator.language];
+    for (const tag of candidates) {
+      try {
+        const locale = new Intl.Locale(tag);
+        if (locale.language !== "zh") continue;
+        const resolved = locale.maximize();
+        if (resolved.script !== "Hant") return null;
+        return resolved.region === "HK" || resolved.region === "MO" ? "hk" : "tw";
+      } catch (err) {
+        // Ignore malformed locale tags and continue through browser preferences.
+      }
+    }
+    return null;
+  }
+
   let currentLang = detectLang();
 
+  // OpenCC runtime conversion (Simplified -> Traditional), loaded lazily from CDN.
+  let converter = null;
+  let converterRequested = false;
+  const targetVariant = detectTraditionalVariant();
+
+  function loadConverter() {
+    if (!targetVariant || converterRequested || typeof document === "undefined") return;
+    converterRequested = true;
+    const script = document.createElement("script");
+    script.src = "https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/full.js";
+    script.async = true;
+    script.onload = () => {
+      try {
+        converter = window.OpenCC.Converter({
+          from: "cn",
+          to: targetVariant === "hk" ? "hk" : "twp",
+        });
+      } catch (err) {
+        converter = null;
+        return;
+      }
+      // Re-render already-rendered text in Traditional.
+      applyLang(currentLang);
+    };
+    script.onerror = () => {
+      // OpenCC failed to load: page keeps working with Simplified.
+      converter = null;
+    };
+    document.head.appendChild(script);
+  }
+
   function t(key) {
-    return getNested(strings[currentLang], key) ?? getNested(strings.en, key) ?? "";
+    const localizedStrings = currentLang === "zh" ? strings.zh : strings.en;
+    const value = getNested(localizedStrings, key) ?? getNested(strings.en, key) ?? "";
+    // All translated output (title, meta, text, attrs, hrefs) passes through here,
+    // so converting at this single point covers everything uniformly.
+    return converter && currentLang === "zh" ? converter(value) : value;
   }
 
   function applyLang(lang) {
     currentLang = lang === "zh" ? "zh" : "en";
     localStorage.setItem(STORAGE_KEY, currentLang);
 
-    const htmlLang = currentLang === "zh" ? "zh-CN" : "en";
+    const htmlLang = currentLang === "zh" && converter
+      ? (targetVariant === "hk" ? "zh-HK" : "zh-TW")
+      : currentLang === "zh" ? "zh-CN" : "en";
     document.documentElement.lang = htmlLang;
     document.documentElement.dataset.lang = currentLang;
 
@@ -367,4 +448,5 @@
   };
 
   applyLang(currentLang);
+  loadConverter();
 })(window);

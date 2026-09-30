@@ -1,6 +1,6 @@
 import AVFoundation
+import CoreML
 import Foundation
-import OnnxRuntimeBindings
 
 // MARK: - VADResult
 
@@ -13,37 +13,41 @@ struct VADResult: Sendable {
 
 // MARK: - SileroVADEngine
 
-/// Runs Silero VAD v5 inference on 16 kHz mono Float32 audio buffers.
+/// Runs Silero VAD v5 Core ML inference on 16 kHz mono Float32 audio buffers.
 ///
 /// The engine accumulates incoming samples into 512-sample chunks (32 ms at 16 kHz),
-/// runs ONNX inference per chunk, and applies onset/offset hysteresis to produce a
-/// stable speech/silence signal.
+/// runs inference per chunk, and applies onset/offset hysteresis to produce a stable
+/// speech/silence signal.
 ///
 /// **Threading**: All methods must be called from the same serial queue (captureQueue).
 final class SileroVADEngine {
 
     // MARK: - Constants
 
-    /// Silero VAD v5 expects 512-sample chunks at 16 kHz.
+    /// Silero VAD v5 expects 512 new samples at 16 kHz plus 64 samples of context.
+    private static let contextSize = 64
     private static let chunkSize = 512
-    /// LSTM state size: shape [2, 1, 64] = 128 floats.
-    private static let stateSize = 2 * 1 * 64
+    private static let inputSize = contextSize + chunkSize
+    private static let stateLayers = 2
+    private static let stateWidth = 128
+    private static let stateSize = stateLayers * stateWidth
+    private static let audioShape = [1, inputSize]
+    private static let stateShape = [stateLayers, 1, stateWidth]
+    private static let probabilityShape = [1, 1]
 
-    // MARK: - ONNX Runtime objects
+    // MARK: - Core ML
 
-    private let env: ORTEnv
-    private let session: ORTSession
+    private let model: MLModel
+    private let audioInput: MLMultiArray
+    private let recurrentStateInput: MLMultiArray
+    private let inputProvider: MLDictionaryFeatureProvider
 
     // MARK: - Model state
 
-    /// LSTM hidden state, carried across chunks.
-    private var hState: [Float]
-    /// LSTM cell state, carried across chunks.
-    private var cState: [Float]
-    /// Sample-rate tensor (constant, reusable).
-    private let srTensor: ORTValue
-    /// Backing data for srTensor (must stay alive).
-    private let srData: NSMutableData
+    /// Recurrent state, carried across chunks with shape [2, 1, 128].
+    private var recurrentState: [Float]
+    /// The final 64 samples from the previous consumed chunk.
+    private var context: [Float]
 
     // MARK: - Accumulation buffer
 
@@ -64,23 +68,32 @@ final class SileroVADEngine {
     // MARK: - Init
 
     init() throws {
-        env = try ORTEnv(loggingLevel: .warning)
+        let modelURL = try Self.resolvedModelURL()
 
-        let sessionOptions = try ORTSessionOptions()
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = .all
+        model = try MLModel(contentsOf: modelURL, configuration: configuration)
 
-        guard let modelURL = Self.resourceBundle.url(forResource: "silero_vad", withExtension: "onnx") else {
-            throw SileroVADError.modelNotFound
-        }
+        let audioInput = try MLMultiArray(
+            shape: Self.audioShape.map(NSNumber.init(value:)),
+            dataType: .float32
+        )
+        let recurrentStateInput = try MLMultiArray(
+            shape: Self.stateShape.map(NSNumber.init(value:)),
+            dataType: .float32
+        )
+        self.audioInput = audioInput
+        self.recurrentStateInput = recurrentStateInput
+        inputProvider = try MLDictionaryFeatureProvider(dictionary: [
+            "audio": MLFeatureValue(multiArray: audioInput),
+            "recurrent_state": MLFeatureValue(multiArray: recurrentStateInput),
+        ])
 
-        session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: sessionOptions)
+        recurrentState = [Float](repeating: 0, count: Self.stateSize)
+        context = [Float](repeating: 0, count: Self.contextSize)
 
-        hState = [Float](repeating: 0, count: Self.stateSize)
-        cState = [Float](repeating: 0, count: Self.stateSize)
-
-        // Pre-build the sample-rate tensor (constant Int64 = 16000).
-        var sr: Int64 = 16000
-        srData = NSMutableData(bytes: &sr, length: MemoryLayout<Int64>.size)
-        srTensor = try ORTValue(tensorData: srData, elementType: .int64, shape: [1])
+        _ = try infer(chunk: [Float](repeating: 0, count: Self.chunkSize))
+        reset()
     }
 
     // MARK: - Public API
@@ -113,6 +126,9 @@ final class SileroVADEngine {
                 probability = try infer(chunk: chunk)
                 hasLoggedInferenceFailure = false
             } catch {
+                // State cannot advance without a prediction. Start a coherent new
+                // model stream rather than combining stale state with newer audio.
+                resetInferenceState()
                 if !hasLoggedInferenceFailure {
                     fputs("Silero VAD inference failed: \(error)\n", stderr)
                     hasLoggedInferenceFailure = true
@@ -134,10 +150,9 @@ final class SileroVADEngine {
         )
     }
 
-    /// Reset LSTM state and hysteresis. Call when starting a new recognition session.
+    /// Reset recurrent state, audio context, and hysteresis for a new stream.
     func reset() {
-        hState = [Float](repeating: 0, count: Self.stateSize)
-        cState = [Float](repeating: 0, count: Self.stateSize)
+        resetInferenceState()
         accumulationBuffer.removeAll()
         hysteresis.reset()
         hasLoggedInferenceFailure = false
@@ -153,71 +168,131 @@ final class SileroVADEngine {
 #endif
     }
 
+    private static let compiledPackageModelURL: Result<URL, Error> = Result {
+        guard let packageURL = resourceBundle.url(
+            forResource: "SileroVAD",
+            withExtension: "mlpackage"
+        ) else {
+            throw SileroVADError.modelNotFound
+        }
+        return try MLModel.compileModel(at: packageURL)
+    }
+
+    private static func resolvedModelURL() throws -> URL {
+        if let compiledURL = resourceBundle.url(
+            forResource: "SileroVAD",
+            withExtension: "mlmodelc"
+        ) {
+            return compiledURL
+        }
+
+        return try compiledPackageModelURL.get()
+    }
+
     private func infer(chunk: [Float]) throws -> Float {
-        // Build input tensor: [1, 512]
-        var audioSamples = chunk
-        let audioData = NSMutableData(
-            bytes: &audioSamples,
-            length: audioSamples.count * MemoryLayout<Float>.size
+        populateInputs(chunk: chunk)
+
+        let outputs = try model.prediction(from: inputProvider)
+        let probabilityOutput = try validatedOutput(
+            named: "probability",
+            from: outputs,
+            expectedShape: Self.probabilityShape
         )
-        let audioTensor = try ORTValue(
-            tensorData: audioData,
-            elementType: .float,
-            shape: [1, NSNumber(value: Self.chunkSize)]
+        let stateOutput = try validatedOutput(
+            named: "state_out",
+            from: outputs,
+            expectedShape: Self.stateShape
         )
 
-        // Build h tensor: [2, 1, 64]
-        let hData = NSMutableData(
-            bytes: &hState,
-            length: hState.count * MemoryLayout<Float>.size
-        )
-        let hTensor = try ORTValue(
-            tensorData: hData,
-            elementType: .float,
-            shape: [2, 1, 64]
-        )
-
-        // Build c tensor: [2, 1, 64]
-        let cData = NSMutableData(
-            bytes: &cState,
-            length: cState.count * MemoryLayout<Float>.size
-        )
-        let cTensor = try ORTValue(
-            tensorData: cData,
-            elementType: .float,
-            shape: [2, 1, 64]
-        )
-
-        let runOptions = try ORTRunOptions()
-        let outputs = try session.run(
-            withInputs: [
-                "input": audioTensor,
-                "sr": srTensor,
-                "h": hTensor,
-                "c": cTensor,
-            ],
-            outputNames: Set(["output", "hn", "cn"]),
-            runOptions: runOptions
-        )
-
-        // Read speech probability
-        guard let outputValue = outputs["output"] else {
-            throw SileroVADError.missingOutput("output")
+        let probability = probabilityOutput.withUnsafeBufferPointer(ofType: Float.self) {
+            $0[0]
         }
-        let outputData = try outputValue.tensorData() as Data
-        let probability = outputData.withUnsafeBytes { $0.load(as: Float.self) }
 
-        // Update LSTM states for next call
-        if let hnValue = outputs["hn"] {
-            let hnData = try hnValue.tensorData() as Data
-            hState = hnData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        let stateStrides = stateOutput.strides.map { $0.intValue }
+        stateOutput.withUnsafeBufferPointer(ofType: Float.self) { values in
+            for layer in 0..<Self.stateLayers {
+                for unit in 0..<Self.stateWidth {
+                    recurrentState[layer * Self.stateWidth + unit] =
+                        values[layer * stateStrides[0] + unit * stateStrides[2]]
+                }
+            }
         }
-        if let cnValue = outputs["cn"] {
-            let cnData = try cnValue.tensorData() as Data
-            cState = cnData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
-        }
+
+        updateContext(from: chunk)
 
         return probability
+    }
+
+    private func resetInferenceState() {
+        recurrentState = [Float](repeating: 0, count: Self.stateSize)
+        context = [Float](repeating: 0, count: Self.contextSize)
+    }
+
+    private func updateContext(from chunk: [Float]) {
+        let contextStart = Self.chunkSize - Self.contextSize
+        for index in 0..<Self.contextSize {
+            context[index] = chunk[contextStart + index]
+        }
+    }
+
+    private func populateInputs(chunk: [Float]) {
+        audioInput.withUnsafeMutableBufferPointer(ofType: Float.self) { values, strides in
+            let sampleStride = strides[1]
+            for index in 0..<Self.contextSize {
+                values[index * sampleStride] = context[index]
+            }
+            for index in 0..<Self.chunkSize {
+                values[(Self.contextSize + index) * sampleStride] = chunk[index]
+            }
+        }
+
+        recurrentStateInput.withUnsafeMutableBufferPointer(ofType: Float.self) { values, strides in
+            for layer in 0..<Self.stateLayers {
+                for unit in 0..<Self.stateWidth {
+                    values[layer * strides[0] + unit * strides[2]] =
+                        recurrentState[layer * Self.stateWidth + unit]
+                }
+            }
+        }
+    }
+
+    private func validatedOutput(
+        named name: String,
+        from provider: any MLFeatureProvider,
+        expectedShape: [Int]
+    ) throws -> MLMultiArray {
+        guard let featureValue = provider.featureValue(for: name) else {
+            throw SileroVADError.missingOutput(name)
+        }
+        guard let multiArray = featureValue.multiArrayValue else {
+            throw SileroVADError.outputIsNotMultiArray(name)
+        }
+        guard multiArray.dataType == .float32 else {
+            throw SileroVADError.invalidOutputDataType(
+                name: name,
+                actual: multiArray.dataType
+            )
+        }
+
+        let expectedCount = expectedShape.reduce(1, *)
+        guard multiArray.count == expectedCount else {
+            throw SileroVADError.invalidOutputCount(
+                name: name,
+                expected: expectedCount,
+                actual: multiArray.count
+            )
+        }
+
+        let actualShape = multiArray.shape.map { $0.intValue }
+        guard actualShape == expectedShape else {
+            throw SileroVADError.invalidOutputShape(
+                name: name,
+                expected: expectedShape,
+                actual: actualShape
+            )
+        }
+
+        return multiArray
     }
 }
 
@@ -226,13 +301,25 @@ final class SileroVADEngine {
 enum SileroVADError: LocalizedError {
     case modelNotFound
     case missingOutput(String)
+    case outputIsNotMultiArray(String)
+    case invalidOutputDataType(name: String, actual: MLMultiArrayDataType)
+    case invalidOutputCount(name: String, expected: Int, actual: Int)
+    case invalidOutputShape(name: String, expected: [Int], actual: [Int])
 
     var errorDescription: String? {
         switch self {
         case .modelNotFound:
-            return "Silero VAD model (silero_vad.onnx) not found in app bundle."
+            return "Silero VAD Core ML model (SileroVAD.mlmodelc or SileroVAD.mlpackage) not found in app bundle."
         case .missingOutput(let name):
-            return "Silero VAD inference missing expected output: \(name)"
+            return "Silero VAD Core ML model is missing expected output '\(name)'."
+        case .outputIsNotMultiArray(let name):
+            return "Silero VAD Core ML output '\(name)' is not a multi-array."
+        case .invalidOutputDataType(let name, let actual):
+            return "Silero VAD Core ML output '\(name)' has data type \(actual); expected Float32."
+        case .invalidOutputCount(let name, let expected, let actual):
+            return "Silero VAD Core ML output '\(name)' has \(actual) elements; expected \(expected)."
+        case .invalidOutputShape(let name, let expected, let actual):
+            return "Silero VAD Core ML output '\(name)' has shape \(actual); expected \(expected)."
         }
     }
 }

@@ -3,49 +3,12 @@ import AVFoundation
 import CoreAudio
 import CoreMedia
 import Foundation
+import os.log
 import Speech
 
-#if canImport(OnnxRuntimeBindings)
-private typealias SessionVADEngine = SileroVADEngine
-private typealias SessionVADResult = VADResult
-#else
-private struct SessionVADResult: Sendable {
-    let speechProbability: Float
-    let isSpeech: Bool
-    let containsSpeechOnset: Bool
-    let containsSpeechOffset: Bool
+private extension Logger {
+    static let appAudioCapture = Logger(subsystem: "com.franklioxygen.v2s", category: "appAudioCapture")
 }
-
-private enum SessionVADError: LocalizedError, AppLocalizableError {
-    case unavailable
-
-    func localizedDescription(languageID: String) -> String {
-        AppLocalization.string(.sileroVadUnavailableWithoutOnnx, languageID: languageID)
-    }
-
-    var errorDescription: String? {
-        localizedDescription(languageID: "en")
-    }
-}
-
-private final class SessionVADEngine {
-    init() throws {
-        throw SessionVADError.unavailable
-    }
-
-    func process(buffer: AVAudioPCMBuffer) -> SessionVADResult {
-        _ = buffer
-        return SessionVADResult(
-            speechProbability: 0,
-            isSpeech: false,
-            containsSpeechOnset: false,
-            containsSpeechOffset: false
-        )
-    }
-
-    func reset() {}
-}
-#endif
 
 struct RecognizedSentence: Equatable, Sendable {
     let text: String
@@ -58,15 +21,50 @@ struct RecognizedSentence: Equatable, Sendable {
 }
 
 final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
+    enum LegacyRecognitionErrorDisposition: Equatable {
+        case ignore
+        case restartImmediately
+        case retryWithBackoff
+        case stopAndSurface
+    }
+
+    /// Decides what to do about a legacy recognition-task error.
+    ///
+    /// `message` is the error's localized description. Code 203 is a bucket Apple uses
+    /// for unrelated failures — the transient "Retry"/"Corrupt" faults that a restart
+    /// clears, and the server quota rejection that no amount of retrying clears — so
+    /// only the quota text earns a hard stop.
+    static func legacyRecognitionErrorDisposition(
+        domain: String,
+        code: Int,
+        message: String = ""
+    ) -> LegacyRecognitionErrorDisposition {
+        guard domain == "kAFAssistantErrorDomain" else {
+            return .retryWithBackoff
+        }
+
+        if message.range(of: "quota", options: .caseInsensitive) != nil {
+            return .stopAndSurface
+        }
+
+        switch code {
+        case 216, 301:
+            return .ignore
+        case 1110:
+            return .restartImmediately
+        default:
+            return .retryWithBackoff
+        }
+    }
+
     private struct CommittedEmission {
         let text: String
         let promotionSegmentID: UUID?
     }
 
     private struct ApplicationCaptureDescriptor: Sendable {
-        let appName: String
+        let source: InputSource
         let processObjectIDs: [AudioObjectID]
-        let readStreamFailureMessage: String
     }
 
     @MainActor
@@ -140,6 +138,18 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     /// Incremented on every restart. Handlers capture their generation at creation time
     /// and discard callbacks that arrive after a newer generation has started.
     private var recognitionGeneration: Int = 0
+    /// Consecutive recognition-task failures since the last delivered result. Restarting
+    /// immediately recovers from a one-off fault, but a persistent one — an evicted
+    /// on-device asset, an unreachable backend — would otherwise spin the task in a hot
+    /// loop, so retries are spaced out and eventually surfaced instead of hidden.
+    private var consecutiveRecognitionFailures = 0
+    private var lastRecognitionFailureTime = Date.distantPast
+    private var pendingRecognitionRestart: DispatchWorkItem?
+    /// Delay before the Nth consecutive retry. The first stays immediate so ordinary
+    /// hiccups still recover without a visible gap.
+    private let recognitionRestartBackoff: [TimeInterval] = [0, 0.5, 1.5, 3, 5]
+    /// Failures spaced further apart than this are unrelated, not a failing recognizer.
+    private let recognitionFailureWindow: TimeInterval = 60
     private var preprocessingConverter: AVAudioConverter?
     private var preprocessingConverterInputSignature: AudioFormatSignature?
     private var audioConverter: AVAudioConverter?
@@ -164,9 +174,25 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var microphoneCaptureSession: AVCaptureSession?
     private var applicationAudioCapture: ApplicationAudioCapture?
 
+    // MARK: App audio capture recovery (captureQueue)
+    /// The app being captured. Nil for a microphone source and once the session stops.
+    private var applicationCaptureSource: InputSource?
+    /// Identifies the current capture. Events and rebuilds that belong to an earlier one
+    /// are dropped.
+    private var applicationCaptureGeneration = 0
+    private var pendingApplicationCaptureRebuild: DispatchWorkItem?
+    private var applicationCaptureRebuildSchedule = ApplicationCaptureRebuildSchedule()
+    private var applicationCaptureRecovery = ApplicationCaptureRecoveryPolicy()
+    /// A route change arrives as a burst of notifications; one rebuild answers them all.
+    private let applicationCaptureRebuildDebounce: TimeInterval = 0.3
+    private let applicationProcessRefreshDebounce: TimeInterval = 1
+
     private var transcriptHandler: (@MainActor (RecognizedSentence) -> Void)?
     private var partialHandler: (@MainActor (DraftSegment?) -> Void)?
     private var errorHandler: (@MainActor (String) -> Void)?
+    /// Reports an unrecoverable recognition failure after this session has stopped.
+    /// The owner uses this separate callback to stop sibling sessions as well.
+    private var fatalErrorHandler: (@MainActor (String) -> Void)?
     @MainActor private var recentCommittedSentenceHistory: [RecentCommittedSentence] = []
 
     private func localized(_ key: AppTextKey, _ arguments: CVarArg...) -> String {
@@ -197,7 +223,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var latestFormattedText: NSString = ""
 
     // MARK: Silero VAD (captureQueue)
-    private var vadEngine: SessionVADEngine?
+    private var vadEngine: SileroVADEngine?
     private var lastVADProbability: Float = 0.0
     private var vadSilenceCommitTimer: DispatchSourceTimer?
     private var noiseFloorRMS: Float = 0.0012
@@ -229,7 +255,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         contextualStrings: [String] = [],
         transcriptHandler: @escaping @MainActor (RecognizedSentence) -> Void,
         partialHandler: @escaping @MainActor (DraftSegment?) -> Void,
-        errorHandler: @escaping @MainActor (String) -> Void
+        errorHandler: @escaping @MainActor (String) -> Void,
+        fatalErrorHandler: @escaping @MainActor (String) -> Void
     ) async throws {
         self.transcriptHandler = transcriptHandler
         self.partialHandler = partialHandler
@@ -238,6 +265,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         self.activeLocaleIdentifier = localeIdentifier
         self.interfaceLanguageID = interfaceLanguageID
         self.errorHandler = errorHandler
+        self.fatalErrorHandler = fatalErrorHandler
         await MainActor.run {
             recentCommittedSentenceHistory.removeAll()
         }
@@ -265,8 +293,21 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     }
 
     func stop() {
-        captureQueue.async { [weak self] in
-            self?.stopOnCaptureQueue()
+        // Keep the session alive until every capture resource has been released. The
+        // owner drops its references immediately after calling this method.
+        captureQueue.async { [self] in
+            stopOnCaptureQueue()
+        }
+    }
+
+    /// Stops the session and returns only after its capture queue has released all
+    /// microphone/Core Audio resources. Used before starting replacement sessions.
+    func stopAndWait() async {
+        await withCheckedContinuation { continuation in
+            captureQueue.async { [self] in
+                stopOnCaptureQueue()
+                continuation.resume()
+            }
         }
     }
 
@@ -279,8 +320,11 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         applicationAudioCapture?.stop()
         applicationAudioCapture = nil
+        resetApplicationCaptureRecovery()
 
         stopModernSpeechRecognizer()
+        resetRecognitionFailureState()
+        recognitionGeneration &+= 1
         recognitionRequest?.endAudio()
         recognitionTask?.cancel()
         recognitionTask = nil
@@ -350,7 +394,9 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             throw SessionError.unavailableSpeechRecognizer(localeIdentifier)
         }
 
-        let request = makeRecognitionRequest()
+        let request = makeRecognitionRequest(
+            requiresOnDeviceRecognition: recognizer.supportsOnDeviceRecognition
+        )
 
         let task = recognizer.recognitionTask(with: request, resultHandler: makeRecognitionHandler())
 
@@ -358,6 +404,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         recognitionRequest = request
         recognitionTask = task
         recognitionBackend = .legacy
+        resetRecognitionFailureState()
         resetAudioProcessingState()
         resetLegacyTranscriptionState()
         cancelSilenceTimer()
@@ -365,7 +412,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         // Initialize Silero VAD engine.
         do {
-            vadEngine = try SessionVADEngine()
+            vadEngine = try SileroVADEngine()
         } catch {
             // VAD is optional — fall back to implicit ASR-based silence detection.
             vadEngine = nil
@@ -378,6 +425,24 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
                 )
             }
         }
+    }
+
+    /// Resolves `requestedLocale` to a locale the modern Speech stack actually carries.
+    ///
+    /// `SpeechTranscriber.supportedLocale(equivalentTo:)` answers with an equivalent
+    /// locale even for languages the stack does not support at all — `ru-RU` resolves
+    /// to `ru_RU` on a Mac whose supported list holds no Russian — so its answer only
+    /// counts when it appears in `supportedLocales`. Without this check the modern path
+    /// is entered for languages only the legacy recognizer can serve.
+    @available(macOS 26.0, *)
+    static func modernSpeechLocale(equivalentTo requestedLocale: Locale) async -> Locale? {
+        guard SpeechTranscriber.isAvailable,
+              let resolved = await SpeechTranscriber.supportedLocale(equivalentTo: requestedLocale) else {
+            return nil
+        }
+
+        let supportedIdentifiers = await Set(SpeechTranscriber.supportedLocales.map(\.identifier))
+        return supportedIdentifiers.contains(resolved.identifier) ? resolved : nil
     }
 
     private func configureModernSpeechRecognizer(localeIdentifier: String) async throws -> Bool {
@@ -396,7 +461,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     @available(macOS 26.0, *)
     private func configureSpeechAnalyzerRecognizer(localeIdentifier: String) async throws -> Bool {
         let requestedLocale = Locale(identifier: localeIdentifier)
-        guard let resolvedLocale = await SpeechTranscriber.supportedLocale(equivalentTo: requestedLocale) else {
+        guard let resolvedLocale = await Self.modernSpeechLocale(equivalentTo: requestedLocale) else {
             return false
         }
 
@@ -470,7 +535,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         // Initialize Silero VAD engine for draft confidence / silence scoring only.
         do {
-            vadEngine = try SessionVADEngine()
+            vadEngine = try SileroVADEngine()
         } catch {
             vadEngine = nil
         }
@@ -532,23 +597,23 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             do {
                 try self.configureSpeechRecognizer(localeIdentifier: localeIdentifier)
             } catch {
-                Task {
-                    await self.emitError(
-                        self.localized(
-                            .speechRecognitionStoppedFormat,
-                            self.localizedErrorDescription(error)
-                        )
-                    )
-                }
+                self.stopRecognitionAndSurface(error)
             }
         }
     }
 
-    private func makeRecognitionRequest() -> SFSpeechAudioBufferRecognitionRequest {
+    /// Builds a recognition request, keeping recognition on device wherever the
+    /// recognizer has a local model. Languages without one — Chinese on Intel, say —
+    /// are only served by Apple's speech service, and refusing that would leave them
+    /// with no recognition at all.
+    private func makeRecognitionRequest(
+        requiresOnDeviceRecognition: Bool
+    ) -> SFSpeechAudioBufferRecognitionRequest {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.taskHint = .dictation
         request.addsPunctuation = true
+        request.requiresOnDeviceRecognition = requiresOnDeviceRecognition
         request.contextualStrings = recognitionContextualStrings
         return request
     }
@@ -631,31 +696,35 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     @MainActor
     private func makeApplicationCaptureDescriptor(for source: InputSource) throws -> ApplicationCaptureDescriptor {
         ApplicationCaptureDescriptor(
-            appName: source.name,
-            processObjectIDs: try resolveApplicationProcessObjectIDs(for: source),
-            readStreamFailureMessage: localized(.failedToReadCapturedAudioStreamFormat, source.name)
+            source: source,
+            processObjectIDs: try resolveApplicationProcessObjectIDs(for: source)
         )
     }
 
     private func startApplicationAudioCapture(descriptor: ApplicationCaptureDescriptor) throws {
+        applicationCaptureGeneration &+= 1
+        let generation = applicationCaptureGeneration
         let capture = ApplicationAudioCapture(
-            appName: descriptor.appName,
+            appName: descriptor.source.name,
             processObjectIDs: descriptor.processObjectIDs,
-            readStreamFailureMessage: descriptor.readStreamFailureMessage,
+            silenceWindow: applicationCaptureRecovery.silenceWindow,
             queue: captureQueue,
             audioHandler: { [weak self] buffer in
                 self?.append(audioBuffer: buffer)
             },
-            errorHandler: { [weak self] message in
-                Task {
-                    await self?.emitError(message)
-                }
+            eventHandler: { [weak self] event in
+                self?.handleApplicationCaptureEvent(event, generation: generation)
             }
         )
 
         do {
             try capture.start()
             applicationAudioCapture = capture
+            applicationCaptureSource = descriptor.source
+            // The descriptor predates tap creation. Process changes during creation or
+            // the listener gap between captures may never reach this generation, so
+            // always reconcile once the new listeners are installed.
+            scheduleApplicationCaptureRebuild(after: applicationProcessRefreshDebounce, onlyIfProcessesChanged: true)
         } catch let error as ApplicationAudioCapture.CaptureError {
             throw mapApplicationCaptureError(error)
         } catch {
@@ -669,6 +738,206 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
     }
 
+    // MARK: App audio capture recovery
+
+    /// Handles a capture's report on the capture queue. A capture that stopped matching
+    /// its audio is replaced: the app's processes are resolved again, and a new tap and
+    /// aggregate device are built for them.
+    private func handleApplicationCaptureEvent(_ event: ApplicationCaptureEvent, generation: Int) {
+        guard generation == applicationCaptureGeneration, applicationCaptureSource != nil else {
+            return
+        }
+
+        switch event {
+        case .receivingAudio:
+            applicationCaptureRecovery.recordAudibleCapture()
+        case .processListChanged:
+            scheduleApplicationCaptureRebuild(after: applicationProcessRefreshDebounce, onlyIfProcessesChanged: true)
+        case .invalidated(let change):
+            Logger.appAudioCapture.notice("Rebuilding app audio capture: \(String(describing: change), privacy: .public)")
+
+            if change == .silentWhileAppIsPlaying {
+                applicationCaptureRecovery.recordSilentCapture()
+            }
+
+            scheduleApplicationCaptureRebuild(after: applicationCaptureRebuildDebounce, onlyIfProcessesChanged: false)
+        }
+    }
+
+    /// Queues a rebuild of the app capture. With `onlyIfProcessesChanged` the running
+    /// capture is kept unless the app's audio processes differ from the tapped ones.
+    private func scheduleApplicationCaptureRebuild(after delay: TimeInterval, onlyIfProcessesChanged: Bool) {
+        guard let request = applicationCaptureRebuildSchedule.schedule(onlyIfProcessesChanged: onlyIfProcessesChanged) else {
+            return
+        }
+        pendingApplicationCaptureRebuild?.cancel()
+
+        let generation = applicationCaptureGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.applicationCaptureRebuildSchedule.beginResolving(request) else {
+                return
+            }
+
+            self.pendingApplicationCaptureRebuild = nil
+            self.rebuildApplicationCapture(generation: generation, request: request)
+        }
+
+        pendingApplicationCaptureRebuild = work
+        captureQueue.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func rebuildApplicationCapture(generation: Int, request: ApplicationCaptureRebuildSchedule.Request) {
+        guard generation == applicationCaptureGeneration, let source = applicationCaptureSource else {
+            // Release the reservation; a request left in place would block every later rebuild.
+            _ = applicationCaptureRebuildSchedule.finish(request)
+            return
+        }
+
+        // The app's processes are resolved on the main actor, as at start.
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+
+            let resolution: Result<ApplicationCaptureDescriptor, Error>
+            do {
+                resolution = .success(try await MainActor.run {
+                    try self.makeApplicationCaptureDescriptor(for: source)
+                })
+            } catch {
+                resolution = .failure(error)
+            }
+
+            self.captureQueue.async {
+                self.finishApplicationCaptureRebuild(
+                    resolution,
+                    generation: generation,
+                    request: request
+                )
+            }
+        }
+    }
+
+    private func finishApplicationCaptureRebuild(
+        _ resolution: Result<ApplicationCaptureDescriptor, Error>,
+        generation: Int,
+        request: ApplicationCaptureRebuildSchedule.Request
+    ) {
+        // Release the reservation before anything else, so no early return can leave it
+        // in place and block every later rebuild.
+        guard applicationCaptureRebuildSchedule.finish(request) else {
+            return
+        }
+        let needsFollowUpRefresh = applicationCaptureRebuildSchedule.takeFollowUpRefresh()
+
+        guard generation == applicationCaptureGeneration, applicationCaptureSource != nil else {
+            return
+        }
+        defer {
+            // A process that registered after this request's lookup still needs tapping.
+            if needsFollowUpRefresh, applicationCaptureSource != nil {
+                scheduleApplicationCaptureRebuild(after: applicationProcessRefreshDebounce, onlyIfProcessesChanged: true)
+            }
+        }
+        let onlyIfProcessesChanged = request.onlyIfProcessesChanged
+
+        let descriptor: ApplicationCaptureDescriptor
+        switch resolution {
+        case .success(let resolved):
+            descriptor = resolved
+        case .failure(let error):
+            // A closed app cannot recover through the watchdog: none of its old
+            // processes will report output again. Surface the specific error now.
+            if case SessionError.missingApplication = error {
+                abandonApplicationCapture(after: error)
+                return
+            }
+            // Keep a working capture through transient process-list churn.
+            if onlyIfProcessesChanged, applicationAudioCapture != nil {
+                return
+            }
+
+            retryApplicationCaptureRebuild(after: error)
+            return
+        }
+
+        if onlyIfProcessesChanged,
+           let capture = applicationAudioCapture,
+           Set(capture.processObjectIDs) == Set(descriptor.processObjectIDs) {
+            return
+        }
+
+        // Count actual replacements, including process changes, rather than just
+        // invalidation events. Helper churn must not bypass the rebuild limit.
+        let rebuildKind: ApplicationCaptureRecoveryPolicy.RebuildKind = onlyIfProcessesChanged ? .processChange : .recovery
+        if let delay = applicationCaptureRecovery.admitRebuild(rebuildKind, at: ProcessInfo.processInfo.systemUptime) {
+            guard onlyIfProcessesChanged, applicationAudioCapture != nil else {
+                abandonApplicationCapture(after: nil)
+                return
+            }
+
+            // The running capture still works, so churn must not end the session. Tap
+            // the changed processes once the window has room again.
+            Logger.appAudioCapture.notice("Deferring app audio process refresh by \(delay, privacy: .public) s")
+            scheduleApplicationCaptureRebuild(after: delay, onlyIfProcessesChanged: true)
+            return
+        }
+
+        applicationAudioCapture?.stop()
+        applicationAudioCapture = nil
+
+        do {
+            try startApplicationAudioCapture(descriptor: descriptor)
+            applicationCaptureRecovery.recordSuccessfulRebuild()
+        } catch {
+            retryApplicationCaptureRebuild(after: error)
+        }
+    }
+
+    private func retryApplicationCaptureRebuild(after error: Error) {
+        Logger.appAudioCapture.error("App audio capture rebuild failed: \(self.localizedErrorDescription(error))")
+
+        guard let delay = applicationCaptureRecovery.delayAfterFailedRebuild() else {
+            abandonApplicationCapture(after: error)
+            return
+        }
+
+        scheduleApplicationCaptureRebuild(after: delay, onlyIfProcessesChanged: false)
+    }
+
+    /// Ends the session once the app's audio cannot be recovered, and tells the user
+    /// how to get it back.
+    private func abandonApplicationCapture(after error: Error?) {
+        let appName = applicationCaptureSource?.name ?? ""
+        var message = localized(.applicationAudioLostFormat, appName)
+
+        if let error = error as? SessionError {
+            switch error {
+            case .audioCapturePermissionDenied, .missingApplication:
+                // These already tell the user what to do.
+                message = localizedErrorDescription(error)
+            default:
+                break
+            }
+        }
+
+        Logger.appAudioCapture.error("Gave up on app audio capture for \(appName)")
+        stopOnCaptureQueue()
+
+        Task {
+            await self.emitFatalError(message)
+        }
+    }
+
+    private func resetApplicationCaptureRecovery() {
+        pendingApplicationCaptureRebuild?.cancel()
+        pendingApplicationCaptureRebuild = nil
+        applicationCaptureRebuildSchedule.cancel()
+        applicationCaptureSource = nil
+        applicationCaptureGeneration &+= 1
+        applicationCaptureRecovery = ApplicationCaptureRecoveryPolicy()
+    }
+
     private func resolveApplicationProcessObjectIDs(for source: InputSource) throws -> [AudioObjectID] {
         let runningApp = try resolveRunningApplication(for: source)
         let system = AudioHardwareSystem.shared
@@ -678,7 +947,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         var seen = Set<AudioObjectID>()
 
         for process in audioProcesses {
-            let processID = try process.pid
+            // Process-list notifications can race an unrelated process exiting.
+            guard let processID = try? process.pid else {
+                continue
+            }
             let processObjectID = process.id
             let processBundleIdentifier = (try? process.bundleID) ?? ""
             let processAppBundleURL = applicationBundleURL(forProcessID: processID)
@@ -827,7 +1099,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
     private func prepareProcessingBuffer(from audioBuffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
         if audioBuffer.format.matches(processingFormat) {
-            guard let copiedBuffer = copyPCMBuffer(audioBuffer) else {
+            guard let copiedBuffer = audioBuffer.copied() else {
                 Task {
                     await emitError(localized(.failedToCopyCapturedAudioForSpeechPreprocessing))
                 }
@@ -966,27 +1238,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         @unknown default:
             return nil
         }
-    }
-
-    private func copyPCMBuffer(_ source: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard let copy = AVAudioPCMBuffer(pcmFormat: source.format, frameCapacity: source.frameLength) else {
-            return nil
-        }
-
-        copy.frameLength = source.frameLength
-        let sourceBuffers = UnsafeMutableAudioBufferListPointer(source.mutableAudioBufferList)
-        let destinationBuffers = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
-
-        for (sourceBuffer, destinationBuffer) in zip(sourceBuffers, destinationBuffers) {
-            guard let sourceData = sourceBuffer.mData,
-                  let destinationData = destinationBuffer.mData else {
-                continue
-            }
-
-            memcpy(destinationData, sourceData, Int(sourceBuffer.mDataByteSize))
-        }
-
-        return copy
     }
 
     private func cleanUpSpeechBuffer(_ buffer: AVAudioPCMBuffer) -> AudioLevelStats {
@@ -1183,6 +1434,11 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     @MainActor
     private func emitError(_ message: String) {
         errorHandler?(message)
+    }
+
+    @MainActor
+    private func emitFatalError(_ message: String) {
+        fatalErrorHandler?(message)
     }
 
     @MainActor
@@ -1419,6 +1675,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
     private func processRecognitionResult(_ result: SFSpeechRecognitionResult) {
         lastRecognitionResultTime = Date()
+        // The recognizer is delivering again — forget any earlier failures.
+        consecutiveRecognitionFailures = 0
         let transcription = result.bestTranscription
         let segments = transcription.segments
         let formattedText = transcription.formattedString as NSString
@@ -1556,6 +1814,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private func restartRecognitionTask() {
         guard let recognizer = speechRecognizer else { return }
 
+        // A restart from any source supersedes a retry still waiting on its backoff.
+        pendingRecognitionRestart?.cancel()
+        pendingRecognitionRestart = nil
+
         // Cleanly end the old request before discarding it.
         recognitionRequest?.endAudio()
         recognitionTask?.cancel()
@@ -1567,7 +1829,9 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         // dispatched by the cancelled task are silently ignored.
         recognitionGeneration &+= 1
 
-        let request = makeRecognitionRequest()
+        let request = makeRecognitionRequest(
+            requiresOnDeviceRecognition: recognizer.supportsOnDeviceRecognition
+        )
 
         let task = recognizer.recognitionTask(with: request, resultHandler: makeRecognitionHandler())
 
@@ -1580,12 +1844,74 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         Task { await emitPartialDraft(nil) }
     }
 
+    private func resetRecognitionFailureState() {
+        pendingRecognitionRestart?.cancel()
+        pendingRecognitionRestart = nil
+        consecutiveRecognitionFailures = 0
+        lastRecognitionFailureTime = .distantPast
+    }
+
+    /// Recovers from a recognition-task error on captureQueue.
+    ///
+    /// Retries are spaced by `recognitionRestartBackoff` so a recognizer that fails the
+    /// instant it starts cannot loop at full speed. Once the retries are exhausted the
+    /// error reaches the UI — otherwise capture keeps running behind an overlay that
+    /// still claims to be waiting for audio.
+    private func handleRecognitionFailure(_ error: Error) {
+        let now = Date()
+        if now.timeIntervalSince(lastRecognitionFailureTime) > recognitionFailureWindow {
+            consecutiveRecognitionFailures = 0
+        }
+        lastRecognitionFailureTime = now
+        consecutiveRecognitionFailures += 1
+
+        guard consecutiveRecognitionFailures <= recognitionRestartBackoff.count else {
+            stopRecognitionAndSurface(error)
+            return
+        }
+
+        let delay = recognitionRestartBackoff[consecutiveRecognitionFailures - 1]
+        guard delay > 0 else {
+            restartRecognitionTask()
+            return
+        }
+
+        pendingRecognitionRestart?.cancel()
+        let restart = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingRecognitionRestart = nil
+            self.restartRecognitionTask()
+        }
+        pendingRecognitionRestart = restart
+        captureQueue.asyncAfter(deadline: .now() + delay, execute: restart)
+    }
+
+    /// Ends the session after recognition has failed for good, and reports why.
+    ///
+    /// Capture is torn down along with the recognizer: audio that nothing transcribes is
+    /// only a microphone left open, and the surfaced message tells the user the session
+    /// has stopped. `stopOnCaptureQueue` keeps `errorHandler` in place, so the message
+    /// still reaches the UI.
+    private func stopRecognitionAndSurface(_ error: Error) {
+        stopOnCaptureQueue()
+
+        Task {
+            await self.emitFatalError(
+                self.localized(
+                    .speechRecognitionStoppedFormat,
+                    self.localizedErrorDescription(error)
+                )
+            )
+        }
+    }
+
     /// Builds the result/error handler used by every recognition task.
     ///
     /// On transient errors (no speech detected, internal failure, etc.) the handler
-    /// automatically restarts recognition so the pipeline never goes silent.
-    /// Fatal configuration errors (permission denied, unsupported locale) propagate
-    /// to the UI so the user knows why things stopped.
+    /// restarts recognition so the pipeline never goes silent. Repeated failures back
+    /// off and are eventually surfaced instead of retried forever — see
+    /// `handleRecognitionFailure`. Fatal configuration errors (permission denied,
+    /// unsupported locale) propagate to the UI so the user knows why things stopped.
     private func makeRecognitionHandler() -> (SFSpeechRecognitionResult?, Error?) -> Void {
         // Capture the generation at handler-creation time. Any callback arriving
         // after a restart (which bumps recognitionGeneration) will be discarded,
@@ -1594,19 +1920,32 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         return { [weak self] result, error in
             if let error {
                 let nsError = error as NSError
-                // kAFAssistantErrorDomain 216/301 = intentional cancellation from our own
-                // restartRecognitionTask / stop calls — ignore silently.
-                let isCancellation = nsError.domain == "kAFAssistantErrorDomain"
-                    && (nsError.code == 216 || nsError.code == 301)
+                let disposition = Self.legacyRecognitionErrorDisposition(
+                    domain: nsError.domain,
+                    code: nsError.code,
+                    message: nsError.localizedDescription
+                )
 
-                if isCancellation { return }
+                // Codes 216/301 are intentional cancellation from our own restart/stop.
+                if disposition == .ignore { return }
 
-                // For any other error, attempt a silent restart so recording continues.
-                // If the recogniser is truly unavailable the restart guard will bail out.
                 self?.captureQueue.async { [weak self] in
                     guard let self, self.speechRecognizer != nil,
                           self.recognitionGeneration == generation else { return }
-                    self.restartRecognitionTask()
+
+                    switch disposition {
+                    case .ignore:
+                        break
+                    case .restartImmediately:
+                        // Code 1110 is a normal "no speech detected" timeout.
+                        self.restartRecognitionTask()
+                    case .stopAndSurface:
+                        // An exhausted Apple server quota. Retrying only produces more
+                        // rejected requests, so fail fast and tell the user.
+                        self.stopRecognitionAndSurface(error)
+                    case .retryWithBackoff:
+                        self.handleRecognitionFailure(error)
+                    }
                 }
                 return
             }
@@ -2119,8 +2458,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         switch error {
         case .permissionDenied:
             return .audioCapturePermissionDenied
-        case .missingOutputDevice:
-            return .failedToStartCapture(localized(.noOutputAudioDeviceForAppCapture))
         case .tapFormatUnavailable:
             return .failedToStartCapture(localized(.selectedAppAudioFormatCouldNotBePrepared))
         case .failed(let stage, let status):
@@ -2141,41 +2478,323 @@ extension LiveTranscriptionSession: AVCaptureAudioDataOutputSampleBufferDelegate
     }
 }
 
-private final class ApplicationAudioCapture {
+/// Why an app-audio capture stopped delivering the audio it was built for. Each one
+/// makes the session tear the capture down and build it again.
+enum ApplicationCaptureChange: Equatable {
+    /// The tap or the aggregate device switched format, as when the app's Bluetooth
+    /// output drops into the hands-free profile.
+    case formatChanged
+    /// An IO cycle's buffer list no longer matches the tap's format.
+    case streamLayoutChanged
+    /// The private aggregate device went away.
+    case deviceDied
+    /// The system output route changed.
+    case defaultOutputChanged
+    /// No IO cycle arrived while the app was playing audio.
+    case stalled
+    /// Only digital silence arrived for the whole silence window while the app was
+    /// playing audio.
+    case silentWhileAppIsPlaying
+}
+
+enum ApplicationCaptureEvent: Equatable {
+    /// The capture no longer matches its audio and has to be rebuilt.
+    case invalidated(ApplicationCaptureChange)
+    /// Core Audio's process list changed, so the app may have started or stopped an
+    /// audio process.
+    case processListChanged
+    /// The first buffer carrying signal arrived.
+    case receivingAudio
+}
+
+/// Keeps a rebuild reserved through asynchronous process resolution. A route change
+/// supersedes a process refresh, and the superseded result cannot replace the capture.
+struct ApplicationCaptureRebuildSchedule {
+    struct Request: Equatable {
+        let id = UUID()
+        let onlyIfProcessesChanged: Bool
+    }
+
+    private(set) var current: Request?
+    /// The current request has started resolving the app's processes.
+    private var isResolving = false
+    /// A process-list change arrived while the current request was resolving, so its
+    /// snapshot of the app's processes may already be out of date.
+    private(set) var needsFollowUpRefresh = false
+
+    mutating func schedule(onlyIfProcessesChanged: Bool) -> Request? {
+        if let current, onlyIfProcessesChanged || !current.onlyIfProcessesChanged {
+            if onlyIfProcessesChanged, isResolving {
+                needsFollowUpRefresh = true
+            }
+            return nil
+        }
+        let request = Request(onlyIfProcessesChanged: onlyIfProcessesChanged)
+        current = request
+        // The new request resolves the processes itself, after this change.
+        isResolving = false
+        needsFollowUpRefresh = false
+        return request
+    }
+
+    /// Marks `request` as resolving. Returns false when a newer request superseded it.
+    mutating func beginResolving(_ request: Request) -> Bool {
+        guard current == request else {
+            return false
+        }
+        isResolving = true
+        return true
+    }
+
+    mutating func finish(_ request: Request) -> Bool {
+        guard current == request else {
+            return false
+        }
+        current = nil
+        isResolving = false
+        return true
+    }
+
+    /// Whether a refresh has to follow the request that just finished. Asking clears it.
+    mutating func takeFollowUpRefresh() -> Bool {
+        defer { needsFollowUpRefresh = false }
+        return needsFollowUpRefresh
+    }
+
+    mutating func cancel() {
+        current = nil
+        isResolving = false
+        needsFollowUpRefresh = false
+    }
+}
+
+/// Tracks IO health on the capture queue, including the active silence timeout.
+struct ApplicationCaptureHealth {
+    /// A playing app whose capture runs no IO cycle for this long has stalled.
+    static let stallTimeout: TimeInterval = 3
+
+    private(set) var silenceWindow: TimeInterval
+    private var lastIOCycleTime: TimeInterval = 0
+    private var lastSignalTime: TimeInterval = 0
+    private var hasReportedAudio = false
+
+    init(silenceWindow: TimeInterval) {
+        self.silenceWindow = silenceWindow
+    }
+
+    mutating func start(at time: TimeInterval) {
+        lastIOCycleTime = time
+        lastSignalTime = time
+    }
+
+    /// Returns true for the first audible cycle, which also resets session backoff.
+    mutating func recordCycle(at time: TimeInterval, hasSignal: Bool) -> Bool {
+        lastIOCycleTime = time
+        guard hasSignal else {
+            return false
+        }
+        lastSignalTime = time
+        silenceWindow = ApplicationCaptureRecoveryPolicy.silenceWindows[0]
+        defer { hasReportedAudio = true }
+        return !hasReportedAudio
+    }
+
+    mutating func check(at time: TimeInterval, isAppPlaying: Bool) -> ApplicationCaptureChange? {
+        guard isAppPlaying else {
+            start(at: time)
+            return nil
+        }
+        if time - lastIOCycleTime > Self.stallTimeout {
+            return .stalled
+        }
+        if time - lastSignalTime > silenceWindow {
+            return .silentWhileAppIsPlaying
+        }
+        return nil
+    }
+}
+
+/// Paces how an app-audio capture is rebuilt after it stops delivering audio.
+struct ApplicationCaptureRecoveryPolicy {
+    /// Delays before retrying a rebuild that failed. Once they run out the capture is
+    /// given up and the session reports it.
+    static let failedRebuildRetryDelays: [TimeInterval] = [0.5, 1, 2, 4]
+    /// How long a playing app may send only digital silence before the capture is
+    /// rebuilt. It grows while rebuilds keep coming back silent, so an app that holds its
+    /// output open without sound is not rebuilt every few seconds.
+    static let silenceWindows: [TimeInterval] = [8, 15, 30, 60]
+    /// More replacements of one kind than this within `rebuildWindow` are not converging.
+    static let maximumRebuildsPerWindow = 8
+    static let rebuildWindow: TimeInterval = 60
+
+    /// Why a capture is being replaced. Each kind has its own allowance, so helper
+    /// processes coming and going cannot use up the rebuilds a broken capture needs.
+    enum RebuildKind: Hashable {
+        /// The running capture stopped delivering its audio.
+        case recovery
+        /// The app's audio processes changed while the capture kept working.
+        case processChange
+    }
+
+    private(set) var consecutiveFailedRebuilds = 0
+    private(set) var consecutiveSilentCaptures = 0
+    private var recentRebuildTimes: [RebuildKind: [TimeInterval]] = [:]
+
+    var silenceWindow: TimeInterval {
+        Self.silenceWindows[min(consecutiveSilentCaptures, Self.silenceWindows.count - 1)]
+    }
+
+    /// Records a replacement of `kind` at `time`. Returns nil when it may go ahead, or
+    /// how long until the window has room for another one.
+    mutating func admitRebuild(_ kind: RebuildKind, at time: TimeInterval) -> TimeInterval? {
+        var times = recentRebuildTimes[kind, default: []].filter { time - $0 < Self.rebuildWindow }
+        defer { recentRebuildTimes[kind] = times }
+
+        if times.count >= Self.maximumRebuildsPerWindow, let oldest = times.first {
+            return oldest + Self.rebuildWindow - time
+        }
+
+        times.append(time)
+        return nil
+    }
+
+    /// Records a failed rebuild. Returns the delay before the next attempt, or nil once
+    /// the retries are exhausted.
+    mutating func delayAfterFailedRebuild() -> TimeInterval? {
+        guard consecutiveFailedRebuilds < Self.failedRebuildRetryDelays.count else {
+            return nil
+        }
+
+        let delay = Self.failedRebuildRetryDelays[consecutiveFailedRebuilds]
+        consecutiveFailedRebuilds += 1
+        return delay
+    }
+
+    mutating func recordSuccessfulRebuild() {
+        consecutiveFailedRebuilds = 0
+    }
+
+    mutating func recordSilentCapture() {
+        consecutiveSilentCaptures += 1
+    }
+
+    mutating func recordAudibleCapture() {
+        consecutiveSilentCaptures = 0
+    }
+}
+
+/// Checks the buffer lists an app-audio capture's IO cycle delivers.
+enum ApplicationCaptureBufferLayout {
+    /// Peaks at or below this (-120 dBFS) are digital silence. A tap that lost its
+    /// audio delivers exact zeros, while a live call's comfort noise sits far above it.
+    static let silenceThreshold: Float = 1e-6
+
+    /// Whether `buffers` holds exactly one non-empty stream in `format`. The aggregate
+    /// device carries only the tap, so any other layout means its configuration changed.
+    static func matches(_ buffers: UnsafeMutableAudioBufferListPointer, format: AVAudioFormat) -> Bool {
+        let expectedBufferCount = format.isInterleaved ? 1 : Int(format.channelCount)
+        let channelsPerBuffer = format.isInterleaved ? format.channelCount : 1
+        let bytesPerFrame = format.streamDescription.pointee.mBytesPerFrame
+
+        guard expectedBufferCount > 0,
+              buffers.count == expectedBufferCount,
+              bytesPerFrame > 0,
+              let byteSize = buffers.first?.mDataByteSize,
+              byteSize > 0,
+              byteSize % bytesPerFrame == 0 else {
+            return false
+        }
+
+        return buffers.allSatisfy {
+            $0.mData != nil && $0.mDataByteSize == byteSize && $0.mNumberChannels == channelsPerBuffer
+        }
+    }
+
+    /// Whether any Float32 sample rises above digital silence. Other sample formats are
+    /// assumed to carry signal, so they never read as a silent tap.
+    static func containsSignal(_ buffers: UnsafeMutableAudioBufferListPointer, format: AVAudioFormat) -> Bool {
+        guard format.commonFormat == .pcmFormatFloat32 else {
+            return true
+        }
+
+        for buffer in buffers {
+            guard let data = buffer.mData else {
+                continue
+            }
+
+            let samples = UnsafeBufferPointer(
+                start: data.assumingMemoryBound(to: Float.self),
+                count: Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+            )
+
+            if samples.contains(where: { abs($0) > silenceThreshold }) {
+                return true
+            }
+        }
+
+        return false
+    }
+}
+
+final class ApplicationAudioCapture {
     enum CaptureError: Error {
         case permissionDenied
-        case missingOutputDevice
         case tapFormatUnavailable
         case failed(stage: String, status: OSStatus)
     }
 
+    private struct PropertyListener {
+        let objectID: AudioObjectID
+        let address: AudioObjectPropertyAddress
+    }
+
+    private enum IOCycle {
+        case empty
+        case audio(AVAudioPCMBuffer, hasSignal: Bool)
+        /// The buffer list did not match the tap's format.
+        case unreadable
+    }
+
+    private static let healthCheckInterval: DispatchTimeInterval = .seconds(1)
+
+    let processObjectIDs: [AudioObjectID]
     private let appName: String
-    private let processObjectIDs: [AudioObjectID]
-    private let readStreamFailureMessage: String
     private let queue: DispatchQueue
+    private let ioQueue = DispatchQueue(label: "com.franklioxygen.v2s.capture.io", qos: .userInteractive)
     private let audioHandler: (AVAudioPCMBuffer) -> Void
-    private let errorHandler: (String) -> Void
+    private let eventHandler: (ApplicationCaptureEvent) -> Void
 
     private let system = AudioHardwareSystem.shared
     private var processTap: AudioHardwareTap?
     private var aggregateDevice: AudioHardwareAggregateDevice?
     private var deviceIOProcID: AudioDeviceIOProcID?
+    /// The tap's own format when the capture started.
     private var tapFormat: AVAudioFormat?
+    /// The format the IO cycle delivers: that of the aggregate device's tap stream.
+    private var streamFormat: AVAudioFormat?
+    private var propertyListeners: [PropertyListener] = []
+    private var propertyListenerToken: PropertyListenerRegistry.Token?
+    private var healthTimer: DispatchSourceTimer?
+
+    // Accessed only on `queue`, which also receives the IO cycles and property changes.
+    private var isRunning = false
+    private var hasReportedInvalidation = false
+    private var health: ApplicationCaptureHealth
 
     init(
         appName: String,
         processObjectIDs: [AudioObjectID],
-        readStreamFailureMessage: String,
+        silenceWindow: TimeInterval,
         queue: DispatchQueue,
         audioHandler: @escaping (AVAudioPCMBuffer) -> Void,
-        errorHandler: @escaping (String) -> Void
+        eventHandler: @escaping (ApplicationCaptureEvent) -> Void
     ) {
         self.appName = appName
         self.processObjectIDs = processObjectIDs
-        self.readStreamFailureMessage = readStreamFailureMessage
+        self.health = ApplicationCaptureHealth(silenceWindow: silenceWindow)
         self.queue = queue
         self.audioHandler = audioHandler
-        self.errorHandler = errorHandler
+        self.eventHandler = eventHandler
     }
 
     func start() throws {
@@ -2192,23 +2811,17 @@ private final class ApplicationAudioCapture {
 
             self.processTap = processTap
 
-            guard let outputDevice = try system.defaultOutputDevice else {
-                throw CaptureError.missingOutputDevice
-            }
-
-            let outputUID = try outputDevice.uid
+            // The aggregate device carries only the tap. With an output device as a
+            // sub-device, capture would depend on whichever device was the default output
+            // at start, and a headset's microphone would become an input stream in front
+            // of the tap. Running that microphone would also force a Bluetooth headset
+            // into its hands-free profile.
             let aggregateDescription: [String: Any] = [
                 kAudioAggregateDeviceNameKey: "v2s-\(appName)",
                 kAudioAggregateDeviceUIDKey: UUID().uuidString,
-                kAudioAggregateDeviceMainSubDeviceKey: outputUID,
                 kAudioAggregateDeviceIsPrivateKey: true,
                 kAudioAggregateDeviceIsStackedKey: false,
                 kAudioAggregateDeviceTapAutoStartKey: true,
-                kAudioAggregateDeviceSubDeviceListKey: [
-                    [
-                        kAudioSubDeviceUIDKey: outputUID
-                    ]
-                ],
                 kAudioAggregateDeviceTapListKey: [
                     [
                         kAudioSubTapDriftCompensationKey: true,
@@ -2223,24 +2836,28 @@ private final class ApplicationAudioCapture {
 
             self.aggregateDevice = aggregateDevice
 
-            var streamDescription = try processTap.format
-            guard let tapFormat = AVAudioFormat(streamDescription: &streamDescription) else {
+            var tapStreamDescription = try processTap.format
+            guard let tapFormat = AVAudioFormat(streamDescription: &tapStreamDescription) else {
                 throw CaptureError.tapFormatUnavailable
             }
 
             self.tapFormat = tapFormat
+            let streamFormat = Self.tapStreamFormat(of: aggregateDevice) ?? tapFormat
+            self.streamFormat = streamFormat
 
+            // The IO block gets its own queue. Core Audio holds the device's IO lock while
+            // the block runs, so running it on the capture queue would deadlock whenever
+            // the capture queue stops the device during an IO cycle.
             var deviceIOProcID: AudioDeviceIOProcID?
             let createIOProcStatus = AudioDeviceCreateIOProcIDWithBlock(
                 &deviceIOProcID,
                 aggregateDevice.id,
-                queue
-            ) { [weak self] _, inputData, _, _, _ in
-                guard let self else {
-                    return
+                ioQueue
+            ) { [weak self, queue] _, inputData, _, _, _ in
+                let cycle = Self.readIOCycle(inputData, format: streamFormat)
+                queue.async {
+                    self?.handleIOCycle(cycle)
                 }
-
-                self.handleCapturedAudio(inputData)
             }
 
             guard createIOProcStatus == noErr, let deviceIOProcID else {
@@ -2249,10 +2866,17 @@ private final class ApplicationAudioCapture {
 
             self.deviceIOProcID = deviceIOProcID
 
+            let now = Self.currentTime()
+            health.start(at: now)
+            isRunning = true
+
             let startStatus = AudioDeviceStart(aggregateDevice.id, deviceIOProcID)
             guard startStatus == noErr else {
                 throw CaptureError.failed(stage: "start app audio capture", status: startStatus)
             }
+
+            installPropertyListeners(tap: processTap, device: aggregateDevice)
+            startHealthChecks()
         } catch let error as AudioHardwareError {
             stop()
 
@@ -2268,6 +2892,12 @@ private final class ApplicationAudioCapture {
     }
 
     func stop() {
+        isRunning = false
+        healthTimer?.cancel()
+        healthTimer = nil
+        // Listeners go first: they are registered on the tap and the aggregate device.
+        removePropertyListeners()
+
         if let aggregateDevice, let deviceIOProcID {
             AudioDeviceStop(aggregateDevice.id, deviceIOProcID)
             AudioDeviceDestroyIOProcID(aggregateDevice.id, deviceIOProcID)
@@ -2287,27 +2917,268 @@ private final class ApplicationAudioCapture {
 
         processTap = nil
         tapFormat = nil
+        streamFormat = nil
     }
 
-    private func handleCapturedAudio(_ inputData: UnsafePointer<AudioBufferList>) {
-        guard let tapFormat,
-              inputData.pointee.mNumberBuffers > 0,
-              inputData.pointee.mBuffers.mDataByteSize > 0 else {
-            return
-        }
-
+    /// Reads one IO cycle on the IO queue. The buffer list is only valid during the
+    /// cycle, so the tap's samples are copied before they leave it.
+    private static func readIOCycle(_ inputData: UnsafePointer<AudioBufferList>, format: AVAudioFormat) -> IOCycle {
         let mutableAudioBufferList = UnsafeMutablePointer<AudioBufferList>(mutating: inputData)
+        let buffers = UnsafeMutableAudioBufferListPointer(mutableAudioBufferList)
+        guard buffers.contains(where: { $0.mDataByteSize > 0 }) else {
+            return .empty
+        }
 
-        guard let buffer = AVAudioPCMBuffer(
-            pcmFormat: tapFormat,
-            bufferListNoCopy: mutableAudioBufferList,
-            deallocator: nil
-        ) else {
-            errorHandler(readStreamFailureMessage)
+        guard ApplicationCaptureBufferLayout.matches(buffers, format: format),
+              let buffer = AVAudioPCMBuffer(
+                  pcmFormat: format,
+                  bufferListNoCopy: mutableAudioBufferList,
+                  deallocator: nil
+              )?.copied() else {
+            return .unreadable
+        }
+
+        return .audio(buffer, hasSignal: ApplicationCaptureBufferLayout.containsSignal(buffers, format: format))
+    }
+
+    private func handleIOCycle(_ cycle: IOCycle) {
+        guard isRunning else {
             return
         }
 
-        audioHandler(buffer)
+        let now = Self.currentTime()
+        let hasSignal: Bool
+        if case .audio(_, let signal) = cycle {
+            hasSignal = signal
+        } else {
+            hasSignal = false
+        }
+        if health.recordCycle(at: now, hasSignal: hasSignal) {
+            eventHandler(.receivingAudio)
+        }
+
+        switch cycle {
+        case .empty:
+            break
+        case .unreadable:
+            invalidate(.streamLayoutChanged)
+        case .audio(let buffer, _):
+            audioHandler(buffer)
+        }
+    }
+
+    // MARK: Change detection
+
+    private func installPropertyListeners(tap: AudioHardwareTap, device: AudioHardwareAggregateDevice) {
+        // Core Audio notifies on its own thread; the change is handled on the capture
+        // queue, which owns all of this object's state.
+        propertyListenerToken = PropertyListenerRegistry.shared.register { [weak self, queue] selector in
+            queue.async {
+                self?.handlePropertyChange(selector)
+            }
+        }
+
+        addPropertyListener(tap.id, kAudioTapPropertyFormat)
+        addPropertyListener(device.id, kAudioDevicePropertyNominalSampleRate)
+        addPropertyListener(device.id, kAudioDevicePropertyStreamConfiguration, scope: kAudioObjectPropertyScopeInput)
+        addPropertyListener(device.id, kAudioDevicePropertyDeviceIsAlive)
+        addPropertyListener(system.id, kAudioHardwarePropertyDefaultOutputDevice)
+        addPropertyListener(system.id, kAudioHardwarePropertyProcessObjectList)
+    }
+
+    private func addPropertyListener(
+        _ objectID: AudioObjectID,
+        _ selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
+    ) {
+        guard let propertyListenerToken else {
+            return
+        }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectAddPropertyListener(
+            objectID,
+            &address,
+            PropertyListenerRegistry.listenerProc,
+            propertyListenerToken.clientData
+        )
+        guard status == noErr else {
+            Logger.appAudioCapture.error(
+                "Could not watch property \(selector) of object \(objectID): \(status.readableDescription, privacy: .public)"
+            )
+            return
+        }
+
+        propertyListeners.append(PropertyListener(objectID: objectID, address: address))
+    }
+
+    private func removePropertyListeners() {
+        guard let propertyListenerToken else {
+            return
+        }
+
+        for listener in propertyListeners {
+            var address = listener.address
+            AudioObjectRemovePropertyListener(
+                listener.objectID,
+                &address,
+                PropertyListenerRegistry.listenerProc,
+                propertyListenerToken.clientData
+            )
+        }
+
+        propertyListeners.removeAll()
+        // A notification already in flight finds no handler and is dropped.
+        PropertyListenerRegistry.shared.unregister(propertyListenerToken)
+        self.propertyListenerToken = nil
+    }
+
+    private func handlePropertyChange(_ selector: AudioObjectPropertySelector) {
+        guard isRunning else {
+            return
+        }
+
+        switch selector {
+        case kAudioHardwarePropertyProcessObjectList:
+            eventHandler(.processListChanged)
+        case kAudioHardwarePropertyDefaultOutputDevice:
+            invalidate(.defaultOutputChanged)
+        case kAudioDevicePropertyDeviceIsAlive:
+            if (try? aggregateDevice?.isAlive) != true {
+                invalidate(.deviceDied)
+            }
+        default:
+            if formatChanged() {
+                invalidate(.formatChanged)
+            }
+        }
+    }
+
+    /// Whether the tap, or the aggregate device's tap stream, now has a different format
+    /// from the one this capture was built with.
+    private func formatChanged() -> Bool {
+        guard let processTap, let aggregateDevice, let tapFormat, let streamFormat else {
+            return false
+        }
+
+        if var tapStreamDescription = try? processTap.format,
+           let currentTapFormat = AVAudioFormat(streamDescription: &tapStreamDescription),
+           currentTapFormat.matches(tapFormat) == false {
+            return true
+        }
+
+        if let currentStreamFormat = Self.tapStreamFormat(of: aggregateDevice),
+           currentStreamFormat.matches(streamFormat) == false {
+            return true
+        }
+
+        return false
+    }
+
+    /// Catches failures that Core Audio sends no notification for. Stalls and silence
+    /// only count while the app is playing, since an idle app legitimately sends nothing.
+    private func startHealthChecks() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + Self.healthCheckInterval, repeating: Self.healthCheckInterval)
+        timer.setEventHandler { [weak self] in
+            self?.checkHealth()
+        }
+        timer.resume()
+        healthTimer = timer
+    }
+
+    private func checkHealth() {
+        guard isRunning else {
+            return
+        }
+
+        if let change = health.check(at: Self.currentTime(), isAppPlaying: isAppPlaying()) {
+            invalidate(change)
+        }
+    }
+
+    private func isAppPlaying() -> Bool {
+        processObjectIDs.contains { (try? AudioHardwareProcess(id: $0).isRunningOutput) == true }
+    }
+
+    /// Reports the first change only: the session replaces this capture in response.
+    private func invalidate(_ change: ApplicationCaptureChange) {
+        guard isRunning, hasReportedInvalidation == false else {
+            return
+        }
+
+        hasReportedInvalidation = true
+        eventHandler(.invalidated(change))
+    }
+
+    /// The format of the aggregate device's tap stream, which is what the IO cycle delivers.
+    private static func tapStreamFormat(of device: AudioHardwareAggregateDevice) -> AVAudioFormat? {
+        guard let streams = try? device.streams,
+              let tapStream = streams.last(where: { (try? $0.direction) == .input }),
+              var streamDescription = try? tapStream.virtualFormat else {
+            return nil
+        }
+
+        return AVAudioFormat(streamDescription: &streamDescription)
+    }
+
+    private static func currentTime() -> TimeInterval {
+        ProcessInfo.processInfo.systemUptime
+    }
+}
+
+/// Routes Core Audio property notifications to the capture that asked for them.
+///
+/// Listeners are registered with a C function and client data because Core Audio
+/// matches removals on exactly that pair. Removing a Swift closure registered through
+/// `AudioObjectRemovePropertyListenerBlock` leaves it installed, which would leak a live
+/// listener on every rebuild. The client data is a token looked up here rather than an
+/// object pointer, so a notification that arrives after removal cannot reach freed memory.
+private final class PropertyListenerRegistry: @unchecked Sendable {
+    struct Token {
+        let value: Int
+
+        var clientData: UnsafeMutableRawPointer? {
+            UnsafeMutableRawPointer(bitPattern: value)
+        }
+    }
+
+    static let shared = PropertyListenerRegistry()
+
+    static let listenerProc: AudioObjectPropertyListenerProc = { _, addressCount, addresses, clientData in
+        let token = Int(bitPattern: clientData)
+        for index in 0..<Int(addressCount) {
+            PropertyListenerRegistry.shared.notify(token: token, selector: addresses[index].mSelector)
+        }
+        return noErr
+    }
+
+    private let lock = NSLock()
+    private var nextTokenValue = 1
+    private var handlers: [Int: (AudioObjectPropertySelector) -> Void] = [:]
+
+    func register(_ handler: @escaping (AudioObjectPropertySelector) -> Void) -> Token {
+        lock.withLock {
+            let value = nextTokenValue
+            nextTokenValue += 1
+            handlers[value] = handler
+            return Token(value: value)
+        }
+    }
+
+    func unregister(_ token: Token) {
+        lock.withLock {
+            handlers[token.value] = nil
+        }
+    }
+
+    private func notify(token: Int, selector: AudioObjectPropertySelector) {
+        let handler = lock.withLock { handlers[token] }
+        handler?(selector)
     }
 }
 
@@ -2322,6 +3193,30 @@ private struct AudioFormatSignature: Equatable {
         channelCount = format.channelCount
         commonFormat = format.commonFormat
         isInterleaved = format.isInterleaved
+    }
+}
+
+private extension AVAudioPCMBuffer {
+    /// A copy that owns its samples, for audio that must outlive the buffer it came in.
+    func copied() -> AVAudioPCMBuffer? {
+        guard let copy = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameLength) else {
+            return nil
+        }
+
+        copy.frameLength = frameLength
+        let sourceBuffers = UnsafeMutableAudioBufferListPointer(mutableAudioBufferList)
+        let destinationBuffers = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
+
+        for (sourceBuffer, destinationBuffer) in zip(sourceBuffers, destinationBuffers) {
+            guard let sourceData = sourceBuffer.mData,
+                  let destinationData = destinationBuffer.mData else {
+                continue
+            }
+
+            memcpy(destinationData, sourceData, Int(sourceBuffer.mDataByteSize))
+        }
+
+        return copy
     }
 }
 

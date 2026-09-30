@@ -170,13 +170,13 @@ final class OverlayWindowController {
     }
 
     private func configurePanels() {
-        configurePanel(panel, acceptsInput: false, level: .statusBar)
+        configurePanel(panel, acceptsInput: false, level: .screenSaver)
         panel.contentView = subtitleHostingView
 
-        configurePanel(controlsChromePanel, acceptsInput: false, level: .statusBar)
+        configurePanel(controlsChromePanel, acceptsInput: false, level: .screenSaver)
         controlsChromePanel.contentView = controlsChromeHostingView
 
-        let controlLevel = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
+        let controlLevel = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
         configurePanel(scrollbarPanel, acceptsInput: true, level: controlLevel)
         scrollbarPanel.contentView = scrollbarHostingView
 
@@ -191,6 +191,12 @@ final class OverlayWindowController {
 
         configurePanel(resetSizeButtonPanel, acceptsInput: true, level: controlLevel)
         resetSizeButtonPanel.contentView = resetSizeButtonHostingView
+
+        applyRecordingVisibility(model.overlayStyle.invisibleInRecording)
+    }
+
+    private var allPanels: [OverlayPanel] {
+        [panel, scrollbarPanel] + leftControlPanels
     }
 
     private var leftControlPanels: [OverlayPanel] {
@@ -215,6 +221,27 @@ final class OverlayWindowController {
         panel.isMovableByWindowBackground = false
         panel.collectionBehavior = Self.panelCollectionBehavior
     }
+
+    /// Excludes the overlay from screen capture while leaving it visible locally,
+    /// or restores the default capturable behaviour.
+    private func applyRecordingVisibility(_ invisibleInRecording: Bool) {
+        let sharingType = Self.sharingType(invisibleInRecording: invisibleInRecording)
+        for overlayPanel in allPanels {
+            overlayPanel.sharingType = sharingType
+        }
+        genieHideWindow?.sharingType = sharingType
+        pendingHideSnapshot?.sharingType = sharingType
+    }
+
+    private static func sharingType(invisibleInRecording: Bool) -> NSWindow.SharingType {
+        invisibleInRecording ? .none : .readOnly
+    }
+
+#if DEBUG
+    var panelSharingTypesForTesting: [NSWindow.SharingType] {
+        allPanels.map(\.sharingType)
+    }
+#endif
 
     private func bindModel() {
         model.$isOverlayVisible
@@ -253,6 +280,16 @@ final class OverlayWindowController {
             .map(\.attachToSource)
             .removeDuplicates()
             .sink { [weak self] _ in self?.scheduleAttachToSourceRefresh() }
+            .store(in: &cancellables)
+
+        model.$overlayStyle
+            .map(\.invisibleInRecording)
+            .removeDuplicates()
+            // @Published emits during willSet, so use the emitted value instead of
+            // reading model.overlayStyle here (which would still be the old style).
+            .sink { [weak self] invisibleInRecording in
+                self?.applyRecordingVisibility(invisibleInRecording)
+            }
             .store(in: &cancellables)
     }
 
@@ -475,10 +512,11 @@ final class OverlayWindowController {
         )
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.level = .statusBar
+        window.level = .screenSaver
         window.hasShadow = false
         window.hidesOnDeactivate = false
         window.collectionBehavior = Self.panelCollectionBehavior
+        window.sharingType = Self.sharingType(invisibleInRecording: model.overlayStyle.invisibleInRecording)
         window.contentView = imageView
 
         return window
@@ -1009,7 +1047,7 @@ final class OverlayWindowController {
     private func updateAttachToSourceLevels() -> Bool {
         let useHighLevel = !model.overlayStyle.attachToSource || isSourceAppFrontmost()
         let presentationChanged = lastAttachToSourceUsesHighLevel != useHighLevel
-        let contentLevel: NSWindow.Level = useHighLevel ? .statusBar : .normal
+        let contentLevel: NSWindow.Level = useHighLevel ? .screenSaver : .normal
         let controlLevel: NSWindow.Level = useHighLevel
             ? NSWindow.Level(rawValue: contentLevel.rawValue + 1)
             : .normal
@@ -1237,6 +1275,8 @@ private extension OverlayWindowController {
     static let passThroughBubbleDiameter: CGFloat = 118
     static let scrollbarRevealDistance: CGFloat = 42
     static let panelCollectionBehavior: NSWindow.CollectionBehavior = [
+        .canJoinAllSpaces,
+        .canJoinAllApplications,
         .fullScreenAuxiliary,
         .ignoresCycle,
         .stationary

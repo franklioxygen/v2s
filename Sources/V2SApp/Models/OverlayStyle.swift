@@ -79,6 +79,7 @@ struct OverlayStyle: Codable, Equatable {
         case translatedFirst
         case overlayScaleFactor
         case attachToSource
+        case invisibleInRecording
     }
 
     private enum LegacyCodingKeys: String, CodingKey {
@@ -102,6 +103,9 @@ struct OverlayStyle: Codable, Equatable {
     var translatedFirst: Bool
     var overlayScaleFactor: Double
     var attachToSource: Bool
+    /// Keeps the overlay on screen for the user while excluding it from screen
+    /// recordings, screenshots, and shared screens.
+    var invisibleInRecording: Bool
 
     var scaledTranslatedFontSize: Double { translatedFontSize * overlayScaleFactor }
     var scaledSourceFontSize: Double { sourceFontSize * overlayScaleFactor }
@@ -122,7 +126,8 @@ struct OverlayStyle: Codable, Equatable {
         clickThrough: true,
         translatedFirst: true,
         overlayScaleFactor: 1.0,
-        attachToSource: false
+        attachToSource: false,
+        invisibleInRecording: false
     )
 
     init(
@@ -141,7 +146,8 @@ struct OverlayStyle: Codable, Equatable {
         clickThrough: Bool,
         translatedFirst: Bool,
         overlayScaleFactor: Double = 1.0,
-        attachToSource: Bool = false
+        attachToSource: Bool = false,
+        invisibleInRecording: Bool = false
     ) {
         self.targetDisplayID = targetDisplayID
         self.topInset = topInset
@@ -159,6 +165,7 @@ struct OverlayStyle: Codable, Equatable {
         self.translatedFirst = translatedFirst
         self.overlayScaleFactor = overlayScaleFactor
         self.attachToSource = attachToSource
+        self.invisibleInRecording = invisibleInRecording
     }
 
     init(from decoder: Decoder) throws {
@@ -186,5 +193,6 @@ struct OverlayStyle: Codable, Equatable {
         translatedFirst    = try c.decodeIfPresent(Bool.self, forKey: .translatedFirst) ?? true
         overlayScaleFactor = try c.decodeIfPresent(Double.self, forKey: .overlayScaleFactor) ?? 1.0
         attachToSource = try c.decodeIfPresent(Bool.self, forKey: .attachToSource) ?? false
+        invisibleInRecording = try c.decodeIfPresent(Bool.self, forKey: .invisibleInRecording) ?? false
     }
 }
