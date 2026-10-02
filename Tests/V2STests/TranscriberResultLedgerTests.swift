@@ -40,6 +40,66 @@ final class TranscriberResultLedgerTests: XCTestCase {
         XCTAssertEqual(ledger.draftText, "")
     }
 
+    func testCommitClearsADraftWhoseLastWordFinalizationRevised() {
+        var ledger = TranscriberResultLedger()
+
+        applyDraft(&ledger, [("Hi their", 0, 2)], range: (0, 2))
+        _ = commit(&ledger, [("Hi", 0, 0.9), (" there.", 0.9, 1.98)], range: (0, 1.98), finalizedThrough: 1.98)
+
+        XCTAssertEqual(ledger.draftText, "")
+    }
+
+    // A commit can cover only the start of a volatile result, which is one piece for all
+    // its text. The rest stays in the draft, and is what a failover commits.
+    func testPartialCommitKeepsTheRestOfADraftPiece() {
+        var ledger = TranscriberResultLedger()
+
+        applyDraft(&ledger, [("One two three four five six seven eight", 0, 10)], range: (0, 10))
+        let committed = commit(
+            &ledger,
+            [("One", 0, 1), (" two", 1, 2), (" three", 2, 3), (" four", 3, 4), (" five", 4, 5), (" six.", 5, 6)],
+            range: (0, 6),
+            finalizedThrough: 6
+        )
+
+        XCTAssertEqual(committed, ["One two three four five six."])
+        XCTAssertEqual(ledger.draftText, "seven eight")
+        XCTAssertEqual(ledger.removePending(), "seven eight")
+    }
+
+    func testPartialCommitKeepsTheRestWhenFinalizationRevisedWords() {
+        var ledger = TranscriberResultLedger()
+
+        applyDraft(&ledger, [("write the write address then more", 0, 6)], range: (0, 6))
+        _ = commit(
+            &ledger,
+            [("Write", 0, 0.5), (" the", 0.5, 0.8), (" right", 0.8, 1.2), (" address.", 1.2, 4)],
+            range: (0, 4),
+            finalizedThrough: 4
+        )
+
+        XCTAssertEqual(ledger.draftText, "then more")
+    }
+
+    func testPartialCommitKeepsTheRestOfCJKText() {
+        var ledger = TranscriberResultLedger()
+
+        applyDraft(&ledger, [("雨が降ったのでそれで", 0, 4)], range: (0, 4))
+        _ = commit(&ledger, [("雨が", 0, 1), ("降ったので。", 1, 2.5)], range: (0, 2.5), finalizedThrough: 2.5)
+
+        XCTAssertEqual(ledger.draftText, "それで")
+    }
+
+    // The volatile transcriber's results can trail the final-only one's.
+    func testDraftResultArrivingAfterAPartialCommitKeepsItsRest() {
+        var ledger = TranscriberResultLedger()
+
+        _ = commit(&ledger, [("One", 0, 1), (" two.", 1, 2)], range: (0, 2), finalizedThrough: 2)
+        applyDraft(&ledger, [("One two three", 0, 3)], range: (0, 3))
+
+        XCTAssertEqual(ledger.draftText, "three")
+    }
+
     // However late the final result arrives, its text is what is committed, and the
     // draft moving on in the meantime commits nothing.
     func testLateFinalResultCommitsItsOwnText() {

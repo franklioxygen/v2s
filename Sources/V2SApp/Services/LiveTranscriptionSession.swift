@@ -529,7 +529,9 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
                             }
                         }
                     }
-                    try await group.waitForAll()
+                    // waitForAll would hold a failed stream's error until the other
+                    // stream ends. Rethrowing it here cancels the other one instead.
+                    while try await group.next() != nil {}
                 }
             } catch is CancellationError {
                 return
@@ -2697,7 +2699,7 @@ extension LiveTranscriptionSession: AVCaptureAudioDataOutputSampleBufferDelegate
 /// final. The session therefore runs a second transcriber on the same analyzer that
 /// reports only final results, which it always delivers. Those results are committed
 /// as they arrive. The first transcriber's results, final or not, only make up the
-/// draft, which drops whatever a commit covers.
+/// draft, which drops the text a commit covers and keeps the rest.
 struct TranscriberResultLedger {
     /// One run of transcribed text and the audio it covers.
     struct Piece: Equatable {
@@ -2705,10 +2707,16 @@ struct TranscriberResultLedger {
         let range: CMTimeRange
     }
 
+    /// How long committed text is kept for cutting it out of draft pieces that started
+    /// before the commit.
+    static let committedTextMemory = CMTime(seconds: 60, preferredTimescale: 1_000)
+
     /// Draft text, one entry per result, in audio order.
     private var pending: [[Piece]] = []
     /// Text for audio before this time has been committed.
     private(set) var committedThrough = CMTime.negativeInfinity
+    /// Recently committed text, word by word.
+    private var recentCommitted: [Piece] = []
 
     /// The draft text as the draft line should read it.
     var draftText: String {
@@ -2736,7 +2744,7 @@ struct TranscriberResultLedger {
                 .filter { $0.isEmpty == false }
         }
 
-        let freshPieces = pieces.filter { isCommitted($0) == false }
+        let freshPieces = pieces.compactMap { uncommittedPart(of: $0) }
         if Self.text(of: freshPieces).isEmpty == false {
             pending.append(freshPieces)
             pending.sort { CMTimeCompare($0[0].range.start, $1[0].range.start) < 0 }
@@ -2750,7 +2758,7 @@ struct TranscriberResultLedger {
             return nil
         }
 
-        let committedText = Self.text(of: pieces.filter { CMTimeCompare($0.range.end, committedThrough) > 0 })
+        let freshPieces = pieces.filter { CMTimeCompare($0.range.end, committedThrough) > 0 }
 
         // No final text will come for audio before the finalization time, so the draft
         // keeps only what follows it.
@@ -2759,25 +2767,104 @@ struct TranscriberResultLedger {
             through = CMTimeMaximum(through, resultsFinalizationTime)
         }
         committedThrough = through
+        recentCommitted += freshPieces
+        let forgetBefore = CMTimeSubtract(committedThrough, Self.committedTextMemory)
+        recentCommitted.removeAll { CMTimeCompare($0.range.end, forgetBefore) <= 0 }
         pending = pending
-            .map { entry in entry.filter { isCommitted($0) == false } }
+            .map { entry in entry.compactMap { uncommittedPart(of: $0) } }
             .filter { $0.isEmpty == false }
 
+        let committedText = Self.text(of: freshPieces)
         return committedText.isEmpty ? nil : committedText
     }
 
-    /// Whether most of a piece's audio has been committed. The two transcribers can end
-    /// the same words at slightly different times, and a volatile result is one piece
-    /// for all its text, so the draft drops a piece by where most of it lies.
-    private func isCommitted(_ piece: Piece) -> Bool {
-        guard committedThrough.isNumeric else {
-            return false
+    /// The part of a draft piece that has not been committed, or nil when none is left.
+    ///
+    /// A volatile result is one piece for all its text, so a commit can cover only its
+    /// start, and the two transcribers can end the same words at slightly different
+    /// times. A piece that runs past the commit is cut after the words it shares with
+    /// the text committed for its audio.
+    private func uncommittedPart(of piece: Piece) -> Piece? {
+        if CMTimeCompare(piece.range.start, committedThrough) >= 0 {
+            return piece
+        }
+        if CMTimeCompare(piece.range.end, committedThrough) <= 0 {
+            return nil
         }
 
-        return CMTimeCompare(
-            CMTimeAdd(piece.range.start, piece.range.end),
-            CMTimeMultiply(committedThrough, multiplier: 2)
-        ) <= 0
+        // Committed words that lie mostly within the piece's committed audio.
+        let committedText = Self.text(of: recentCommitted.filter { committed in
+            let doubledMiddle = CMTimeAdd(committed.range.start, committed.range.end)
+            return CMTimeCompare(doubledMiddle, CMTimeMultiply(piece.range.start, multiplier: 2)) >= 0
+                && CMTimeCompare(doubledMiddle, CMTimeMultiply(committedThrough, multiplier: 2)) < 0
+        })
+        guard let tail = Self.text(of: piece.text, after: committedText) else {
+            return nil
+        }
+        return Piece(text: tail, range: CMTimeRange(start: committedThrough, end: piece.range.end))
+    }
+
+    /// What is left of `text` once the words it shares with `committedText` are cut
+    /// from its start, or nil when nothing is. Words are compared by their letters and
+    /// digits, each CJK character counting as a word, so case and punctuation changed
+    /// by finalization still match. Where words differ, the cut goes where `text`
+    /// matches `committedText` most closely, after as many words as it has.
+    static func text(of text: String, after committedText: String) -> String? {
+        let committedWords = comparableWords(in: committedText).map(\.word)
+        let words = comparableWords(in: text)
+        guard words.isEmpty == false else {
+            return nil
+        }
+
+        // distances[j]: edit distance between the committed words and the first j words.
+        var distances = Array(0...words.count)
+        for committedWord in committedWords {
+            var next = [distances[0] + 1]
+            for (j, word) in words.enumerated() {
+                next.append(min(
+                    distances[j] + (word.word == committedWord ? 0 : 1),
+                    distances[j + 1] + 1,
+                    next[j] + 1
+                ))
+            }
+            distances = next
+        }
+
+        let cut = distances.indices.min { lhs, rhs in
+            (distances[lhs], abs(lhs - committedWords.count)) < (distances[rhs], abs(rhs - committedWords.count))
+        } ?? 0
+        guard cut < words.count else {
+            return nil
+        }
+        return String(text[words[cut].start...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func comparableWords(in text: String) -> [(word: String, start: String.Index)] {
+        var words: [(word: String, start: String.Index)] = []
+        var word = ""
+        var wordStart = text.startIndex
+        for index in text.indices {
+            let character = text[index]
+            if String(character).containsCJKCharacters {
+                if word.isEmpty == false {
+                    words.append((word, wordStart))
+                    word = ""
+                }
+                words.append((String(character), index))
+            } else if character.isLetter || character.isNumber {
+                if word.isEmpty {
+                    wordStart = index
+                }
+                word += character.lowercased()
+            } else if word.isEmpty == false {
+                words.append((word, wordStart))
+                word = ""
+            }
+        }
+        if word.isEmpty == false {
+            words.append((word, wordStart))
+        }
+        return words
     }
 
     /// Drops the draft text and returns it.
