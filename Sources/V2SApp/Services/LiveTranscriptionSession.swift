@@ -3212,9 +3212,8 @@ final class ApplicationAudioCapture {
     private let audioHandler: (AVAudioPCMBuffer) -> Void
     private let eventHandler: (ApplicationCaptureEvent) -> Void
 
-    private let system = AudioHardwareSystem.shared
-    private var processTap: AudioHardwareTap?
-    private var aggregateDevice: AudioHardwareAggregateDevice?
+    private var processTapID: AudioObjectID?
+    private var aggregateDeviceID: AudioObjectID?
     private var deviceIOProcID: AudioDeviceIOProcID?
     /// The tap's own format when the capture started.
     private var tapFormat: AVAudioFormat?
@@ -3253,11 +3252,13 @@ final class ApplicationAudioCapture {
             tapDescription.isPrivate = true
             tapDescription.name = "v2s \(appName)"
 
-            guard let processTap = try system.makeProcessTap(description: tapDescription) else {
+            var processTapID = kAudioObjectUnknown
+            try CoreAudioHAL.check(AudioHardwareCreateProcessTap(tapDescription, &processTapID))
+            guard processTapID != kAudioObjectUnknown else {
                 throw CaptureError.failed(stage: "create the process tap", status: kAudioHardwareIllegalOperationError)
             }
 
-            self.processTap = processTap
+            self.processTapID = processTapID
 
             // The aggregate device carries only the tap. With an output device as a
             // sub-device, capture would depend on whichever device was the default output
@@ -3273,24 +3274,32 @@ final class ApplicationAudioCapture {
                 kAudioAggregateDeviceTapListKey: [
                     [
                         kAudioSubTapDriftCompensationKey: true,
-                        kAudioSubTapUIDKey: try processTap.uid
+                        kAudioSubTapUIDKey: try CoreAudioHAL.string(of: processTapID, kAudioTapPropertyUID)
                     ]
                 ]
             ]
 
-            guard let aggregateDevice = try system.makeAggregateDevice(description: aggregateDescription) else {
+            var aggregateDeviceID = kAudioObjectUnknown
+            try CoreAudioHAL.check(
+                AudioHardwareCreateAggregateDevice(aggregateDescription as CFDictionary, &aggregateDeviceID)
+            )
+            guard aggregateDeviceID != kAudioObjectUnknown else {
                 throw CaptureError.failed(stage: "create the aggregate device", status: kAudioHardwareIllegalOperationError)
             }
 
-            self.aggregateDevice = aggregateDevice
+            self.aggregateDeviceID = aggregateDeviceID
 
-            var tapStreamDescription = try processTap.format
+            var tapStreamDescription = try CoreAudioHAL.value(
+                of: processTapID,
+                kAudioTapPropertyFormat,
+                initialValue: AudioStreamBasicDescription()
+            )
             guard let tapFormat = AVAudioFormat(streamDescription: &tapStreamDescription) else {
                 throw CaptureError.tapFormatUnavailable
             }
 
             self.tapFormat = tapFormat
-            let streamFormat = Self.tapStreamFormat(of: aggregateDevice) ?? tapFormat
+            let streamFormat = Self.tapStreamFormat(of: aggregateDeviceID) ?? tapFormat
             self.streamFormat = streamFormat
 
             // The IO block gets its own queue. Core Audio holds the device's IO lock while
@@ -3299,7 +3308,7 @@ final class ApplicationAudioCapture {
             var deviceIOProcID: AudioDeviceIOProcID?
             let createIOProcStatus = AudioDeviceCreateIOProcIDWithBlock(
                 &deviceIOProcID,
-                aggregateDevice.id,
+                aggregateDeviceID,
                 ioQueue
             ) { [weak self, queue] _, inputData, _, _, _ in
                 let cycle = Self.readIOCycle(inputData, format: streamFormat)
@@ -3318,21 +3327,21 @@ final class ApplicationAudioCapture {
             health.start(at: now)
             isRunning = true
 
-            let startStatus = AudioDeviceStart(aggregateDevice.id, deviceIOProcID)
+            let startStatus = AudioDeviceStart(aggregateDeviceID, deviceIOProcID)
             guard startStatus == noErr else {
                 throw CaptureError.failed(stage: "start app audio capture", status: startStatus)
             }
 
-            installPropertyListeners(tap: processTap, device: aggregateDevice)
+            installPropertyListeners(tapID: processTapID, deviceID: aggregateDeviceID)
             startHealthChecks()
-        } catch let error as AudioHardwareError {
+        } catch let error as CoreAudioHAL.StatusError {
             stop()
 
-            if error.error == permErr {
+            if error.status == permErr {
                 throw CaptureError.permissionDenied
             }
 
-            throw CaptureError.failed(stage: "configure app audio capture", status: error.error)
+            throw CaptureError.failed(stage: "configure app audio capture", status: error.status)
         } catch {
             stop()
             throw error
@@ -3346,24 +3355,24 @@ final class ApplicationAudioCapture {
         // Listeners go first: they are registered on the tap and the aggregate device.
         removePropertyListeners()
 
-        if let aggregateDevice, let deviceIOProcID {
-            AudioDeviceStop(aggregateDevice.id, deviceIOProcID)
-            AudioDeviceDestroyIOProcID(aggregateDevice.id, deviceIOProcID)
+        if let aggregateDeviceID, let deviceIOProcID {
+            AudioDeviceStop(aggregateDeviceID, deviceIOProcID)
+            AudioDeviceDestroyIOProcID(aggregateDeviceID, deviceIOProcID)
         }
 
         deviceIOProcID = nil
 
-        if let aggregateDevice {
-            try? system.destroyAggregateDevice(aggregateDevice)
+        if let aggregateDeviceID {
+            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
         }
 
-        aggregateDevice = nil
+        aggregateDeviceID = nil
 
-        if let processTap {
-            try? system.destroyProcessTap(processTap)
+        if let processTapID {
+            AudioHardwareDestroyProcessTap(processTapID)
         }
 
-        processTap = nil
+        processTapID = nil
         tapFormat = nil
         streamFormat = nil
     }
@@ -3417,7 +3426,7 @@ final class ApplicationAudioCapture {
 
     // MARK: Change detection
 
-    private func installPropertyListeners(tap: AudioHardwareTap, device: AudioHardwareAggregateDevice) {
+    private func installPropertyListeners(tapID: AudioObjectID, deviceID: AudioObjectID) {
         // Core Audio notifies on its own thread; the change is handled on the capture
         // queue, which owns all of this object's state.
         propertyListenerToken = PropertyListenerRegistry.shared.register { [weak self, queue] selector in
@@ -3426,12 +3435,13 @@ final class ApplicationAudioCapture {
             }
         }
 
-        addPropertyListener(tap.id, kAudioTapPropertyFormat)
-        addPropertyListener(device.id, kAudioDevicePropertyNominalSampleRate)
-        addPropertyListener(device.id, kAudioDevicePropertyStreamConfiguration, scope: kAudioObjectPropertyScopeInput)
-        addPropertyListener(device.id, kAudioDevicePropertyDeviceIsAlive)
-        addPropertyListener(system.id, kAudioHardwarePropertyDefaultOutputDevice)
-        addPropertyListener(system.id, kAudioHardwarePropertyProcessObjectList)
+        let systemID = AudioObjectID(kAudioObjectSystemObject)
+        addPropertyListener(tapID, kAudioTapPropertyFormat)
+        addPropertyListener(deviceID, kAudioDevicePropertyNominalSampleRate)
+        addPropertyListener(deviceID, kAudioDevicePropertyStreamConfiguration, scope: kAudioObjectPropertyScopeInput)
+        addPropertyListener(deviceID, kAudioDevicePropertyDeviceIsAlive)
+        addPropertyListener(systemID, kAudioHardwarePropertyDefaultOutputDevice)
+        addPropertyListener(systemID, kAudioHardwarePropertyProcessObjectList)
     }
 
     private func addPropertyListener(
@@ -3496,7 +3506,10 @@ final class ApplicationAudioCapture {
         case kAudioHardwarePropertyDefaultOutputDevice:
             invalidate(.defaultOutputChanged)
         case kAudioDevicePropertyDeviceIsAlive:
-            if (try? aggregateDevice?.isAlive) != true {
+            let isAlive = aggregateDeviceID.flatMap {
+                try? CoreAudioHAL.value(of: $0, kAudioDevicePropertyDeviceIsAlive, initialValue: UInt32(0))
+            }
+            if (isAlive ?? 0) == 0 {
                 invalidate(.deviceDied)
             }
         default:
@@ -3509,17 +3522,21 @@ final class ApplicationAudioCapture {
     /// Whether the tap, or the aggregate device's tap stream, now has a different format
     /// from the one this capture was built with.
     private func formatChanged() -> Bool {
-        guard let processTap, let aggregateDevice, let tapFormat, let streamFormat else {
+        guard let processTapID, let aggregateDeviceID, let tapFormat, let streamFormat else {
             return false
         }
 
-        if var tapStreamDescription = try? processTap.format,
+        if var tapStreamDescription = try? CoreAudioHAL.value(
+               of: processTapID,
+               kAudioTapPropertyFormat,
+               initialValue: AudioStreamBasicDescription()
+           ),
            let currentTapFormat = AVAudioFormat(streamDescription: &tapStreamDescription),
            currentTapFormat.matches(tapFormat) == false {
             return true
         }
 
-        if let currentStreamFormat = Self.tapStreamFormat(of: aggregateDevice),
+        if let currentStreamFormat = Self.tapStreamFormat(of: aggregateDeviceID),
            currentStreamFormat.matches(streamFormat) == false {
             return true
         }
@@ -3564,10 +3581,17 @@ final class ApplicationAudioCapture {
     }
 
     /// The format of the aggregate device's tap stream, which is what the IO cycle delivers.
-    private static func tapStreamFormat(of device: AudioHardwareAggregateDevice) -> AVAudioFormat? {
-        guard let streams = try? device.streams,
-              let tapStream = streams.last(where: { (try? $0.direction) == .input }),
-              var streamDescription = try? tapStream.virtualFormat else {
+    private static func tapStreamFormat(of deviceID: AudioObjectID) -> AVAudioFormat? {
+        guard let streamIDs = try? CoreAudioHAL.objectIDs(of: deviceID, kAudioDevicePropertyStreams),
+              let tapStreamID = streamIDs.last(where: {
+                  (try? CoreAudioHAL.value(of: $0, kAudioStreamPropertyDirection, initialValue: UInt32(0)))
+                      == CoreAudioHAL.inputDirection
+              }),
+              var streamDescription = try? CoreAudioHAL.value(
+                  of: tapStreamID,
+                  kAudioStreamPropertyVirtualFormat,
+                  initialValue: AudioStreamBasicDescription()
+              ) else {
             return nil
         }
 
@@ -3576,6 +3600,72 @@ final class ApplicationAudioCapture {
 
     private static func currentTime() -> TimeInterval {
         ProcessInfo.processInfo.systemUptime
+    }
+}
+
+/// The Core Audio C calls that app audio capture makes, with failures thrown as their `OSStatus`.
+///
+/// The Swift wrappers (`AudioHardwareSystem.makeProcessTap(description:)` and the like) throw
+/// `AudioHardwareError`, whose `error` property is only exported by macOS 26's libswiftCoreAudio
+/// even though the SDK marks it available from macOS 15. Reading it binds a symbol macOS 15
+/// does not have, and dyld then refuses to launch the app there.
+private enum CoreAudioHAL {
+    struct StatusError: Error {
+        let status: OSStatus
+    }
+
+    /// `kAudioStreamPropertyDirection` is 0 for an output stream and 1 for an input stream.
+    static let inputDirection: UInt32 = 1
+
+    static func check(_ status: OSStatus) throws {
+        guard status == noErr else {
+            throw StatusError(status: status)
+        }
+    }
+
+    static func value<Value>(
+        of objectID: AudioObjectID,
+        _ selector: AudioObjectPropertySelector,
+        initialValue: Value
+    ) throws -> Value {
+        var address = globalAddress(selector)
+        var value = initialValue
+        var size = UInt32(MemoryLayout<Value>.size)
+        try withUnsafeMutableBytes(of: &value) { bytes in
+            try check(AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, bytes.baseAddress!))
+        }
+        return value
+    }
+
+    static func string(of objectID: AudioObjectID, _ selector: AudioObjectPropertySelector) throws -> String {
+        var address = globalAddress(selector)
+        var value: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        try check(AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &value))
+        guard let value else {
+            throw StatusError(status: kAudioHardwareUnspecifiedError)
+        }
+
+        return value.takeRetainedValue() as String
+    }
+
+    static func objectIDs(of objectID: AudioObjectID, _ selector: AudioObjectPropertySelector) throws -> [AudioObjectID] {
+        var address = globalAddress(selector)
+        var size: UInt32 = 0
+        try check(AudioObjectGetPropertyDataSize(objectID, &address, 0, nil, &size))
+
+        let stride = MemoryLayout<AudioObjectID>.stride
+        var objectIDs = [AudioObjectID](repeating: kAudioObjectUnknown, count: Int(size) / stride)
+        try check(AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &objectIDs))
+        return Array(objectIDs.prefix(Int(size) / stride))
+    }
+
+    private static func globalAddress(_ selector: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
     }
 }
 
