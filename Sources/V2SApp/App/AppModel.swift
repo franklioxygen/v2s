@@ -1210,7 +1210,7 @@ final class AppModel: ObservableObject {
             return nil
         }
 
-        let transcriber = makeSpeechTranscriber(locale: resolvedLocale)
+        let transcriber = LiveTranscriptionSession.makeSpeechTranscriber(locale: resolvedLocale)
 
         do {
             try await ensureSpeechAssetsReady(
@@ -1576,16 +1576,6 @@ final class AppModel: ObservableObject {
             group.cancelAll()
             _ = result
         }
-    }
-
-    @available(macOS 26.0, *)
-    private func makeSpeechTranscriber(locale: Locale) -> SpeechTranscriber {
-        SpeechTranscriber(
-            locale: locale,
-            transcriptionOptions: [],
-            reportingOptions: [.volatileResults, .fastResults],
-            attributeOptions: [.audioTimeRange, .transcriptionConfidence]
-        )
     }
 
     private func normalizedProgressValue(_ fractionCompleted: Double) -> Double? {
