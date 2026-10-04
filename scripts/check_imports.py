@@ -13,6 +13,8 @@ Usage: scripts/check_imports.py path/to/v2s.app/Contents/MacOS/v2s
 """
 
 import collections
+import ctypes
+import os
 import platform
 import re
 import subprocess  # nosec B404
@@ -33,6 +35,21 @@ def run(tool, *args):
     # arguments are the binary under test and the system library paths it links.
     command = [TOOLS[tool], *args]
     return subprocess.run(command, capture_output=True, text=True, check=True).stdout  # nosec B603  # nosemgrep
+
+
+_shared_cache_contains_path = ctypes.CDLL("/usr/lib/libSystem.B.dylib")._dyld_shared_cache_contains_path
+_shared_cache_contains_path.argtypes = [ctypes.c_char_p]
+_shared_cache_contains_path.restype = ctypes.c_bool
+
+
+def library_exists(path):
+    """Whether this macOS has the library, either in the dyld shared cache or on disk.
+
+    Most system libraries exist only in the shared cache, so a file check alone is not
+    enough. dyld_info's error for a missing path differs between Xcode versions ("file
+    not found", "non-mach-o in fat file"), so dyld itself is asked instead.
+    """
+    return _shared_cache_contains_path(os.fsencode(path)) or os.path.exists(path)
 
 
 def linked_libraries(binary, arch):
@@ -62,22 +79,21 @@ def imported_symbols(binary, arch):
 
 
 def exported_symbols(path, cache, seen=frozenset()):
-    """Symbols a system library exports, including those of the libraries it re-exports."""
+    """Symbols a system library exports, including those of the libraries it re-exports.
+
+    Returns None when this macOS does not have the library, which is expected for a
+    weak-linked library on an older macOS. A library that exists must be readable.
+    """
     if path not in cache:
-        try:
-            output = run("dyld_info", "-exports", path)
-        except subprocess.CalledProcessError as error:
-            # Missing weak-linked libraries are expected on older macOS versions.
-            # Do not use file existence: system libraries can live in the dyld cache.
-            if not error.stdout and error.stderr.strip() == f"dyld_info: '{path}' file not found":
-                cache[path] = set()
-                return cache[path]
-            raise
+        if not library_exists(path):
+            cache[path] = None
+            return None
+        output = run("dyld_info", "-exports", path)
         symbols = set(re.findall(r"^\s+0x[0-9A-Fa-f]+\s+(\S+)", output, re.M))
         symbols |= set(re.findall(r"^\s+\[re-export\]\s+(\S+)", output, re.M))
         for reexported in re.findall(r"^\s+re-export\s+(\S+)", run("dyld_info", "-linked_dylibs", path), re.M):
             if reexported not in seen:
-                symbols |= exported_symbols(reexported, cache, seen | {path})
+                symbols |= exported_symbols(reexported, cache, seen | {path}) or set()
         cache[path] = symbols
     return cache[path]
 
@@ -111,7 +127,7 @@ def main():
             continue
 
         exported = exported_symbols(path, cache)
-        if not exported:
+        if exported is None:
             if library_is_weak:
                 print(f"weak   {path} is not on this macOS")
             else:

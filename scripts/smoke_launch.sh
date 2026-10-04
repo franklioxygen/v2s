@@ -17,6 +17,11 @@ EXECUTABLE="$APP_PATH/Contents/MacOS/v2s"
 LOG_FILE="$(mktemp -t v2s-launch)"
 STARTED_MARKER="$(mktemp -t v2s-started)"
 
+if [[ ! -x "$EXECUTABLE" ]]; then
+  echo "::error::No v2s executable at $EXECUTABLE"
+  exit 1
+fi
+
 echo "macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion)), $(uname -m)"
 echo "Binary architectures: $(lipo -archs "$EXECUTABLE")"
 echo "Minimum macOS: $(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP_PATH/Contents/Info.plist")"

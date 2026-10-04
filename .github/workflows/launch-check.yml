@@ -70,12 +70,15 @@ jobs:
           name: v2s-app
 
       - name: Unpack app
+        id: unpack
         run: ditto -x -k v2s.app.zip .
 
       - name: Check imported symbols
         run: scripts/check_imports.py v2s.app/Contents/MacOS/v2s
 
+      # Runs even when the symbol check fails, so dyld's own message is in the log,
+      # but only when there is an app to launch.
       - name: Launch app
-        if: ${{ !cancelled() && matrix.launch }}
+        if: ${{ !cancelled() && matrix.launch && steps.unpack.outcome == 'success' }}
         run: scripts/smoke_launch.sh v2s.app
 
