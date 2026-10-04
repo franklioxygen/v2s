@@ -14,12 +14,23 @@ Usage: scripts/check_imports.py path/to/v2s.app/Contents/MacOS/v2s
 import collections
 import platform
 import re
-import subprocess
+import subprocess  # nosec B404
 import sys
 
+# The Apple developer tools that read the binary and the system libraries it links.
+TOOLS = {
+    "dyld_info": "/usr/bin/dyld_info",
+    "nm": "/usr/bin/nm",
+    "otool": "/usr/bin/otool",
+    "xcrun": "/usr/bin/xcrun",
+}
 
-def run(*args):
-    return subprocess.run(args, capture_output=True, text=True, check=False).stdout
+
+def run(tool, *args):
+    # Only the fixed tools above run, from an argument list and without a shell. Their
+    # arguments are the binary under test and the system library paths it links.
+    command = [TOOLS[tool], *args]
+    return subprocess.run(command, capture_output=True, text=True, check=False).stdout  # nosec B603  # nosemgrep
 
 
 def linked_libraries(binary, arch):
