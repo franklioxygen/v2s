@@ -6,7 +6,8 @@ which imports are weak. When an annotation is wrong, the import is strong and
 dyld kills the app at launch on an older macOS, before it draws anything. A
 missing weak import is bound to NULL and only crashes if the code calls it.
 
-Exits with status 1 when a strong import or a strongly linked library is missing.
+Exits with status 1 when a strong import or a strongly linked library is missing,
+or when the binary cannot be inspected for the running architecture.
 
 Usage: scripts/check_imports.py path/to/v2s.app/Contents/MacOS/v2s
 """
@@ -20,6 +21,7 @@ import sys
 # The Apple developer tools that read the binary and the system libraries it links.
 TOOLS = {
     "dyld_info": "/usr/bin/dyld_info",
+    "lipo": "/usr/bin/lipo",
     "nm": "/usr/bin/nm",
     "otool": "/usr/bin/otool",
     "xcrun": "/usr/bin/xcrun",
@@ -30,7 +32,7 @@ def run(tool, *args):
     # Only the fixed tools above run, from an argument list and without a shell. Their
     # arguments are the binary under test and the system library paths it links.
     command = [TOOLS[tool], *args]
-    return subprocess.run(command, capture_output=True, text=True, check=False).stdout  # nosec B603  # nosemgrep
+    return subprocess.run(command, capture_output=True, text=True, check=True).stdout  # nosec B603  # nosemgrep
 
 
 def linked_libraries(binary, arch):
@@ -62,7 +64,15 @@ def imported_symbols(binary, arch):
 def exported_symbols(path, cache, seen=frozenset()):
     """Symbols a system library exports, including those of the libraries it re-exports."""
     if path not in cache:
-        output = run("dyld_info", "-exports", path)
+        try:
+            output = run("dyld_info", "-exports", path)
+        except subprocess.CalledProcessError as error:
+            # Missing weak-linked libraries are expected on older macOS versions.
+            # Do not use file existence: system libraries can live in the dyld cache.
+            if not error.stdout and error.stderr.strip() == f"dyld_info: '{path}' file not found":
+                cache[path] = set()
+                return cache[path]
+            raise
         symbols = set(re.findall(r"^\s+0x[0-9A-Fa-f]+\s+(\S+)", output, re.M))
         symbols |= set(re.findall(r"^\s+\[re-export\]\s+(\S+)", output, re.M))
         for reexported in re.findall(r"^\s+re-export\s+(\S+)", run("dyld_info", "-linked_dylibs", path), re.M):
@@ -77,14 +87,24 @@ def demangle(symbol):
 
 
 def main():
+    if len(sys.argv) != 2:
+        raise ValueError("usage: scripts/check_imports.py path/to/v2s.app/Contents/MacOS/v2s")
     binary = sys.argv[1]
     arch = platform.machine()
+    architectures = run("lipo", "-archs", binary).split()
+    if arch not in architectures:
+        raise ValueError(f"{binary} has no {arch} slice (available: {', '.join(architectures) or 'none'})")
     libraries = linked_libraries(binary, arch)
+    imports = imported_symbols(binary, arch)
+    # v2s always has linked libraries and imports. Empty results mean the tools
+    # could not read the app, or their output no longer matches our parsers.
+    if not libraries or not imports:
+        raise ValueError(f"Could not read linked libraries and imported symbols from {binary} ({arch})")
     cache = {}
     missing_strong = 0
     missing_weak = 0
 
-    for library, symbols in sorted(imported_symbols(binary, arch).items()):
+    for library, symbols in sorted(imports.items()):
         path, library_is_weak = libraries[library]
         if path.startswith("@rpath/"):
             # Embedded frameworks such as Sparkle ship inside the app bundle.
@@ -117,4 +137,12 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr.strip() or error.stdout.strip() or "no diagnostic output"
+        print(f"error: {error.cmd[0]} exited with status {error.returncode}: {detail}", file=sys.stderr)
+        sys.exit(1)
+    except (OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        sys.exit(1)
