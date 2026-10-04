@@ -1,0 +1,84 @@
+name: Launch check
+
+# Builds the app the same way the release workflow does, then launches it on
+# every macOS version the deployment target allows. The release is built with
+# the newest SDK, so this is where a symbol that only exists on newer macOS
+# shows up as a startup crash.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release app
+        run: |
+          xcodebuild \
+            -project v2s.xcodeproj \
+            -scheme v2s \
+            -configuration Release \
+            -derivedDataPath .build/release \
+            build
+
+      - name: Package app
+        run: |
+          ditto -c -k --keepParent \
+            .build/release/Build/Products/Release/v2s.app \
+            v2s.app.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v2s-app
+          path: v2s.app.zip
+          retention-days: 3
+
+  launch:
+    name: launch (${{ matrix.os }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            launch: true
+          # GitHub's Intel VMs have a paravirtualized GPU that reports no Metal
+          # architecture, so SwiftUI's renderer aborts while loading its shaders in
+          # any app that draws with it. Only the symbol check runs there.
+          - os: macos-15-intel
+            launch: false
+          - os: macos-26
+            launch: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test symbol checker
+        run: python3 -m unittest discover -s Tests/Scripts -p 'test_*.py'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: v2s-app
+
+      - name: Unpack app
+        id: unpack
+        run: ditto -x -k v2s.app.zip .
+
+      - name: Check imported symbols
+        run: scripts/check_imports.py v2s.app/Contents/MacOS/v2s
+
+      # Runs even when the symbol check fails, so dyld's own message is in the log,
+      # but only when there is an app to launch.
+      - name: Launch app
+        if: ${{ !cancelled() && matrix.launch && steps.unpack.outcome == 'success' }}
+        run: scripts/smoke_launch.sh v2s.app
+
