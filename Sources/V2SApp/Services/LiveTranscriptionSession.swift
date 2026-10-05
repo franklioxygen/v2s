@@ -172,6 +172,12 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var analyzerInputFormat: AVAudioFormat?
     private var latestModernText = ""
     private var modernCommittedPrefixText = ""
+    /// Committed text that stops mid-sentence, held for the next commit (see `commitModernText`).
+    private var modernHeldFragmentText = ""
+    private var modernHeldFragmentSince: Date?
+    private var modernHeldFragmentTimer: DispatchSourceTimer?
+    /// The latest committed sentences in `comparableModernSentence` form.
+    private var recentModernCommittedSentences: [String] = []
 
     private var microphoneCaptureSession: AVCaptureSession?
     private var applicationAudioCapture: ApplicationAudioCapture?
@@ -533,6 +539,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         audioConverterInputSignature = nil
         resetLegacyTranscriptionState()
         resetModernTranscriptionState()
+        clearHeldFragment()
+        recentModernCommittedSentences.removeAll()
         cancelSilenceTimer()
         cancelVADSilenceTimer()
         resetDraftState()
@@ -564,6 +572,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     }
 
     private func stopModernSpeechRecognizer() {
+        // A held fragment was already recognized: keep it in the transcript.
+        flushHeldFragment(clearDraftAfter: true)
         modernAnalyzerTask?.cancel()
         modernAnalyzerTask = nil
         modernResultsTask?.cancel()
@@ -2057,22 +2067,11 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             cancelSilenceTimer()
             cancelVADSilenceTimer()
             resetModernTranscriptionState()
-            let committedDraftID = currentDraftId
-            resetDraftState()
 
             if text.isEmpty == false {
-                Task {
-                    await emitCommittedSequence(
-                        [
-                            CommittedEmission(
-                                text: text,
-                                promotionSegmentID: committedDraftID
-                            )
-                        ],
-                        clearDraftAfter: true
-                    )
-                }
-            } else {
+                commitModernText(text, clearDraftAfter: true)
+            } else if modernHeldFragmentText.isEmpty {
+                resetDraftState()
                 Task { await emitPartialDraft(nil) }
             }
             return
@@ -2082,7 +2081,9 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             latestModernText = ""
             cancelSilenceTimer()
             cancelVADSilenceTimer()
-            Task { await emitPartialDraft(nil) }
+            if modernHeldFragmentText.isEmpty {
+                Task { await emitPartialDraft(nil) }
+            }
             return
         }
 
@@ -2095,7 +2096,9 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             let committedText = split.committedRawText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard committedText.isEmpty == false else {
                 latestModernText = ""
-                Task { await emitPartialDraft(nil) }
+                if modernHeldFragmentText.isEmpty {
+                    Task { await emitPartialDraft(nil) }
+                }
                 return
             }
 
@@ -2103,23 +2106,14 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             cancelVADSilenceTimer()
             modernCommittedPrefixText += split.committedRawText
             latestModernText = split.remainingRawText
-            let committedDraftID = currentDraftId
-            resetDraftState()
-            Task {
-                await emitCommittedSequence(
-                    [
-                        CommittedEmission(
-                            text: committedText,
-                            promotionSegmentID: committedDraftID
-                        )
-                    ],
-                    clearDraftAfter: true
-                )
-            }
+            commitModernText(committedText, clearDraftAfter: true)
             return
         }
 
-        emitDraftUpdate(from: result, text: text)
+        emitDraftUpdate(
+            from: result,
+            text: Self.joiningHeldFragment(modernHeldFragmentText, to: text, languageCode: activeLanguageCode)
+        )
         scheduleSilenceCommit()
     }
 
@@ -2155,7 +2149,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             return false
         }
 
-        guard shouldHoldModernVADCommit(for: text) == false else {
+        // Fast results hold the last word back until more speech follows, so at a pause a
+        // draft that does not end its sentence usually stops short of what was said, often
+        // mid-word. Leave such a draft to the transcriber's final result.
+        guard SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: text) else {
             return false
         }
 
@@ -2169,24 +2166,225 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         return text.count <= maxDraftLength
     }
 
-    private func shouldHoldModernVADCommit(for text: String) -> Bool {
-        guard SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: text) == false else {
+    // MARK: - Sentence fragments (SpeechAnalyzer)
+
+    /// Commits text from the SpeechAnalyzer path.
+    ///
+    /// A pause inside a sentence can hand over half of it: the transcriber finalizes there,
+    /// or VAD and inactivity commit the draft. Such a fragment ends on a comma or a
+    /// particle, or is a lone connective the transcriber closed with a full stop because
+    /// the speaker paused. It is held on the draft line and put in front of the next
+    /// commit, so the sentence stays one caption. A fragment nothing follows is committed
+    /// on its own once the speaker stops.
+    private func commitModernText(_ text: String, clearDraftAfter: Bool) {
+        if modernHeldFragmentText.isEmpty == false, repeatsRecentModernCommit(text) {
+            // The transcriber can reissue sentences it already committed. They come from
+            // before the fragment, so joining them to it would garble the sentence: commit
+            // them alone, where emission drops what it recognizes as a repeat, and keep
+            // waiting for the fragment's own continuation.
+            emitModernCommit(text, clearDraftAfter: false)
+            return
+        }
+
+        let combinedText = Self.joiningHeldFragment(modernHeldFragmentText, to: text, languageCode: activeLanguageCode)
+        guard combinedText.isEmpty == false else {
+            return
+        }
+
+        if Self.isModernSentenceFragment(combinedText, languageCode: activeLanguageCode) {
+            modernHeldFragmentText = combinedText
+            if modernHeldFragmentSince == nil {
+                modernHeldFragmentSince = Date()
+            }
+            scheduleHeldFragmentCheck()
+            return
+        }
+
+        clearHeldFragment()
+        emitModernCommit(combinedText, clearDraftAfter: clearDraftAfter)
+    }
+
+    private func emitModernCommit(_ text: String, clearDraftAfter: Bool) {
+        rememberModernCommit(text)
+        let committedDraftID = currentDraftId
+        resetDraftState()
+        Task {
+            await emitCommittedSequence(
+                [
+                    CommittedEmission(
+                        text: text,
+                        promotionSegmentID: committedDraftID
+                    )
+                ],
+                clearDraftAfter: clearDraftAfter
+            )
+        }
+    }
+
+    private func scheduleHeldFragmentCheck() {
+        modernHeldFragmentTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: captureQueue)
+        timer.schedule(deadline: .now() + .milliseconds(Self.heldFragmentCheckMs))
+        timer.setEventHandler { [weak self] in
+            self?.commitHeldFragmentIfSpeechStopped()
+        }
+        timer.resume()
+        modernHeldFragmentTimer = timer
+    }
+
+    /// Commits a held fragment on its own once nothing has been said after it for a while,
+    /// or once it has waited too long for its sentence to be committed.
+    private func commitHeldFragmentIfSpeechStopped() {
+        modernHeldFragmentTimer = nil
+        guard modernHeldFragmentText.isEmpty == false, let heldSince = modernHeldFragmentSince else {
+            return
+        }
+
+        let now = Date()
+        let speechFollows = latestModernText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        let quietFor = now.timeIntervalSince(max(heldSince, lastDraftTextChangeTime))
+        if now.timeIntervalSince(heldSince) < Self.maxHeldFragmentSeconds,
+           speechFollows || quietFor < Self.heldFragmentQuietSeconds {
+            scheduleHeldFragmentCheck()
+            return
+        }
+
+        flushHeldFragment(clearDraftAfter: speechFollows == false)
+    }
+
+    private func flushHeldFragment(clearDraftAfter: Bool) {
+        let text = modernHeldFragmentText
+        clearHeldFragment()
+        guard text.isEmpty == false else {
+            return
+        }
+
+        emitModernCommit(text, clearDraftAfter: clearDraftAfter)
+    }
+
+    private func clearHeldFragment() {
+        modernHeldFragmentText = ""
+        modernHeldFragmentSince = nil
+        modernHeldFragmentTimer?.cancel()
+        modernHeldFragmentTimer = nil
+    }
+
+    private func rememberModernCommit(_ text: String) {
+        recentModernCommittedSentences += splitRecognizedSentences(in: text)
+            .map(Self.comparableModernSentence)
+            .filter { $0.isEmpty == false }
+        if recentModernCommittedSentences.count > Self.recentModernCommitMemory {
+            recentModernCommittedSentences.removeFirst(recentModernCommittedSentences.count - Self.recentModernCommitMemory)
+        }
+    }
+
+    /// Whether text opens with a sentence committed a moment ago.
+    private func repeatsRecentModernCommit(_ text: String) -> Bool {
+        guard let firstSentence = splitRecognizedSentences(in: text).first else {
             return false
         }
 
-        if SentenceBoundaryHeuristics.endsWithLikelyNonTerminalAbbreviation(in: text) {
+        let comparable = Self.comparableModernSentence(firstSentence)
+        return recentModernCommittedSentences.contains { committed in
+            // A reissue can also be the tail of a longer committed sentence.
+            Self.isNearlySameSentence(committed, comparable)
+                || (comparable.count >= Self.minimumReissuedTailLength && committed.hasSuffix(comparable))
+        }
+    }
+
+    /// A sentence without spacing and punctuation, with katakana folded to hiragana: the
+    /// transcriber often revises a word only in which of the two it is written in.
+    static func comparableModernSentence(_ text: String) -> String {
+        let folded = text.applyingTransform(.hiraganaToKatakana, reverse: true) ?? text
+        let ignored = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
+        return String(String.UnicodeScalarView(folded.unicodeScalars.filter { ignored.contains($0) == false }))
+    }
+
+    /// Whether two comparable sentences differ in at most a fifth of their characters.
+    static func isNearlySameSentence(_ lhs: String, _ rhs: String) -> Bool {
+        guard lhs.isEmpty == false, rhs.isEmpty == false else {
+            return false
+        }
+
+        let a = Array(lhs), b = Array(rhs)
+        let allowedEdits = max(a.count, b.count) / 5
+        guard abs(a.count - b.count) <= allowedEdits else {
+            return false
+        }
+
+        var previous = Array(0...b.count)
+        for i in 1...a.count {
+            var current = [i] + Array(repeating: 0, count: b.count)
+            for j in 1...b.count {
+                current[j] = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1))
+            }
+            previous = current
+        }
+        return previous[b.count] <= allowedEdits
+    }
+
+    /// Whether committed text stops partway through a sentence.
+    static func isModernSentenceFragment(_ rawText: String, languageCode: String?) -> Bool {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let lastCharacter = text.last else {
+            return false
+        }
+
+        if dialogueClauseSeparators.contains(lastCharacter) {
             return true
         }
 
-        switch activeHeuristicLanguage {
-        case .japanese:
-            return Self.modernVADDeferredJapaneseCommitSuffixes.contains(where: { text.hasSuffix($0) })
-        case .english:
-            let normalized = text.lowercased()
-            return Self.modernVADDeferredEnglishCommitSuffixes.contains(where: { normalized.hasSuffix($0) })
-        case .other:
+        // A pause can make the transcriber close a fragment with a full stop.
+        let body = removingTrailingPauseFullStops(from: text)
+        guard body.isEmpty == false else {
             return false
         }
+
+        switch languageCode {
+        case "ja":
+            if japaneseSentenceInitialConnectives.contains(body) || japaneseLoneParticles.contains(body) {
+                return true
+            }
+            if japaneseGreetingsEndingInTopicParticle.contains(where: { body.hasSuffix($0) }) {
+                return false
+            }
+            return japaneseFragmentEndingSuffixes.contains(where: { body.hasSuffix($0) })
+        case "en":
+            let normalized = " " + body.lowercased()
+            return englishFragmentEndingSuffixes.contains(where: { normalized.hasSuffix($0) })
+        default:
+            return false
+        }
+    }
+
+    /// Puts a held fragment in front of the text that continues its sentence. The full
+    /// stop a pause gave the fragment goes, since the sentence did not end there.
+    static func joiningHeldFragment(_ fragment: String, to text: String, languageCode: String?) -> String {
+        let nextText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let heldText = fragment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard heldText.isEmpty == false else {
+            return nextText
+        }
+        guard nextText.isEmpty == false else {
+            return heldText
+        }
+
+        let opening = removingTrailingPauseFullStops(from: heldText)
+        // A revision can repeat the fragment at the start of the text that continues it.
+        if opening.count >= 2, nextText.hasPrefix(opening) {
+            return nextText
+        }
+
+        let separator = opening.containsCJKCharacters || nextText.containsCJKCharacters ? "" : " "
+        return opening + separator + nextText
+    }
+
+    private static func removingTrailingPauseFullStops(from text: String) -> String {
+        var body = text
+        while let last = body.last, pauseFullStops.contains(last) {
+            body.removeLast()
+        }
+        return body.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var activeHeuristicLanguage: RecognitionHeuristicLanguage {
@@ -2438,19 +2636,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
             modernCommittedPrefixText += committedRawText
             latestModernText = remainingRawText
-            let committedDraftID = currentDraftId
-            resetDraftState()
-            Task {
-                await emitCommittedSequence(
-                    [
-                        CommittedEmission(
-                            text: text,
-                            promotionSegmentID: committedDraftID
-                        )
-                    ],
-                    clearDraftAfter: remainingRawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
-            }
+            commitModernText(
+                text,
+                clearDraftAfter: remainingRawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            )
             return
         }
 
@@ -3575,13 +3764,35 @@ private extension LiveTranscriptionSession {
     static let japaneseDialogueClauseLeadingPhrases = [
         "俺", "私", "僕", "うん", "いや", "や", "でも", "じゃ", "ただいま", "おかえり", "ありがとう", "ごめん"
     ]
-    static let modernVADDeferredJapaneseCommitSuffixes = [
+    /// Endings that leave a sentence unfinished: conjunctions, particles, conditionals.
+    static let japaneseFragmentEndingSuffixes = [
         "けど", "けれど", "けれども", "から", "ので", "のに", "とか", "って",
-        "で", "て", "が", "を", "に", "へ", "と", "し"
+        "で", "て", "が", "を", "に", "へ", "と", "し", "ば", "たら", "なら", "は"
     ]
-    static let modernVADDeferredEnglishCommitSuffixes = [
+    static let englishFragmentEndingSuffixes = [
         " and", " or", " but", " so", " because", " if", " when", " that", " to"
     ]
+    /// Greetings that end in the topic particle but are complete.
+    static let japaneseGreetingsEndingInTopicParticle = ["こんにちは", "こんばんは"]
+    /// Words that open a sentence; on their own they are only its start.
+    static let japaneseSentenceInitialConnectives: Set<String> = [
+        "ただ", "でも", "そこで", "それで", "それから", "そして", "だから", "しかし",
+        "ところが", "なので", "つまり", "例えば", "たとえば", "もし", "まず"
+    ]
+    static let japaneseLoneParticles: Set<String> = ["は", "が", "を", "に", "で", "と", "も", "へ", "の", "や"]
+    /// Full stops a pause can put at the end of a fragment. Question and exclamation
+    /// marks are left alone: the transcriber adds them for intonation, not for pauses.
+    static let pauseFullStops: Set<Character> = ["。", "."]
+    static let heldFragmentCheckMs = 300
+    /// A held fragment is committed on its own after this long with nothing said after it.
+    /// It stays visible on the draft line meanwhile, and the next clause can take two
+    /// seconds to show up after a pause.
+    static let heldFragmentQuietSeconds: TimeInterval = 3
+    /// While speech goes on, a fragment waits for its sentence, which can run long.
+    static let maxHeldFragmentSeconds: TimeInterval = 20
+    static let recentModernCommitMemory = 8
+    /// Shorter tails of committed sentences are too likely to be said again on purpose.
+    static let minimumReissuedTailLength = 8
     static let committedComparisonTrimCharacterSet = CharacterSet.whitespacesAndNewlines
         .union(.punctuationCharacters)
         .union(.symbols)
