@@ -13,10 +13,16 @@ private extension Logger {
 struct RecognizedSentence: Equatable, Sendable {
     let text: String
     let promotionSegmentID: UUID?
+    let translationContext: SentenceTranslationContext?
+    /// Identity of an utterance already deduplicated by its finalized audio range.
+    /// Repeating its words later is new speech, not a revision of this utterance.
+    let recognitionID: UUID?
 
-    init(text: String, promotionSegmentID: UUID? = nil) {
+    init(text: String, promotionSegmentID: UUID? = nil, translationContext: SentenceTranslationContext? = nil, recognitionID: UUID? = nil) {
         self.text = text
         self.promotionSegmentID = promotionSegmentID
+        self.translationContext = translationContext
+        self.recognitionID = recognitionID
     }
 }
 
@@ -170,6 +176,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var speechTranscriberState: AnyObject?
     private var analyzerInputContinuationState: Any?
     private var analyzerInputFormat: AVAudioFormat?
+    private var japaneseSentenceAssembler = JapaneseSentenceAssembler()
     private var latestModernText = ""
     private var modernCommittedPrefixText = ""
     /// Committed text that stops mid-sentence, held for the next commit (see `commitModernText`).
@@ -540,6 +547,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         resetLegacyTranscriptionState()
         resetModernTranscriptionState()
         clearHeldFragment()
+        japaneseSentenceAssembler = JapaneseSentenceAssembler()
         recentModernCommittedSentences.removeAll()
         cancelSilenceTimer()
         cancelVADSilenceTimer()
@@ -1071,6 +1079,12 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             return
         }
 
+        // Per-buffer gain changes the envelope every ~10 ms. In Japanese video
+        // replays this erased quiet syllables and short replies from final results.
+        // Preserve the captured waveform for this recognizer; VAD still uses the
+        // existing processing, as do the other language and legacy paths.
+        let japaneseRecognitionBuffer = recognitionBackend == .speechAnalyzer && activeHeuristicLanguage == .japanese
+            ? processingBuffer.copied() : nil
         let audioLevels = cleanUpSpeechBuffer(processingBuffer)
         boostIfQuiet(buffer: processingBuffer, levels: audioLevels)
 
@@ -1087,7 +1101,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
 
         if recognitionBackend == .speechAnalyzer {
-            appendToSpeechAnalyzer(processingBuffer)
+            appendToSpeechAnalyzer(japaneseRecognitionBuffer ?? processingBuffer)
             return
         }
 
@@ -2053,6 +2067,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
     @available(macOS 26.0, *)
     private func processModernRecognitionResult(_ result: SpeechTranscriber.Result) {
+        if activeHeuristicLanguage == .japanese {
+            processJapaneseRecognitionResult(result)
+            return
+        }
         let now = Date()
         lastRecognitionResultTime = now
         let fullText = normalizedTranscriberText(result.text)
@@ -2115,6 +2133,58 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             text: Self.joiningHeldFragment(modernHeldFragmentText, to: text, languageCode: activeLanguageCode)
         )
         scheduleSilenceCommit()
+    }
+
+    /// Keep speculative Japanese words on the draft line. Fast results arrive in
+    /// roughly one-second batches; an inactivity/VAD timer between batches cannot
+    /// establish a sentence boundary or safely remove a prefix from a later revision.
+    @available(macOS 26.0, *)
+    private func processJapaneseRecognitionResult(_ result: SpeechTranscriber.Result) {
+        guard result.range.end.seconds > japaneseSentenceAssembler.finalizedThrough else { return }
+        lastRecognitionResultTime = Date()
+        let text = normalizedTranscriberText(result.text)
+        if !result.isFinal {
+            latestModernText = text
+            emitDraftUpdate(from: result, text: japaneseSentenceAssembler.preview(appending: text))
+            return
+        }
+
+        let wordRanges = result.text.runs.compactMap { $0.audioTimeRange }
+        let start = wordRanges.map { $0.start.seconds }.filter(\.isFinite).min() ?? result.range.start.seconds
+        let end = wordRanges.map { $0.end.seconds }.filter(\.isFinite).max() ?? result.range.end.seconds
+        let sentences = japaneseSentenceAssembler.appendFinal(
+            text, start: start, end: end, finalizedEnd: result.range.end.seconds
+        )
+        latestModernText = ""
+        emitJapaneseSentences(sentences, clearDraftAfter: japaneseSentenceAssembler.pendingText.isEmpty)
+        if japaneseSentenceAssembler.pendingText.isEmpty {
+            clearHeldFragment()
+        } else {
+            if !sentences.isEmpty || modernHeldFragmentSince == nil { modernHeldFragmentSince = Date() }
+            emitDraftUpdate(from: result, text: japaneseSentenceAssembler.pendingText)
+            scheduleHeldFragmentCheck()
+        }
+    }
+
+    private func emitJapaneseSentences(_ sentences: [String], clearDraftAfter: Bool) {
+        let promotionID = currentDraftId
+        if !sentences.isEmpty { resetDraftState() }
+        Task { @MainActor in
+            // These units already have sentence boundaries and audio-range deduplication.
+            // The legacy comma splitter and fuzzy text deduplication would split clauses
+            // and drop intentional repetitions, respectively.
+            for (index, text) in sentences.enumerated() {
+                emitRecognizedSentence(RecognizedSentence(
+                    text: text,
+                    promotionSegmentID: index == 0 ? promotionID : nil,
+                    translationContext: SentenceTranslationContext(
+                        sentences: sentences, sentenceIndex: index, draftSegmentID: promotionID
+                    ),
+                    recognitionID: UUID()
+                ))
+            }
+            if clearDraftAfter { emitPartialDraft(nil) }
+        }
     }
 
     private func observeDraftText(_ text: String, at now: Date) {
@@ -2236,7 +2306,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     /// or once it has waited too long for its sentence to be committed.
     private func commitHeldFragmentIfSpeechStopped() {
         modernHeldFragmentTimer = nil
-        guard modernHeldFragmentText.isEmpty == false, let heldSince = modernHeldFragmentSince else {
+        let hasFragment = activeHeuristicLanguage == .japanese
+            ? !japaneseSentenceAssembler.pendingText.isEmpty
+            : !modernHeldFragmentText.isEmpty
+        guard hasFragment, let heldSince = modernHeldFragmentSince else {
             return
         }
 
@@ -2253,6 +2326,12 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     }
 
     private func flushHeldFragment(clearDraftAfter: Bool) {
+        if activeHeuristicLanguage == .japanese {
+            let sentences = japaneseSentenceAssembler.flush()
+            clearHeldFragment()
+            if !sentences.isEmpty { emitJapaneseSentences(sentences, clearDraftAfter: clearDraftAfter) }
+            return
+        }
         let text = modernHeldFragmentText
         clearHeldFragment()
         guard text.isEmpty == false else {
@@ -2609,6 +2688,9 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
 
         if recognitionBackend == .speechAnalyzer {
+            // Japanese volatile text is a preview, including at a VAD pause. Its
+            // finalized result owns the boundary and may still correct the last word.
+            guard activeHeuristicLanguage != .japanese else { return }
             let committedRawText: String
             let remainingRawText: String
 

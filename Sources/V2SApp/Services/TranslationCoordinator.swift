@@ -181,6 +181,7 @@ final class TranslationCoordinator: ObservableObject {
         _ text: String,
         from sourceIdentifier: String,
         to targetIdentifier: String,
+        context: SentenceTranslationContext? = nil,
         priority: Priority = .normal
     ) async throws -> String {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -190,6 +191,21 @@ final class TranslationCoordinator: ObservableObject {
 
         guard sourceIdentifier != targetIdentifier else {
             return trimmedText
+        }
+
+        // The standalone memo may contain a different meaning of a short phrase
+        // (e.g. ただいま -> "now"). Resolve the passage before consulting that memo.
+        if let context, context.matchesCaption(trimmedText) {
+            do {
+                let passage = try await translate(
+                    context.sourceText, from: sourceIdentifier, to: targetIdentifier, priority: priority
+                )
+                if let sentence = context.translatedSentence(from: passage) { return sentence }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // A failed or unalignable passage can still be translated individually.
+            }
         }
 
         let pair = LanguagePair(source: sourceIdentifier, target: targetIdentifier)
@@ -293,6 +309,12 @@ final class TranslationCoordinator: ObservableObject {
                 }
 
             case .translate(let id, _, let pair, let text, _, let continuation):
+                // Several captions can request the same passage before the first
+                // request finishes. Recheck here so that passage is translated once.
+                if let memoized = translationMemo[MemoKey(pair: pair, text: text)] {
+                    finishOperation(id: id, continuation: continuation, result: memoized)
+                    continue
+                }
                 do {
                     let response = try await session.translate(text)
                     let translatedText = response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)

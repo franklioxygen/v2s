@@ -71,6 +71,7 @@ final class AppModel: ObservableObject {
     private var recentRecognizedCaptionTexts: [RecentRecognizedCaption] = []
     private var recentArchivedCaption: RecentArchivedCaption?
     private var finalizedDraftPromotionIDs: [(id: UUID, time: Date)] = []
+    private var recentRecognitionIDs: [UUID] = []
     private var transcriptInputLanguageID: String?
     private var transcriptOutputLanguageID: String?
     private var statusDescriptor: StatusDescriptor = .ready
@@ -1972,7 +1973,7 @@ final class AppModel: ObservableObject {
 
     // MARK: - Caption queue
 
-    private func enqueueRecognizedSentence(
+    func enqueueRecognizedSentence(
         _ sentence: RecognizedSentence,
         source: InputSource,
         sourceLanguageID: String,
@@ -1983,16 +1984,30 @@ final class AppModel: ObservableObject {
             return
         }
 
+        if let recognitionID = sentence.recognitionID {
+            guard !recentRecognitionIDs.contains(recognitionID) else { return }
+            recentRecognitionIDs.append(recognitionID)
+            if recentRecognitionIDs.count > 512 { recentRecognitionIDs.removeFirst() }
+        }
+
+        let promotedDraftTranslation = promotedDraftTranslationSnapshot(
+            for: sentence.promotionSegmentID ?? sentence.translationContext?.draftSegmentID,
+            sourceText: sourceText,
+            sourceID: source.id,
+            sourceLanguageID: sourceLanguageID,
+            targetLanguageID: targetLanguageID,
+            context: sentence.translationContext
+        )
+
         if let promotionID = sentence.promotionSegmentID {
             guard isFinalizedDraftPromotionID(promotionID) == false else {
                 return
             }
 
-            let promotedDraftTranslation = promotedDraftTranslationSnapshot(for: sentence.promotionSegmentID)
             markDraftPromotionFinalized(promotionID)
             cancelCommittedCaptionArchive()
 
-            guard shouldEnqueueRecognizedSentence(sourceText, promotionID: promotionID) else {
+            guard sentence.recognitionID != nil || shouldEnqueueRecognizedSentence(sourceText, promotionID: promotionID) else {
                 return
             }
 
@@ -2003,7 +2018,8 @@ final class AppModel: ObservableObject {
                 sourceName: source.name,
                 sourceLanguageID: sourceLanguageID,
                 targetLanguageID: targetLanguageID,
-                promotedDraftTranslation: promotedDraftTranslation
+                promotedDraftTranslation: promotedDraftTranslation,
+                translationContext: sentence.translationContext
             )
 
             rememberRecognizedSentence(sourceText)
@@ -2013,7 +2029,7 @@ final class AppModel: ObservableObject {
         } else {
             cancelCommittedCaptionArchive()
 
-            guard shouldEnqueueRecognizedSentence(sourceText) else {
+            guard sentence.recognitionID != nil || shouldEnqueueRecognizedSentence(sourceText) else {
                 return
             }
 
@@ -2024,7 +2040,8 @@ final class AppModel: ObservableObject {
                 sourceName: source.name,
                 sourceLanguageID: sourceLanguageID,
                 targetLanguageID: targetLanguageID,
-                promotedDraftTranslation: nil
+                promotedDraftTranslation: promotedDraftTranslation,
+                translationContext: sentence.translationContext
             )
 
             rememberRecognizedSentence(sourceText)
@@ -2070,7 +2087,8 @@ final class AppModel: ObservableObject {
 
         let initialTranslation = initialCaptionTranslation(for: caption) ?? ""
         if initialTranslation.isEmpty == false {
-            // Let the final translation replace the draft translation when it arrives.
+            // Track app-owned text for late updates. A validated promoted translation
+            // is also used by translatedText(for:), so completion preserves it.
             translationRevisions[caption.id] = initialTranslation
         }
 
@@ -2233,6 +2251,7 @@ final class AppModel: ObservableObject {
         recentRecognizedCaptionTexts.removeAll()
         recentArchivedCaption = nil
         finalizedDraftPromotionIDs.removeAll()
+        recentRecognitionIDs.removeAll()
         displayedCaption = nil
         overlayHistoryScrollOffset = 0
         displayedCaptionLastVisualUpdateAt = Date.distantPast
@@ -2524,14 +2543,24 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func promotedDraftTranslationSnapshot(for promotionID: UUID?) -> String? {
+    private func promotedDraftTranslationSnapshot(
+        for promotionID: UUID?,
+        sourceText: String,
+        sourceID: String,
+        sourceLanguageID: String,
+        targetLanguageID: String,
+        context: SentenceTranslationContext?
+    ) -> String? {
         guard let promotionID,
               let state = overlayState,
-              let draftText = state.draftSourceText,
               state.draftPromotionID == promotionID,
-              let currentDraftTranslation = state.visibleDraftTranslatedText(
-                  for: draftText,
-                  promotionID: promotionID
+              lastDraftSourceID == sourceID,
+              activeDraftSourceLanguageID == sourceLanguageID,
+              activeDraftTargetLanguageID == targetLanguageID,
+              let currentDraftTranslation = state.promotableDraftTranslatedText(
+                  for: sourceText,
+                  promotionID: promotionID,
+                  context: context
               ) else {
             return nil
         }
@@ -2861,6 +2890,13 @@ final class AppModel: ObservableObject {
             return caption.sourceText
         }
 
+        // This translation was validated against this caption's words (or its
+        // sentence in the full passage). Promotion is not a reason to replace it
+        // with a new, context-free translation. Retries and refreshes use it too.
+        if let promoted = caption.promotedDraftTranslation, !promoted.isEmpty {
+            return promoted
+        }
+
         // The committed caption display path has its own wait timeout. Keep this
         // request alive so a slow translation can still backfill overlay history
         // and transcript entries instead of being dropped permanently.
@@ -2870,6 +2906,7 @@ final class AppModel: ObservableObject {
                 caption.sourceText,
                 from: caption.sourceLanguageID,
                 to: caption.targetLanguageID,
+                context: caption.translationContext,
                 priority: priority
             )
         } catch {
@@ -3303,6 +3340,7 @@ private struct QueuedCaption: Identifiable, Equatable {
     let sourceLanguageID: String
     let targetLanguageID: String
     let promotedDraftTranslation: String?
+    let translationContext: SentenceTranslationContext?
 }
 
 struct TranscriptEntry: Identifiable, Equatable {
