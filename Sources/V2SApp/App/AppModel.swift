@@ -50,7 +50,6 @@ final class AppModel: ObservableObject {
     private var isBootstrapping = true
     private var usesSystemInterfaceLanguage = true
     private var draftTranslationTask: Task<Void, Never>?
-    private var draftClearTask: Task<Void, Never>?
     private var committedCaptionArchiveTask: Task<Void, Never>?
     private var languageResourcePreparationTask: Task<Void, Never>?
     private var languageCatalogRefreshTask: Task<Void, Never>?
@@ -62,7 +61,6 @@ final class AppModel: ObservableObject {
     private var lastDraftTranslationSource = ""
     private var lastDraftTranslationPromotionID: UUID?
     private var draftTranslationGeneration: Int = 0
-    private var draftClearGeneration: Int = 0
     private var displayedCaptionLastVisualUpdateAt = Date.distantPast
     private var displayedCaptionLastVisualUpdateWasLateTranslation = false
     // Committed translation per caption; late translations may only replace
@@ -1661,15 +1659,13 @@ final class AppModel: ObservableObject {
         let draftText = sanitizedDisplayText(draft?.sourceText ?? "")
         let draftPromotionID = draft?.segmentId
         if draftText.isEmpty {
-            if isDraftPromotionPending() {
-                return
-            }
-            scheduleDraftClear()
+            // An empty recognizer update is not a replacement caption. Final
+            // results may still be queued, so retain the draft until its own
+            // committed caption, a newer draft, or a session reset replaces it.
             return
         }
 
         cancelCommittedCaptionArchive()
-        cancelPendingDraftClear()
         activeDraftSourceLanguageID = sourceLanguageID
         activeDraftTargetLanguageID = targetLanguageID
         overlayState?.draftSourceText = draftText
@@ -1717,38 +1713,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func scheduleDraftClear() {
-        draftClearTask?.cancel()
-        draftClearGeneration &+= 1
-        let generation = draftClearGeneration
-
-        draftClearTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-
-            do {
-                try await Task.sleep(nanoseconds: Self.draftClearDelayNanoseconds)
-            } catch {
-                return
-            }
-
-            guard !Task.isCancelled,
-                  liveTranscriptionSession != nil,
-                  generation == draftClearGeneration else { return }
-
-            clearDraftOverlay()
-            scheduleCommittedCaptionArchiveIfNeeded()
-        }
-    }
-
-    private func cancelPendingDraftClear() {
-        draftClearTask?.cancel()
-        draftClearTask = nil
-        draftClearGeneration &+= 1
-    }
-
     private func clearDraftOverlay() {
-        draftClearTask?.cancel()
-        draftClearTask = nil
         overlayState?.draftSourceText = nil
         overlayState?.draftStablePrefixLength = 0
         overlayState?.draftPromotionID = nil
@@ -1762,6 +1727,16 @@ final class AppModel: ObservableObject {
         draftTranslationTask?.cancel()
         draftTranslationTask = nil
         draftTranslationGeneration &+= 1
+    }
+
+    private func clearPromotedDraftIfReady() {
+        guard let state = overlayState,
+              let draftID = state.draftPromotionID,
+              draftID == state.committedPromotionID else { return }
+        // A visible, older draft translation can remain useful while the final
+        // source is being translated, but must not become the committed result.
+        guard !showsTranslatedSubtitle || !state.isAwaitingCommittedTranslation else { return }
+        clearDraftOverlay()
     }
 
     private func scheduleDraftTranslation(
@@ -1890,6 +1865,7 @@ final class AppModel: ObservableObject {
         }
         displayedCaptionLastVisualUpdateAt = Date()
         displayedCaptionLastVisualUpdateWasLateTranslation = lateTranslation
+        clearPromotedDraftIfReady()
     }
 
     // MARK: - Settings sync
@@ -1949,6 +1925,7 @@ final class AppModel: ObservableObject {
             overlayState?.clearDraftTranslation()
         }
 
+        clearPromotedDraftIfReady()
         scheduleCommittedCaptionArchiveIfNeeded()
     }
 
@@ -2201,6 +2178,31 @@ final class AppModel: ObservableObject {
         transcriptEntries.isEmpty == false
     }
 
+#if DEBUG
+    /// Drives the real overlay in rendering tests without opening an audio device.
+    func previewOverlayForTesting(_ state: OverlayPreviewState) {
+        // Keep asynchronous source-catalog refreshes from replacing the test state
+        // with the idle preview, just as an active capture would.
+        liveTranscriptionSession = liveTranscriptionSession ?? LiveTranscriptionSession()
+        overlayState = state
+        sessionState = .running
+        activeDraftSourceLanguageID = state.hasActiveDraftLayer ? "ja" : nil
+        activeDraftTargetLanguageID = state.hasActiveDraftLayer ? "zh-Hans" : nil
+    }
+
+    func receiveDraftForTesting(_ draft: DraftSegment?, source: InputSource = .preview, language: String = "ja", target: String = "zh-Hans") {
+        handlePartialDraft(draft, source: source, sourceLanguageID: language, targetLanguageID: target)
+    }
+
+    func finishCaptionTranslationForTesting(promotionID: UUID, text: String) {
+        guard let caption = pendingCaptions.first(where: { $0.promotionID == promotionID })
+            ?? displayedCaption.flatMap({ $0.promotionID == promotionID ? $0 : nil }) else { return }
+        captionTranslationTasks[caption.id]?.cancel()
+        captionTranslationTasks[caption.id] = nil
+        updateReadyCaptionTranslation(text, for: caption.id)
+    }
+#endif
+
     func transcriptText(isTranslation: Bool) -> String {
         transcriptEntries
             .map { isTranslation ? $0.translatedText : $0.sourceText }
@@ -2228,8 +2230,6 @@ final class AppModel: ObservableObject {
     private func resetLiveTextPipeline() {
         captionDisplayTask?.cancel()
         captionDisplayTask = nil
-        draftClearTask?.cancel()
-        draftClearTask = nil
         draftTranslationTask?.cancel()
         draftTranslationTask = nil
         committedCaptionArchiveTask?.cancel()
@@ -2241,7 +2241,6 @@ final class AppModel: ObservableObject {
         lastDraftTranslationSource = ""
         lastDraftTranslationPromotionID = nil
         draftTranslationGeneration &+= 1
-        draftClearGeneration &+= 1
         cancelCaptionTranslations()
         resumeAllCaptionTranslationWaiters()
         pendingCaptions.removeAll()
@@ -2300,6 +2299,12 @@ final class AppModel: ObservableObject {
 
             // Archive the current caption before the next sentence replaces it.
             capturePreviousCaption()
+            if let previousID = displayedCaption?.promotionID,
+               overlayState?.draftPromotionID == previousID {
+                // Only retire a held draft belonging to the caption just archived.
+                // A newer utterance may already be visible below it.
+                clearDraftOverlay()
+            }
 
             // Use the best available translation for the initial committed display:
             // 1. Pre-computed caption translation (if ready)
@@ -2329,7 +2334,6 @@ final class AppModel: ObservableObject {
                 translatedText: initialTranslation ?? (translationExpected ? "" : caption.sourceText)
             )
             overlayState?.sourceName = caption.sourceName
-            clearDraftOverlay()
 
             let finalTranslation: String?
             if let earlyTranslation {
@@ -2590,18 +2594,6 @@ final class AppModel: ObservableObject {
                 finalizedDraftPromotionIDs.count - Self.finalizedDraftPromotionLimit
             )
         }
-    }
-
-    private func isDraftPromotionPending() -> Bool {
-        guard let draftPromotionID = overlayState?.draftPromotionID else {
-            return false
-        }
-
-        if displayedCaption?.promotionID == draftPromotionID {
-            return true
-        }
-
-        return pendingCaptions.contains { $0.promotionID == draftPromotionID }
     }
 
     private func shouldSuppressArchivedCaptionReplay(
@@ -3301,7 +3293,6 @@ private enum StatusDescriptor: Equatable {
 
 private extension AppModel {
     static let overlayHistoryLimit = 120
-    static let draftClearDelayNanoseconds: UInt64 = 150_000_000
     static let committedCaptionIdleArchiveDelay: TimeInterval = 0.9
     static let archivedCaptionReplaySuppressionWindow: TimeInterval = 1.8
     static let archivedCaptionReplaySimilarityThreshold = 0.18

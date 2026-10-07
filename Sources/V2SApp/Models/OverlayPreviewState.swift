@@ -44,6 +44,15 @@ struct OverlayPreviewState: Equatable {
         draftSourceText?.isEmpty == false
     }
 
+    /// Keep a provisional translation visible until the final caption has one.
+    /// Its text remains draft-only: it may belong to an earlier source revision.
+    var isAwaitingCommittedTranslation: Bool {
+        guard hasActiveDraftLayer, let draftPromotionID,
+              draftPromotionID == committedPromotionID,
+              translatedText.isEmpty else { return false }
+        return visibleDraftTranslatedText(for: draftSourceText ?? "", promotionID: draftPromotionID) != nil
+    }
+
     var hasHistory: Bool {
         history.isEmpty == false
     }
