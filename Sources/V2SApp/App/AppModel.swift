@@ -1976,6 +1976,20 @@ final class AppModel: ObservableObject {
             context: sentence.translationContext
         )
 
+        // A combined draft needs a fresh reading window for its first finalized
+        // sentence. Preserve sentence boundaries; only delay the next caption.
+        var minimumDisplayDuration: TimeInterval = 0
+        if let context = sentence.translationContext,
+           context.sentenceIndex == 0,
+           sentence.promotionSegmentID == context.draftSegmentID,
+           overlayState?.draftPromotionID == context.draftSegmentID,
+           lastDraftSourceID == source.id,
+           activeDraftSourceLanguageID == sourceLanguageID,
+           activeDraftTargetLanguageID == targetLanguageID,
+           context.matchesPassage(overlayState?.draftSourceText ?? "") {
+            minimumDisplayDuration = 2.0
+        }
+
         if let promotionID = sentence.promotionSegmentID {
             guard isFinalizedDraftPromotionID(promotionID) == false else {
                 return
@@ -1996,7 +2010,8 @@ final class AppModel: ObservableObject {
                 sourceLanguageID: sourceLanguageID,
                 targetLanguageID: targetLanguageID,
                 promotedDraftTranslation: promotedDraftTranslation,
-                translationContext: sentence.translationContext
+                translationContext: sentence.translationContext,
+                minimumDisplayDuration: minimumDisplayDuration
             )
 
             rememberRecognizedSentence(sourceText)
@@ -2018,7 +2033,8 @@ final class AppModel: ObservableObject {
                 sourceLanguageID: sourceLanguageID,
                 targetLanguageID: targetLanguageID,
                 promotedDraftTranslation: promotedDraftTranslation,
-                translationContext: sentence.translationContext
+                translationContext: sentence.translationContext,
+                minimumDisplayDuration: minimumDisplayDuration
             )
 
             rememberRecognizedSentence(sourceText)
@@ -2785,7 +2801,7 @@ final class AppModel: ObservableObject {
     /// holdDisplayedCaption
     /// Keeps the current caption visible, extending the hold if a late translation appears mid-display.
     private func holdDisplayedCaption(_ caption: QueuedCaption, initialHoldDuration: Double) async -> Bool {
-        var targetDuration = initialHoldDuration
+        var targetDuration = max(initialHoldDuration, caption.minimumDisplayDuration)
         var observedLateTranslationAt = Date.distantPast
 
         while Task.isCancelled == false {
@@ -2813,9 +2829,9 @@ final class AppModel: ObservableObject {
                let state = overlayState,
                state.translatedText.isEmpty == false {
                 observedLateTranslationAt = displayedCaptionLastVisualUpdateAt
-                targetDuration = computeDisplayDuration(
-                    sourceText: state.sourceText,
-                    translatedText: state.translatedText
+                targetDuration = max(
+                    caption.minimumDisplayDuration,
+                    computeDisplayDuration(sourceText: state.sourceText, translatedText: state.translatedText)
                 )
                 continue
             }
@@ -3332,6 +3348,7 @@ private struct QueuedCaption: Identifiable, Equatable {
     let targetLanguageID: String
     let promotedDraftTranslation: String?
     let translationContext: SentenceTranslationContext?
+    let minimumDisplayDuration: TimeInterval
 }
 
 struct TranscriptEntry: Identifiable, Equatable {
