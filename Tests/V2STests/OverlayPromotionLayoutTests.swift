@@ -46,7 +46,7 @@ final class OverlayPromotionLayoutTests: XCTestCase {
         }
     }
 
-    func testFirstSplitSentenceStaysVisibleWhileTheSecondWaits() async throws {
+    func testBothSplitSentencesRemainVisibleAfterPromotion() async throws {
         guard ProcessInfo.processInfo.environment["V2S_OVERLAY_LAYOUT_INTEGRATION"] == "1" else {
             throw XCTSkip("Set V2S_OVERLAY_LAYOUT_INTEGRATION=1 to render the native overlay")
         }
@@ -69,7 +69,9 @@ final class OverlayPromotionLayoutTests: XCTestCase {
         draft.setDraftTranslation("我回来了。欢迎回来。", sourceText: source, promotionID: id)
         model.previewOverlayForTesting(draft)
         let host = NSHostingView(rootView: OverlayView(model: model, interactionState: OverlayInteractionState()))
-        let size = NSSize(width: 540, height: 150)
+        // Leave room for both sentences. A short window can conceal a missing
+        // history entry and falsely pass a test that only checks the latest line.
+        let size = NSSize(width: 540, height: 240)
         let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10000, y: -10000), size: size),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -77,9 +79,11 @@ final class OverlayPromotionLayoutTests: XCTestCase {
         host.frame = NSRect(origin: .zero, size: size)
         window.orderBack(nil)
         defer { window.close(); model.stopSession() }
-        try await Task.sleep(nanoseconds: 200_000_000)
+        // Reproduce the recorded greeting's mature draft. Native window/font
+        // setup can itself add exposure, so a fixed 1.5s formal hold assertion
+        // would contradict the new credit for text already read in the draft.
+        try await Task.sleep(nanoseconds: 2_892_000_000)
         let before = try snapshot(host, name: "split-draft")
-        let start = Date()
         for index in sentences.indices {
             let context = try XCTUnwrap(SentenceTranslationContext(sentences: sentences, sentenceIndex: index, draftSegmentID: id))
             model.enqueueRecognizedSentence(
@@ -90,23 +94,55 @@ final class OverlayPromotionLayoutTests: XCTestCase {
         }
         model.receiveDraftForTesting(nil)
         try await Task.sleep(nanoseconds: 80_000_000)
-        let during = try snapshot(host, name: "split-first-promoted")
-        let remaining = max(0, 1.5 - Date().timeIntervalSince(start))
-        try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
         XCTAssertEqual(model.overlayState?.sourceText, sentences[0])
         XCTAssertEqual(model.overlayState?.translatedText, "我回来了。")
         XCTAssertTrue(model.overlayState?.history.isEmpty == true)
         XCTAssertEqual(model.transcriptEntries.map(\.sourceText), sentences)
-        let after = try snapshot(host, name: "split-first-reading")
+        // Pixel analysis is synchronous and can take longer than this caption's
+        // one-second remaining hold. Assert state before capture; timing itself
+        // is exercised without bitmap work in CaptionLatencyTests.
+        let during = try snapshot(host, name: "split-first-promoted")
         XCTAssertFalse(before.isEmpty)
-        for rows in [during, after] {
-            XCTAssertEqual(rows.count, before.count)
-            for (a, b) in zip(before, rows) {
+        XCTAssertEqual(during.count, before.count)
+        for (a, b) in zip(before, during) {
+            XCTAssertEqual(a.lowerBound, b.lowerBound, accuracy: 1)
+            XCTAssertEqual(a.upperBound, b.upperBound, accuracy: 1)
+        }
+        print("SPLIT LAYOUT: draft=\(before), first=\(during)")
+
+        // The preceding sentence must remain visible without scrolling when the
+        // second arrives. Counting only transcript entries missed this regression.
+        let secondDeadline = Date().addingTimeInterval(4)
+        while model.overlayState?.sourceText != sentences[1], Date() < secondDeadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(model.overlayState?.sourceText, sentences[1])
+        XCTAssertEqual(model.overlayState?.history.map(\.sourceText), [sentences[0]])
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let second = try snapshot(host, name: "split-second-reading")
+        let archiveDeadline = Date().addingTimeInterval(4)
+        while model.overlayState?.sourceText.isEmpty == false, Date() < archiveDeadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(model.overlayState?.history.map(\.sourceText), sentences)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let archived = try snapshot(host, name: "split-finished")
+        for rows in [second, archived] {
+            XCTAssertEqual(rows.count, 4, "Both sentences must remain visible; do not hide every preceding sentence")
+            for (a, b) in zip(before, rows.suffix(2)) {
                 XCTAssertEqual(a.lowerBound, b.lowerBound, accuracy: 1)
                 XCTAssertEqual(a.upperBound, b.upperBound, accuracy: 1)
             }
         }
-        print("SPLIT LAYOUT: draft=\(before), first=\(during), reading=\(after)")
+        print("SPLIT RETENTION: draft=\(before), second=\(second), archived=\(archived)")
+
+        // A larger window must show both sentences automatically, without making
+        // the user scroll back just to recover the previous sentence.
+        window.setContentSize(NSSize(width: 540, height: 420))
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let history = try snapshot(host, name: "split-full-history")
+        XCTAssertEqual(history.count, 4)
+        XCTAssertEqual(model.overlayHistoryScrollOffset, 0)
     }
 
     private func checkPromotion(
