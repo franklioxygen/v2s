@@ -1,4 +1,3 @@
-import CoreMedia
 import XCTest
 @testable import v2s
 
@@ -58,76 +57,81 @@ final class LiveTranscriptionSessionTests: XCTestCase {
         )
     }
 
-    func testCompletedSentenceBoundaryEndsAtLastCompletedSentenceBeforeMoreSpeech() {
-        let boundary = LiveTranscriptionSession.completedSentenceBoundary(in: [
-            run("Hello", at: 0.4), run(" there.", at: 0.9),
-            run(" How", at: 1.3), run(" are you?", at: 2.0),
-            run(" I", at: 2.4), run(" was", at: 2.7)
-        ])
-
-        XCTAssertEqual(boundary, seconds(2.0))
+    func testJapaneseClauseEndingOnACommaIsAFragment() {
+        XCTAssertTrue(isFragment("最初は水をあげすぎてしまい、", language: "ja"))
+        XCTAssertTrue(isFragment("そこで近所の園芸店の方に相談したところ、", language: "ja"))
     }
 
-    // A draft that ends on its terminator is left to the pause timers, which finalize
-    // everything taken so far.
-    func testCompletedSentenceBoundaryIgnoresTextEndingOnSentence() {
-        XCTAssertNil(LiveTranscriptionSession.completedSentenceBoundary(in: [
-            run("Hello", at: 0.4), run(" there.", at: 0.9)
-        ]))
+    func testJapaneseClauseEndingOnAParticleIsAFragment() {
+        XCTAssertTrue(isFragment("ベランダに小さなプランターをいくつか置いて", language: "ja"))
+        XCTAssertTrue(isFragment("来年は", language: "ja"))
+        XCTAssertTrue(isFragment("もし皆さんも興味があれば。", language: "ja"))
     }
 
-    func testCompletedSentenceBoundaryIgnoresTextWithoutCompletedSentence() {
-        XCTAssertNil(LiveTranscriptionSession.completedSentenceBoundary(in: [
-            run("I", at: 0.2), run(" think", at: 0.5), run(" that", at: 0.8)
-        ]))
+    // The transcriber can close a lone connective or particle with a full stop at a pause.
+    func testJapaneseConnectiveOrParticleClosedByAPauseIsAFragment() {
+        XCTAssertTrue(isFragment("そこで。", language: "ja"))
+        XCTAssertTrue(isFragment("ただ。", language: "ja"))
+        XCTAssertTrue(isFragment("は。", language: "ja"))
+        XCTAssertTrue(isFragment("も", language: "ja"))
     }
 
-    func testCompletedSentenceBoundaryDoesNotSplitAfterTitleAbbreviation() {
-        XCTAssertNil(LiveTranscriptionSession.completedSentenceBoundary(in: [
-            run("Ask", at: 0.3), run(" Mr.", at: 0.7), run(" Smith", at: 1.2)
-        ]))
+    func testCompleteJapaneseSentencesAreNotFragments() {
+        XCTAssertFalse(isFragment("トマトとバジルを育て始めました。", language: "ja"))
+        XCTAssertFalse(isFragment("皆さん、こんにちは。", language: "ja"))
+        XCTAssertFalse(isFragment("こんにちは", language: "ja"))
+        XCTAssertFalse(isFragment("はい", language: "ja"))
+        XCTAssertFalse(isFragment("本当ですか？", language: "ja"))
     }
 
-    // Punctuation can come as its own run with no audio range; the sentence then ends
-    // with the last word that has one.
-    func testCompletedSentenceBoundaryUsesLastTimedRunForBarePunctuation() {
-        let boundary = LiveTranscriptionSession.completedSentenceBoundary(in: [
-            run("Yes", at: 0.5), (text: "。", audioEnd: nil), run("それで", at: 1.4)
-        ])
-
-        XCTAssertEqual(boundary, seconds(0.5))
+    func testEnglishClauseEndingOnAConjunctionIsAFragment() {
+        XCTAssertTrue(isFragment("I went to the store and", language: "en"))
+        XCTAssertTrue(isFragment("Over the last decade,", language: "en"))
+        XCTAssertFalse(isFragment("I went to the store.", language: "en"))
     }
 
-    func testModernVADFinalizationDefersDanglingEnglishConjunction() {
-        XCTAssertTrue(defersVADFinalization("I went to the store and", language: "en"))
-        XCTAssertTrue(defersVADFinalization("because", language: "en"))
-        XCTAssertFalse(defersVADFinalization("I went to the store", language: "en"))
-        XCTAssertFalse(defersVADFinalization("Brand new.", language: "en"))
+    func testOtherLanguagesOnlyTreatACommaAsAFragmentEnding() {
+        XCTAssertTrue(isFragment("我们先去，", language: "zh"))
+        XCTAssertFalse(isFragment("我们先去", language: "zh"))
     }
 
-    func testModernVADFinalizationDefersJapaneseParticle() {
-        XCTAssertTrue(defersVADFinalization("雨が降ったので", language: "ja"))
-        XCTAssertFalse(defersVADFinalization("雨が降りました。", language: "ja"))
+    func testHeldFragmentJoinsTheNextTextWithoutItsPauseFullStop() {
+        XCTAssertEqual(join("そこで。", "近所の方に相談しました。", language: "ja"), "そこで近所の方に相談しました。")
+        XCTAssertEqual(join("最初は水をあげすぎてしまい、", "葉っぱが黄色くなりました。", language: "ja"), "最初は水をあげすぎてしまい、葉っぱが黄色くなりました。")
+        XCTAssertEqual(join("I went to the store and", "bought milk.", language: "en"), "I went to the store and bought milk.")
     }
 
-    func testModernVADFinalizationDefersTitleAbbreviationInAnyLanguage() {
-        XCTAssertTrue(defersVADFinalization("Ask Dr.", language: nil))
+    func testHeldFragmentIsNotRepeatedWhenTheNextTextAlreadyOpensWithIt() {
+        XCTAssertEqual(join("ただ。", "ただ台風の時期には大変でした。", language: "ja"), "ただ台風の時期には大変でした。")
     }
 
-    func testModernVADFinalizationDoesNotDeferEmptyDraft() {
-        XCTAssertFalse(defersVADFinalization("  ", language: "en"))
+    func testHeldFragmentJoinKeepsEitherSideWhenTheOtherIsEmpty() {
+        XCTAssertEqual(join("", "近所の方に相談しました。", language: "ja"), "近所の方に相談しました。")
+        XCTAssertEqual(join("そこで。", "  ", language: "ja"), "そこで。")
     }
 
-    private func run(_ text: String, at audioEndSeconds: Double) -> (text: String, audioEnd: CMTime?) {
-        (text: text, audioEnd: seconds(audioEndSeconds))
+    // A reissued sentence often differs only in kana or a word, and must not be joined
+    // to a held fragment.
+    func testReissuedSentenceIsNearlyTheSameAsTheCommittedOne() {
+        XCTAssertTrue(nearlySame("きゅうりやナスにも挑戦してみたいと考えています。", "きゅうりやなスにも挑戦してみたいと考えています。"))
+        XCTAssertTrue(nearlySame("スーパーで買うものよりもずっと甘く感じます。", "スーパーで買うものよりもずっと甘く感じます"))
+        XCTAssertFalse(nearlySame("スーパーで買うものよりもずっと甘く感じます。", "台風の時期にはとても大変でした。"))
+        XCTAssertFalse(nearlySame("はい。", "いいえ。"))
     }
 
-    private func seconds(_ value: Double) -> CMTime {
-        CMTime(seconds: value, preferredTimescale: 1_000)
+    private func nearlySame(_ lhs: String, _ rhs: String) -> Bool {
+        LiveTranscriptionSession.isNearlySameSentence(
+            LiveTranscriptionSession.comparableModernSentence(lhs),
+            LiveTranscriptionSession.comparableModernSentence(rhs)
+        )
     }
 
-    private func defersVADFinalization(_ text: String, language: String?) -> Bool {
-        LiveTranscriptionSession.shouldDeferModernVADFinalization(of: text, languageCode: language)
+    private func isFragment(_ text: String, language: String?) -> Bool {
+        LiveTranscriptionSession.isModernSentenceFragment(text, languageCode: language)
+    }
+
+    private func join(_ fragment: String, _ text: String, language: String?) -> String {
+        LiveTranscriptionSession.joiningHeldFragment(fragment, to: text, languageCode: language)
     }
 
     private func disposition(

@@ -44,13 +44,11 @@ final class AppModel: ObservableObject {
     private var captionTranslationTasks: [UUID: Task<Void, Never>] = [:]
     private var pendingCaptions: [QueuedCaption] = []
     private var readyCaptionTranslations: [UUID: String] = [:]
-    private var skippedCaptionsAwaitingTranslation: [QueuedCaption] = []
     private var captionTranslationWaiters: [UUID: [UUID: CheckedContinuation<String?, Never>]] = [:]
     private var displayedCaption: QueuedCaption?
     private var isBootstrapping = true
     private var usesSystemInterfaceLanguage = true
     private var draftTranslationTask: Task<Void, Never>?
-    private var draftClearTask: Task<Void, Never>?
     private var committedCaptionArchiveTask: Task<Void, Never>?
     private var languageResourcePreparationTask: Task<Void, Never>?
     private var languageCatalogRefreshTask: Task<Void, Never>?
@@ -62,15 +60,16 @@ final class AppModel: ObservableObject {
     private var lastDraftTranslationSource = ""
     private var lastDraftTranslationPromotionID: UUID?
     private var draftTranslationGeneration: Int = 0
-    private var draftClearGeneration: Int = 0
     private var displayedCaptionLastVisualUpdateAt = Date.distantPast
-    private var displayedCaptionLastVisualUpdateWasLateTranslation = false
+    private var draftReadingExposure: DraftReadingExposure?
+    private var displayedCaptionDraftReadingCredit: TimeInterval = 0
     // Committed translation per caption; late translations may only replace
     // displayed text that still matches what this pipeline committed.
     private var translationRevisions: [UUID: String] = [:]
     private var recentRecognizedCaptionTexts: [RecentRecognizedCaption] = []
     private var recentArchivedCaption: RecentArchivedCaption?
     private var finalizedDraftPromotionIDs: [(id: UUID, time: Date)] = []
+    private var recentRecognitionIDs: [UUID] = []
     private var transcriptInputLanguageID: String?
     private var transcriptOutputLanguageID: String?
     private var statusDescriptor: StatusDescriptor = .ready
@@ -78,7 +77,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var microphoneSources: [InputSource] = []
     @Published private(set) var sessionState: SessionState = .idle
     @Published private(set) var statusMessage = ""
-    @Published private(set) var overlayState: OverlayPreviewState?
+    @Published private(set) var overlayState: OverlayPreviewState? {
+        didSet { trackDraftReadingExposure() }
+    }
     @Published private(set) var languageResourceStatuses: [LanguageResourceStatus] = []
     @Published private(set) var speechLanguageOptions = LanguageCatalog.speechInput
     /// Speech languages this Mac can recognize without sending audio to Apple.
@@ -1210,7 +1211,7 @@ final class AppModel: ObservableObject {
             return nil
         }
 
-        let transcriber = LiveTranscriptionSession.makeSpeechTranscriber(locale: resolvedLocale)
+        let transcriber = makeSpeechTranscriber(locale: resolvedLocale)
 
         do {
             try await ensureSpeechAssetsReady(
@@ -1578,6 +1579,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @available(macOS 26.0, *)
+    private func makeSpeechTranscriber(locale: Locale) -> SpeechTranscriber {
+        SpeechTranscriber(
+            locale: locale,
+            transcriptionOptions: [],
+            reportingOptions: [.volatileResults, .fastResults],
+            attributeOptions: [.audioTimeRange, .transcriptionConfidence]
+        )
+    }
+
     private func normalizedProgressValue(_ fractionCompleted: Double) -> Double? {
         guard fractionCompleted.isFinite, fractionCompleted >= 0 else {
             return nil
@@ -1636,6 +1647,56 @@ final class AppModel: ObservableObject {
 
     // MARK: - Draft handler
 
+    private func trackDraftReadingExposure() {
+        guard let state = overlayState, let id = state.draftPromotionID,
+              let source = state.draftSourceText, !source.isEmpty else {
+            draftReadingExposure = nil
+            return
+        }
+        // A provisional translation of an older source revision cannot earn
+        // reading time for the eventual corrected caption.
+        let translation = showsTranslatedSubtitle
+            ? state.currentDraftTranslatedText(for: source, promotionID: id) : nil
+        guard !showsTranslatedSubtitle || translation != nil else {
+            draftReadingExposure = nil
+            return
+        }
+        if let old = draftReadingExposure, old.id == id, old.sourceText == source,
+           old.translatedText == translation, old.mode == subtitleDisplayMode { return }
+        draftReadingExposure = DraftReadingExposure(id: id, sourceText: source,
+                                                   translatedText: translation, mode: subtitleDisplayMode, since: Date())
+    }
+
+    private func draftReadingDuration(for sentence: RecognizedSentence, sourceText: String,
+                                      translatedText: String?, sourceID: String,
+                                      sourceLanguageID: String, targetLanguageID: String) -> TimeInterval {
+        guard let exposure = draftReadingExposure,
+              exposure.id == (sentence.promotionSegmentID ?? sentence.translationContext?.draftSegmentID),
+              exposure.mode == subtitleDisplayMode,
+              lastDraftSourceID == sourceID,
+              activeDraftSourceLanguageID == sourceLanguageID,
+              activeDraftTargetLanguageID == targetLanguageID else { return 0 }
+        if let context = sentence.translationContext {
+            guard context.matchesCaption(sourceText), context.matchesPassage(exposure.sourceText) else { return 0 }
+        } else {
+            guard SentenceTranslationContext.equivalentSource(sourceText, exposure.sourceText) else { return 0 }
+        }
+        if showsTranslatedSubtitle {
+            guard let translatedText,
+                  translatedText == (sentence.translationContext?.translatedSentence(from: exposure.translatedText ?? "")
+                    ?? exposure.translatedText) else { return 0 }
+        }
+        let elapsed = max(0, Date().timeIntervalSince(exposure.since))
+        guard elapsed >= 0.5 else { return 0 }
+        // Divide the shared draft exposure between its sentences. Giving every
+        // sentence the whole interval would multiply the reader's available time.
+        let sentenceLength = (showsOriginalSubtitle ? sourceText.count : 0)
+            + (showsTranslatedSubtitle ? (translatedText?.count ?? 0) : 0)
+        let passageLength = (showsOriginalSubtitle ? exposure.sourceText.count : 0)
+            + (showsTranslatedSubtitle ? (exposure.translatedText?.count ?? 0) : 0)
+        return min(elapsed, 6.0) * min(1, Double(sentenceLength) / Double(max(1, passageLength)))
+    }
+
     private func handlePartialDraft(
         _ draft: DraftSegment?,
         source: InputSource,
@@ -1650,15 +1711,13 @@ final class AppModel: ObservableObject {
         let draftText = sanitizedDisplayText(draft?.sourceText ?? "")
         let draftPromotionID = draft?.segmentId
         if draftText.isEmpty {
-            if isDraftPromotionPending() {
-                return
-            }
-            scheduleDraftClear()
+            // An empty recognizer update is not a replacement caption. Final
+            // results may still be queued, so retain the draft until its own
+            // committed caption, a newer draft, or a session reset replaces it.
             return
         }
 
         cancelCommittedCaptionArchive()
-        cancelPendingDraftClear()
         activeDraftSourceLanguageID = sourceLanguageID
         activeDraftTargetLanguageID = targetLanguageID
         overlayState?.draftSourceText = draftText
@@ -1706,38 +1765,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func scheduleDraftClear() {
-        draftClearTask?.cancel()
-        draftClearGeneration &+= 1
-        let generation = draftClearGeneration
-
-        draftClearTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-
-            do {
-                try await Task.sleep(nanoseconds: Self.draftClearDelayNanoseconds)
-            } catch {
-                return
-            }
-
-            guard !Task.isCancelled,
-                  liveTranscriptionSession != nil,
-                  generation == draftClearGeneration else { return }
-
-            clearDraftOverlay()
-            scheduleCommittedCaptionArchiveIfNeeded()
-        }
-    }
-
-    private func cancelPendingDraftClear() {
-        draftClearTask?.cancel()
-        draftClearTask = nil
-        draftClearGeneration &+= 1
-    }
-
     private func clearDraftOverlay() {
-        draftClearTask?.cancel()
-        draftClearTask = nil
         overlayState?.draftSourceText = nil
         overlayState?.draftStablePrefixLength = 0
         overlayState?.draftPromotionID = nil
@@ -1751,6 +1779,16 @@ final class AppModel: ObservableObject {
         draftTranslationTask?.cancel()
         draftTranslationTask = nil
         draftTranslationGeneration &+= 1
+    }
+
+    private func clearPromotedDraftIfReady() {
+        guard let state = overlayState,
+              let draftID = state.draftPromotionID,
+              draftID == state.committedPromotionID else { return }
+        // A visible, older draft translation can remain useful while the final
+        // source is being translated, but must not become the committed result.
+        guard !showsTranslatedSubtitle || !state.isAwaitingCommittedTranslation else { return }
+        clearDraftOverlay()
     }
 
     private func scheduleDraftTranslation(
@@ -1843,7 +1881,6 @@ final class AppModel: ObservableObject {
         overlayState?.committedPromotionID = nil
         displayedCaption = nil
         displayedCaptionLastVisualUpdateAt = Date.distantPast
-        displayedCaptionLastVisualUpdateWasLateTranslation = false
     }
 
     /// Archives the currently committed caption into the scrollback history before
@@ -1865,9 +1902,11 @@ final class AppModel: ObservableObject {
         translatedText: String,
         sourceText: String,
         promotionID: UUID? = nil,
-        bumpEpoch: Bool = false,
-        lateTranslation: Bool = false
+        bumpEpoch: Bool = false
     ) {
+        let sourceIsVisible = showsOriginalSubtitle || (showsTranslatedSubtitle && translatedText.isEmpty)
+        let visibleTextChanged = (sourceIsVisible && overlayState?.sourceText != sourceText)
+            || (showsTranslatedSubtitle && overlayState?.translatedText != translatedText)
         if bumpEpoch {
             overlayState?.captionEpoch = (overlayState?.captionEpoch ?? 0) + 1
         }
@@ -1877,8 +1916,14 @@ final class AppModel: ObservableObject {
         if let promotionID {
             overlayState?.committedPromotionID = promotionID
         }
-        displayedCaptionLastVisualUpdateAt = Date()
-        displayedCaptionLastVisualUpdateWasLateTranslation = lateTranslation
+        // A repeated result (or a translation hidden in original-only mode) has
+        // not given the reader new text. Only actual visible changes restart the
+        // clock; a new caption still gets its own time even if its words repeat.
+        if bumpEpoch || visibleTextChanged {
+            displayedCaptionLastVisualUpdateAt = Date()
+            displayedCaptionDraftReadingCredit = 0
+        }
+        clearPromotedDraftIfReady()
     }
 
     // MARK: - Settings sync
@@ -1898,6 +1943,9 @@ final class AppModel: ObservableObject {
     }
 
     private func handleSubtitleDisplayModeChange() {
+        displayedCaptionDraftReadingCredit = 0
+        draftReadingExposure = nil
+        trackDraftReadingExposure()
         guard liveTranscriptionSession != nil else {
             return
         }
@@ -1938,6 +1986,7 @@ final class AppModel: ObservableObject {
             overlayState?.clearDraftTranslation()
         }
 
+        clearPromotedDraftIfReady()
         scheduleCommittedCaptionArchiveIfNeeded()
     }
 
@@ -1962,7 +2011,7 @@ final class AppModel: ObservableObject {
 
     // MARK: - Caption queue
 
-    private func enqueueRecognizedSentence(
+    func enqueueRecognizedSentence(
         _ sentence: RecognizedSentence,
         source: InputSource,
         sourceLanguageID: String,
@@ -1973,16 +2022,48 @@ final class AppModel: ObservableObject {
             return
         }
 
+        if let recognitionID = sentence.recognitionID {
+            guard !recentRecognitionIDs.contains(recognitionID) else { return }
+            recentRecognitionIDs.append(recognitionID)
+            if recentRecognitionIDs.count > 512 { recentRecognitionIDs.removeFirst() }
+        }
+
+        let promotedDraftTranslation = promotedDraftTranslationSnapshot(
+            for: sentence.promotionSegmentID ?? sentence.translationContext?.draftSegmentID,
+            sourceText: sourceText,
+            sourceID: source.id,
+            sourceLanguageID: sourceLanguageID,
+            targetLanguageID: targetLanguageID,
+            context: sentence.translationContext
+        )
+        let draftReadingDuration = draftReadingDuration(
+            for: sentence, sourceText: sourceText, translatedText: promotedDraftTranslation,
+            sourceID: source.id, sourceLanguageID: sourceLanguageID, targetLanguageID: targetLanguageID
+        )
+
+        // A combined draft needs a fresh reading window for its first finalized
+        // sentence. Preserve sentence boundaries; only delay the next caption.
+        var minimumDisplayDuration: TimeInterval = 0
+        if let context = sentence.translationContext,
+           context.sentenceIndex == 0,
+           sentence.promotionSegmentID == context.draftSegmentID,
+           overlayState?.draftPromotionID == context.draftSegmentID,
+           lastDraftSourceID == source.id,
+           activeDraftSourceLanguageID == sourceLanguageID,
+           activeDraftTargetLanguageID == targetLanguageID,
+           context.matchesPassage(overlayState?.draftSourceText ?? "") {
+            minimumDisplayDuration = 2.0
+        }
+
         if let promotionID = sentence.promotionSegmentID {
             guard isFinalizedDraftPromotionID(promotionID) == false else {
                 return
             }
 
-            let promotedDraftTranslation = promotedDraftTranslationSnapshot(for: sentence.promotionSegmentID)
             markDraftPromotionFinalized(promotionID)
             cancelCommittedCaptionArchive()
 
-            guard shouldEnqueueRecognizedSentence(sourceText, promotionID: promotionID) else {
+            guard sentence.recognitionID != nil || shouldEnqueueRecognizedSentence(sourceText, promotionID: promotionID) else {
                 return
             }
 
@@ -1993,7 +2074,11 @@ final class AppModel: ObservableObject {
                 sourceName: source.name,
                 sourceLanguageID: sourceLanguageID,
                 targetLanguageID: targetLanguageID,
-                promotedDraftTranslation: promotedDraftTranslation
+                promotedDraftTranslation: promotedDraftTranslation,
+                translationContext: sentence.translationContext,
+                minimumDisplayDuration: minimumDisplayDuration,
+                draftReadingDuration: draftReadingDuration,
+                draftReadingMode: subtitleDisplayMode
             )
 
             rememberRecognizedSentence(sourceText)
@@ -2003,7 +2088,7 @@ final class AppModel: ObservableObject {
         } else {
             cancelCommittedCaptionArchive()
 
-            guard shouldEnqueueRecognizedSentence(sourceText) else {
+            guard sentence.recognitionID != nil || shouldEnqueueRecognizedSentence(sourceText) else {
                 return
             }
 
@@ -2014,7 +2099,11 @@ final class AppModel: ObservableObject {
                 sourceName: source.name,
                 sourceLanguageID: sourceLanguageID,
                 targetLanguageID: targetLanguageID,
-                promotedDraftTranslation: nil
+                promotedDraftTranslation: promotedDraftTranslation,
+                translationContext: sentence.translationContext,
+                minimumDisplayDuration: minimumDisplayDuration,
+                draftReadingDuration: draftReadingDuration,
+                draftReadingMode: subtitleDisplayMode
             )
 
             rememberRecognizedSentence(sourceText)
@@ -2023,15 +2112,9 @@ final class AppModel: ObservableObject {
             translateCaption(caption)
         }
 
-        // Keep the currently displayed caption plus up to two fresh arrivals.
-        // This avoids losing the first sentence when a single ASR result is split
-        // into two back-to-back captions.
-        while pendingCaptions.count > 3 {
-            let dropped = pendingCaptions.remove(at: 1)
-            keepTranslatingSkippedCaption(dropped)
-            updateReadyCaptionTranslation(nil, for: dropped.id)
-        }
-
+        // Finalized captions are a FIFO, not disposable draft revisions. A burst
+        // must wait its turn: dropping index 1 skipped unseen sentences whenever
+        // the next recognizer result arrived before the current reading time ended.
         processCaptionQueueIfNeeded()
 
         // Record speech rate for speed-protection monitor
@@ -2045,9 +2128,9 @@ final class AppModel: ObservableObject {
         setStatus(.running(sourceName: activeSourceDisplayName))
     }
 
-    /// Writes the caption to the transcript as soon as it is recognized, so sentences
-    /// skipped on the overlay or still queued when the session stops are kept, in
-    /// spoken order. The display path and late translations update the entry in place.
+    /// Writes the caption to the transcript as soon as it is recognized, including
+    /// captions still queued when the session stops. The display path and late
+    /// translations update the entry in place, in spoken order.
     private func recordCaptionInTranscript(_ caption: QueuedCaption) {
         guard caption.sourceLanguageID != caption.targetLanguageID else {
             upsertTranscriptEntry(
@@ -2060,7 +2143,8 @@ final class AppModel: ObservableObject {
 
         let initialTranslation = initialCaptionTranslation(for: caption) ?? ""
         if initialTranslation.isEmpty == false {
-            // Let the final translation replace the draft translation when it arrives.
+            // Track app-owned text for late updates. A validated promoted translation
+            // is also used by translatedText(for:), so completion preserves it.
             translationRevisions[caption.id] = initialTranslation
         }
 
@@ -2078,27 +2162,6 @@ final class AppModel: ObservableObject {
             ?? (caption.promotedDraftTranslation?.isEmpty == false ? caption.promotedDraftTranslation : nil)
     }
 
-    /// A caption skipped on the overlay is still in the transcript, so keep translating it
-    /// for applyLateCaptionTranslation to backfill, but behind the captions still to be
-    /// shown so it can't delay them.
-    private func keepTranslatingSkippedCaption(_ caption: QueuedCaption) {
-        guard caption.sourceLanguageID != caption.targetLanguageID,
-              readyCaptionTranslations[caption.id] == nil else {
-            return
-        }
-
-        skippedCaptionsAwaitingTranslation.append(caption)
-        translateCaption(caption, priority: .background)
-    }
-
-    /// Recovery and refresh cancel every queued translation, so reissue the ones skipped
-    /// captions still need for their transcript entries.
-    private func retranslateSkippedCaptions() {
-        for caption in skippedCaptionsAwaitingTranslation {
-            translateCaption(caption, priority: .background)
-        }
-    }
-
     private func refreshCaptionTranslations() {
         guard liveTranscriptionSession != nil else {
             return
@@ -2110,7 +2173,6 @@ final class AppModel: ObservableObject {
         for caption in pendingCaptions {
             translateCaption(caption)
         }
-        retranslateSkippedCaptions()
 
         if let displayedCaption {
             Task { @MainActor [weak self] in
@@ -2131,8 +2193,7 @@ final class AppModel: ObservableObject {
 
                 updateCommittedOverlay(
                     translatedText: resolvedTranslation,
-                    sourceText: displayedCaption.sourceText,
-                    lateTranslation: translationExpected && resolvedTranslation.isEmpty == false
+                    sourceText: displayedCaption.sourceText
                 )
                 upsertTranscriptEntry(
                     id: displayedCaption.id,
@@ -2173,6 +2234,35 @@ final class AppModel: ObservableObject {
         transcriptEntries.isEmpty == false
     }
 
+#if DEBUG
+    /// Drives the real overlay in rendering tests without opening an audio device.
+    func previewOverlayForTesting(_ state: OverlayPreviewState) {
+        // Keep asynchronous source-catalog refreshes from replacing the test state
+        // with the idle preview, just as an active capture would.
+        liveTranscriptionSession = liveTranscriptionSession ?? LiveTranscriptionSession()
+        overlayState = state
+        sessionState = .running
+        activeDraftSourceLanguageID = state.hasActiveDraftLayer ? "ja" : nil
+        activeDraftTargetLanguageID = state.hasActiveDraftLayer ? "zh-Hans" : nil
+    }
+
+    func receiveDraftForTesting(_ draft: DraftSegment?, source: InputSource = .preview, language: String = "ja", target: String = "zh-Hans") {
+        handlePartialDraft(draft, source: source, sourceLanguageID: language, targetLanguageID: target)
+    }
+
+    func finishCaptionTranslationForTesting(promotionID: UUID, text: String) {
+        guard let caption = pendingCaptions.first(where: { $0.promotionID == promotionID })
+            ?? displayedCaption.flatMap({ $0.promotionID == promotionID ? $0 : nil }) else { return }
+        finishCaptionTranslationForTesting(captionID: caption.id, text: text)
+    }
+
+    func finishCaptionTranslationForTesting(captionID: UUID, text: String) {
+        captionTranslationTasks[captionID]?.cancel()
+        captionTranslationTasks[captionID] = nil
+        updateReadyCaptionTranslation(text, for: captionID)
+    }
+#endif
+
     func transcriptText(isTranslation: Bool) -> String {
         transcriptEntries
             .map { isTranslation ? $0.translatedText : $0.sourceText }
@@ -2200,8 +2290,6 @@ final class AppModel: ObservableObject {
     private func resetLiveTextPipeline() {
         captionDisplayTask?.cancel()
         captionDisplayTask = nil
-        draftClearTask?.cancel()
-        draftClearTask = nil
         draftTranslationTask?.cancel()
         draftTranslationTask = nil
         committedCaptionArchiveTask?.cancel()
@@ -2213,20 +2301,21 @@ final class AppModel: ObservableObject {
         lastDraftTranslationSource = ""
         lastDraftTranslationPromotionID = nil
         draftTranslationGeneration &+= 1
-        draftClearGeneration &+= 1
         cancelCaptionTranslations()
         resumeAllCaptionTranslationWaiters()
         pendingCaptions.removeAll()
         readyCaptionTranslations.removeAll()
-        skippedCaptionsAwaitingTranslation.removeAll()
         translationRevisions.removeAll()
         recentRecognizedCaptionTexts.removeAll()
         recentArchivedCaption = nil
         finalizedDraftPromotionIDs.removeAll()
+        recentRecognitionIDs.removeAll()
         displayedCaption = nil
         overlayHistoryScrollOffset = 0
         displayedCaptionLastVisualUpdateAt = Date.distantPast
-        displayedCaptionLastVisualUpdateWasLateTranslation = false
+
+        draftReadingExposure = nil
+        displayedCaptionDraftReadingCredit = 0
 
         translationCoordinator.invalidateSession()
         translationCoordinator.reset()
@@ -2271,6 +2360,12 @@ final class AppModel: ObservableObject {
 
             // Archive the current caption before the next sentence replaces it.
             capturePreviousCaption()
+            if let previousID = displayedCaption?.promotionID,
+               overlayState?.draftPromotionID == previousID {
+                // Only retire a held draft belonging to the caption just archived.
+                // A newer utterance may already be visible below it.
+                clearDraftOverlay()
+            }
 
             // Use the best available translation for the initial committed display:
             // 1. Pre-computed caption translation (if ready)
@@ -2294,17 +2389,24 @@ final class AppModel: ObservableObject {
                 promotionID: caption.promotionID,
                 bumpEpoch: true
             )
+            if caption.draftReadingMode == subtitleDisplayMode,
+               !showsTranslatedSubtitle || initialTranslation == caption.promotedDraftTranslation {
+                displayedCaptionDraftReadingCredit = caption.draftReadingDuration
+            }
             upsertTranscriptEntry(
                 id: caption.id,
                 sourceText: caption.sourceText,
                 translatedText: initialTranslation ?? (translationExpected ? "" : caption.sourceText)
             )
             overlayState?.sourceName = caption.sourceName
-            clearDraftOverlay()
 
             let finalTranslation: String?
-            if let earlyTranslation {
-                finalTranslation = earlyTranslation
+            let needsTranslationWait = showsTranslatedSubtitle && translationExpected && initialTranslation == nil
+            if !needsTranslationWait {
+                // A validated draft translation is already final-quality text.
+                // Original-only display also has nothing visible to wait for;
+                // translation continues separately and backfills the transcript.
+                finalTranslation = earlyTranslation ?? initialTranslation
             } else {
                 // Dynamic wait: base 3s + 1s per 30 chars, capped at 15s
                 let captionCharCount = caption.sourceText.count
@@ -2326,7 +2428,7 @@ final class AppModel: ObservableObject {
             )
 
             // If nothing translated for a translation-expected caption, the session may be stuck.
-            let translationFailed = translationExpected
+            let translationFailed = needsTranslationWait
                 && resolvedTranslation.isEmpty
                 && initialTranslation == nil
 
@@ -2348,13 +2450,11 @@ final class AppModel: ObservableObject {
                 for captionToRetry in captionsToRetry {
                     translateCaption(captionToRetry)
                 }
-                retranslateSkippedCaptions()
             }
 
             updateCommittedOverlay(
                 translatedText: resolvedTranslation,
-                sourceText: caption.sourceText,
-                lateTranslation: translationExpected && resolvedTranslation.isEmpty == false
+                sourceText: caption.sourceText
             )
             upsertTranscriptEntry(
                 id: caption.id,
@@ -2367,15 +2467,7 @@ final class AppModel: ObservableObject {
                 translationRevisions.removeValue(forKey: caption.id)
             }
 
-            let holdDuration = computeDisplayDuration(
-                sourceText: caption.sourceText,
-                translatedText: resolvedTranslation
-            )
-
-            let completedHold = await holdDisplayedCaption(
-                caption,
-                initialHoldDuration: holdDuration
-            )
+            let completedHold = await holdDisplayedCaption(caption)
             if completedHold == false {
                 break
             }
@@ -2514,14 +2606,24 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func promotedDraftTranslationSnapshot(for promotionID: UUID?) -> String? {
+    private func promotedDraftTranslationSnapshot(
+        for promotionID: UUID?,
+        sourceText: String,
+        sourceID: String,
+        sourceLanguageID: String,
+        targetLanguageID: String,
+        context: SentenceTranslationContext?
+    ) -> String? {
         guard let promotionID,
               let state = overlayState,
-              let draftText = state.draftSourceText,
               state.draftPromotionID == promotionID,
-              let currentDraftTranslation = state.visibleDraftTranslatedText(
-                  for: draftText,
-                  promotionID: promotionID
+              lastDraftSourceID == sourceID,
+              activeDraftSourceLanguageID == sourceLanguageID,
+              activeDraftTargetLanguageID == targetLanguageID,
+              let currentDraftTranslation = state.promotableDraftTranslatedText(
+                  for: sourceText,
+                  promotionID: promotionID,
+                  context: context
               ) else {
             return nil
         }
@@ -2551,18 +2653,6 @@ final class AppModel: ObservableObject {
                 finalizedDraftPromotionIDs.count - Self.finalizedDraftPromotionLimit
             )
         }
-    }
-
-    private func isDraftPromotionPending() -> Bool {
-        guard let draftPromotionID = overlayState?.draftPromotionID else {
-            return false
-        }
-
-        if displayedCaption?.promotionID == draftPromotionID {
-            return true
-        }
-
-        return pendingCaptions.contains { $0.promotionID == draftPromotionID }
     }
 
     private func shouldSuppressArchivedCaptionReplay(
@@ -2678,9 +2768,6 @@ final class AppModel: ObservableObject {
 
             updateReadyCaptionTranslation(translatedText, for: caption.id)
             captionTranslationTasks[caption.id] = nil
-            if translatedText != nil {
-                skippedCaptionsAwaitingTranslation.removeAll { $0.id == caption.id }
-            }
         }
     }
 
@@ -2723,8 +2810,7 @@ final class AppModel: ObservableObject {
            state.sourceText.isEmpty == false {
             updateCommittedOverlay(
                 translatedText: translatedText,
-                sourceText: state.sourceText,
-                lateTranslation: true
+                sourceText: state.sourceText
             )
             didApplyTranslation = true
             didApplyDisplayedTranslation = true
@@ -2751,45 +2837,45 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// holdDisplayedCaption
-    /// Keeps the current caption visible, extending the hold if a late translation appears mid-display.
-    private func holdDisplayedCaption(_ caption: QueuedCaption, initialHoldDuration: Double) async -> Bool {
-        var targetDuration = initialHoldDuration
-        var observedLateTranslationAt = Date.distantPast
-
+    /// Reassess reading time while speech continues. A long sleep chosen before
+    /// the next utterance arrives used to block the entire FIFO until it expired.
+    private func holdDisplayedCaption(_ caption: QueuedCaption) async -> Bool {
         while Task.isCancelled == false {
             guard liveTranscriptionSession != nil,
-                  displayedCaption?.id == caption.id else {
+                  displayedCaption?.id == caption.id,
+                  let state = overlayState else {
                 return false
             }
 
-            let elapsed = max(0, Date().timeIntervalSince(displayedCaptionLastVisualUpdateAt))
-            let remainingDelay = max(0, targetDuration - elapsed)
-            if remainingDelay > 0 {
-                do {
-                    try await Task.sleep(nanoseconds: UInt64(remainingDelay * 1_000_000_000))
-                } catch {
-                    return false
-                }
+            let now = Date()
+            let normalDuration = computeDisplayDuration(sourceText: state.sourceText, translatedText: state.translatedText)
+            var targetDuration = max(normalDuration, caption.minimumDisplayDuration)
+            let waiting = pendingCaptions.filter { $0.id != caption.id }
+            if let next = waiting.first {
+                let isBacklogged = waiting.count >= 2 || now.timeIntervalSince(next.enqueuedAt) >= 3.0
+                // Keep at least a second for short replies; longer captions keep
+                // more reading time. The extra split-draft hold remains useful in
+                // quiet dialogue, but must not hold up a growing queue.
+                let readingFloor = min(1.6, max(1.0, normalDuration * 0.4))
+                let minimum = isBacklogged ? readingFloor : max(1.2, caption.minimumDisplayDuration)
+                let scale = isBacklogged ? 0.6 : 0.8
+                let maximum = isBacklogged ? 2.8 : 3.5
+                targetDuration = min(targetDuration, max(minimum, min(normalDuration * scale, maximum)))
+                // Stable, matching draft text has already been read. Keep an
+                // explicit formal interval, without charging that time twice.
+                targetDuration = max(readingFloor, targetDuration - displayedCaptionDraftReadingCredit)
             }
 
-            guard displayedCaption?.id == caption.id else {
+            let elapsed = max(0, now.timeIntervalSince(displayedCaptionLastVisualUpdateAt))
+            let remainingDelay = targetDuration - elapsed
+            if remainingDelay <= 0 { return true }
+            do {
+                // Also notice a newly arrived caption or a genuinely changed late
+                // translation while waiting; neither requires dropping a sentence.
+                try await Task.sleep(nanoseconds: UInt64(min(remainingDelay, 0.1) * 1_000_000_000))
+            } catch {
                 return false
             }
-
-            if displayedCaptionLastVisualUpdateWasLateTranslation,
-               displayedCaptionLastVisualUpdateAt > observedLateTranslationAt,
-               let state = overlayState,
-               state.translatedText.isEmpty == false {
-                observedLateTranslationAt = displayedCaptionLastVisualUpdateAt
-                targetDuration = computeDisplayDuration(
-                    sourceText: state.sourceText,
-                    translatedText: state.translatedText
-                )
-                continue
-            }
-
-            return true
         }
 
         return false
@@ -2851,6 +2937,13 @@ final class AppModel: ObservableObject {
             return caption.sourceText
         }
 
+        // This translation was validated against this caption's words (or its
+        // sentence in the full passage). Promotion is not a reason to replace it
+        // with a new, context-free translation. Retries and refreshes use it too.
+        if let promoted = caption.promotedDraftTranslation, !promoted.isEmpty {
+            return promoted
+        }
+
         // The committed caption display path has its own wait timeout. Keep this
         // request alive so a slow translation can still backfill overlay history
         // and transcript entries instead of being dropped permanently.
@@ -2860,6 +2953,7 @@ final class AppModel: ObservableObject {
                 caption.sourceText,
                 from: caption.sourceLanguageID,
                 to: caption.targetLanguageID,
+                context: caption.translationContext,
                 priority: priority
             )
         } catch {
@@ -3254,7 +3348,6 @@ private enum StatusDescriptor: Equatable {
 
 private extension AppModel {
     static let overlayHistoryLimit = 120
-    static let draftClearDelayNanoseconds: UInt64 = 150_000_000
     static let committedCaptionIdleArchiveDelay: TimeInterval = 0.9
     static let archivedCaptionReplaySuppressionWindow: TimeInterval = 1.8
     static let archivedCaptionReplaySimilarityThreshold = 0.18
@@ -3286,6 +3379,7 @@ private struct LanguagePairRequirement: Hashable {
 }
 
 private struct QueuedCaption: Identifiable, Equatable {
+    let enqueuedAt = Date()
     let id: UUID
     let promotionID: UUID
     let sourceText: String
@@ -3293,6 +3387,18 @@ private struct QueuedCaption: Identifiable, Equatable {
     let sourceLanguageID: String
     let targetLanguageID: String
     let promotedDraftTranslation: String?
+    let translationContext: SentenceTranslationContext?
+    let minimumDisplayDuration: TimeInterval
+    let draftReadingDuration: TimeInterval
+    let draftReadingMode: SubtitleDisplayMode
+}
+
+private struct DraftReadingExposure {
+    let id: UUID
+    let sourceText: String
+    let translatedText: String?
+    let mode: SubtitleDisplayMode
+    let since: Date
 }
 
 struct TranscriptEntry: Identifiable, Equatable {

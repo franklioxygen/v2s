@@ -8,12 +8,9 @@ enum OverlayPanelMetrics {
 struct OverlayView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var interactionState: OverlayInteractionState
-    @Namespace private var captionFlowNamespace
     @State private var renderedPassThroughBubble: OverlayPassThroughBubble?
     @State private var passThroughRevealProgress: Double = 0.0
-    @State private var lastDraftSlotHeight: CGFloat = 0.0
     @State private var lastLiveLayersHeight: CGFloat = 0.0
-    @State private var lastCommittedSlotHeight: CGFloat = 0.0
     @State private var measuredHistoryEntryHeights: [UUID: CGFloat] = [:]
 
     var body: some View {
@@ -52,9 +49,12 @@ struct OverlayView: View {
                                 )
                             }
 
-                            liveLayers(state)
-                                .background(liveLayersHeightReader)
+                            if hasCommittedCaption(state) || showsDraftLayer(state) {
+                                liveLayers(state)
+                                    .background(liveLayersHeightReader)
+                            }
                         }
+                        .padding(.bottom, Self.captionBottomInset)
                         .animation(
                             Self.captionFlowAnimation,
                             value: historyLayoutAnimationState(for: state, visibleHistoryEntries: visibleHistoryEntries)
@@ -64,24 +64,9 @@ struct OverlayView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                     .mask(continuousFlowMask)
-                    .onPreferenceChange(DraftSlotHeightPreferenceKey.self) { height in
-                        guard height > 0 else { return }
-                        let snappedHeight = ceil(height)
-                        let downwardDelta = lastDraftSlotHeight - snappedHeight
-
-                        if lastDraftSlotHeight == 0
-                            || snappedHeight >= lastDraftSlotHeight
-                            || downwardDelta >= Self.draftHeightJitterTolerance {
-                            lastDraftSlotHeight = snappedHeight
-                        }
-                    }
                     .onPreferenceChange(LiveLayersHeightPreferenceKey.self) { height in
                         guard height > 0 else { return }
                         lastLiveLayersHeight = ceil(height)
-                    }
-                    .onPreferenceChange(CommittedSlotHeightPreferenceKey.self) { height in
-                        guard height > 0 else { return }
-                        lastCommittedSlotHeight = ceil(height)
                     }
                     .onPreferenceChange(HistoryEntryHeightsPreferenceKey.self) { heights in
                         guard heights.isEmpty == false else { return }
@@ -104,9 +89,7 @@ struct OverlayView: View {
                     }
                     .onChange(of: model.sessionState) { _, newState in
                         if newState != .running {
-                            lastDraftSlotHeight = 0
                             lastLiveLayersHeight = 0
-                            lastCommittedSlotHeight = 0
                             measuredHistoryEntryHeights = [:]
                         }
                     }
@@ -134,29 +117,23 @@ struct OverlayView: View {
         VStack(alignment: .center, spacing: Self.liveStackSpacing) {
             if hasCommittedCaption(state) {
                 committedLayer(state)
-            } else if shouldReserveCommittedSlot(for: state) {
-                committedSlotPlaceholder
             }
 
-            draftLayer(state)
+            if showsDraftLayer(state) {
+                draftLayer(state)
+            }
         }
-        .animation(Self.captionFlowAnimation, value: flowAnimationState(for: state))
+        // A promoted caption occupies the same bottom row as its draft. Leaving
+        // an empty draft slot underneath it used to move the words up a full row.
+        .transaction { $0.animation = nil }
     }
 
     private func committedLayer(_ state: OverlayPreviewState) -> some View {
-        applyingPromotionTransition(
-            to: captionPair(
-                translated: state.translatedText,
-                translatedColor: baseSubtitleColor,
-                source: state.sourceText,
-                sourceColor: subtitleColor(opacity: 0.82)
-            )
-            .background(committedSlotHeightReader),
-            key: promotionKey(
-                promotionID: state.committedPromotionID,
-                sourceText: state.sourceText,
-                translatedText: state.translatedText
-            )
+        captionPair(
+            translated: state.translatedText,
+            translatedColor: baseSubtitleColor,
+            source: state.sourceText,
+            sourceColor: subtitleColor(opacity: 0.82)
         )
     }
 
@@ -187,67 +164,26 @@ struct OverlayView: View {
     // MARK: - Draft layer (50–65% opacity, stable prefix slightly brighter)
 
     private func draftLayer(_ state: OverlayPreviewState) -> some View {
-        ZStack(alignment: .top) {
-            Color.clear
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            if let draftText = state.draftSourceText, !draftText.isEmpty {
-                let visibleDraftTranslatedText = displayedDraftTranslatedText(
-                    for: state,
-                    draftText: draftText
-                )
-                applyingPromotionTransition(
-                    to: VStack(spacing: 2) {
-                        if showsTranslatedSubtitle {
-                            if let draftTranslated = visibleDraftTranslatedText {
-                                translatedText(
-                                    draftTranslated,
-                                    color: subtitleColor(opacity: 0.55)
-                                )
-                            } else if model.shouldReserveDraftTranslationSlot {
-                                Text(" ")
-                                    .font(.system(size: model.overlayStyle.scaledTranslatedFontSize, weight: .semibold))
-                                    .multilineTextAlignment(.center)
-                                    .lineLimit(nil)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .frame(maxWidth: .infinity)
-                                    .hidden()
-                                    .accessibilityHidden(true)
-                            }
-                        }
-
-                        if showsOriginalSubtitle {
-                            let prefixLen = min(state.draftStablePrefixLength, draftText.count)
-                            let stable = String(draftText.prefix(prefixLen))
-                            let mutable = String(draftText.dropFirst(prefixLen))
-
-                            captionText(
-                                draftSourceAttributedText(
-                                    stable: stable,
-                                    mutable: mutable
-                                ),
-                                rawText: draftText,
-                                fontSize: displayedSourceFontSize,
-                                weight: displayedSourceFontWeight
-                            )
-                        }
-                    }
-                    .background(draftSlotHeightReader),
-                    key: promotionKey(
-                        promotionID: state.draftPromotionID,
-                        sourceText: draftText,
-                        translatedText: visibleDraftTranslatedText ?? draftText
-                    )
-                )
-                .frame(maxWidth: .infinity, alignment: .top)
-            }
-        }
-        .frame(
-            maxWidth: .infinity,
-            minHeight: draftSlotHeight(for: state),
-            maxHeight: draftSlotHeight(for: state),
-            alignment: .top
+        let draftText = state.draftSourceText ?? ""
+        return captionPair(
+            translated: state.visibleDraftTranslatedText(for: draftText, promotionID: state.draftPromotionID) ?? "",
+            translatedColor: subtitleColor(opacity: 0.55),
+            source: draftText,
+            sourceColor: subtitleColor(opacity: 0.48),
+            draftStablePrefixLength: state.draftStablePrefixLength
         )
+    }
+
+    private func showsDraftLayer(_ state: OverlayPreviewState) -> Bool {
+        guard state.hasActiveDraftLayer else { return false }
+        // Promotion updates the committed text before clearing the draft. Avoid
+        // briefly rendering the same utterance twice during those updates.
+        return state.draftPromotionID == nil || state.draftPromotionID != state.committedPromotionID
+            || keepsDraftVisibleDuringPromotion(state)
+    }
+
+    private func keepsDraftVisibleDuringPromotion(_ state: OverlayPreviewState) -> Bool {
+        showsTranslatedSubtitle && state.isAwaitingCommittedTranslation
     }
 
     private func historyEntry(
@@ -298,31 +234,18 @@ struct OverlayView: View {
     }
 
     private func reservedFlowHeight(for state: OverlayPreviewState) -> CGFloat {
-        max(lastLiveLayersHeight, estimatedLiveLayersHeight(for: state))
+        guard hasCommittedCaption(state) || showsDraftLayer(state) else { return 0 }
+        return max(lastLiveLayersHeight, estimatedLiveLayersHeight(for: state))
     }
 
     private func hasCommittedCaption(_ state: OverlayPreviewState) -> Bool {
-        usesSourceAsTranslationFallback(
+        guard !keepsDraftVisibleDuringPromotion(state) else { return false }
+        return usesSourceAsTranslationFallback(
             translated: state.translatedText,
             source: state.sourceText
         )
             || (showsTranslatedSubtitle && state.translatedText.isEmpty == false)
             || (showsOriginalSubtitle && state.sourceText.isEmpty == false)
-    }
-
-    private func shouldReserveCommittedSlot(for state: OverlayPreviewState) -> Bool {
-        hasCommittedCaption(state) || model.shouldReserveCommittedCaptionSlot
-    }
-
-    private func flowAnimationState(for state: OverlayPreviewState) -> OverlayFlowAnimationState {
-        OverlayFlowAnimationState(
-            captionEpoch: state.captionEpoch,
-            translatedText: state.translatedText,
-            sourceText: state.sourceText,
-            committedPromotionID: state.committedPromotionID,
-            draftPromotionID: state.draftPromotionID,
-            reservesCommittedSlot: shouldReserveCommittedSlot(for: state)
-        )
     }
 
     private func historyLayoutAnimationState(
@@ -331,20 +254,9 @@ struct OverlayView: View {
     ) -> OverlayHistoryLayoutAnimationState {
         OverlayHistoryLayoutAnimationState(
             historyIDs: visibleHistoryEntries.map(\.id),
-            reservesCommittedSlot: shouldReserveCommittedSlot(for: state),
-            draftPromotionID: state.draftPromotionID
+            hasCommittedCaption: hasCommittedCaption(state),
+            draftPromotionID: showsDraftLayer(state) ? state.draftPromotionID : nil
         )
-    }
-
-    private var estimatedCommittedSlotHeight: CGFloat {
-        estimatedCaptionPairHeight(
-            showsTranslated: showsTranslatedSubtitle,
-            showsSource: showsOriginalSubtitle
-        )
-    }
-
-    private var committedSlotHeight: CGFloat {
-        max(lastCommittedSlotHeight, estimatedCommittedSlotHeight)
     }
 
     private func historyEntryHeight(for entry: OverlayHistoryEntry) -> CGFloat {
@@ -363,77 +275,15 @@ struct OverlayView: View {
     }
 
     private func estimatedLiveLayersHeight(for state: OverlayPreviewState) -> CGFloat {
-        var height = draftSlotHeight(for: state)
-
-        if shouldReserveCommittedSlot(for: state) {
-            height += committedSlotHeight + Self.liveStackSpacing
-        }
-
-        return height
-    }
-
-    private func draftSlotHeight(for state: OverlayPreviewState) -> CGFloat {
-        max(lastDraftSlotHeight, estimatedDraftRowHeight(for: state)) + Self.draftBottomInset
-    }
-
-    private func estimatedDraftRowHeight(for state: OverlayPreviewState) -> CGFloat {
-        let currentDraftTranslation = state.visibleDraftTranslatedText(
-            for: state.draftSourceText ?? "",
-            promotionID: state.draftPromotionID
-        )
-        let translatedHeight = showsTranslatedSubtitle && (
-            (currentDraftTranslation?.isEmpty == false) || model.shouldReserveDraftTranslationSlot
-        )
-            ? translatedLineHeight
-            : 0
-        let sourceHeight = showsOriginalSubtitle ? sourceLineHeight : 0
-        return translatedHeight + sourceHeight
-    }
-
-    private func displayedDraftTranslatedText(
-        for state: OverlayPreviewState,
-        draftText: String
-    ) -> String? {
-        if model.shouldReserveDraftTranslationSlot && showsOriginalSubtitle == false {
-            return draftText
-        }
-
-        guard let draftTranslated = state.visibleDraftTranslatedText(
-            for: draftText,
-            promotionID: state.draftPromotionID
-        ),
-              draftTranslated.isEmpty == false else {
-            return nil
-        }
-
-        return draftTranslated
-    }
-
-    private var draftSlotHeightReader: some View {
-        GeometryReader { proxy in
-            Color.clear
-                .preference(key: DraftSlotHeightPreferenceKey.self, value: proxy.size.height)
-        }
-    }
-
-    private var committedSlotPlaceholder: some View {
-        Color.clear
-            .frame(maxWidth: .infinity)
-            .frame(height: committedSlotHeight)
-            .accessibilityHidden(true)
+        let count = (hasCommittedCaption(state) ? 1 : 0) + (showsDraftLayer(state) ? 1 : 0)
+        let pairHeight = estimatedCaptionPairHeight(showsTranslated: showsTranslatedSubtitle, showsSource: showsOriginalSubtitle)
+        return CGFloat(count) * pairHeight + CGFloat(max(count - 1, 0)) * Self.liveStackSpacing + Self.captionBottomInset
     }
 
     private var liveLayersHeightReader: some View {
         GeometryReader { proxy in
             Color.clear
                 .preference(key: LiveLayersHeightPreferenceKey.self, value: proxy.size.height)
-        }
-    }
-
-    private var committedSlotHeightReader: some View {
-        GeometryReader { proxy in
-            Color.clear
-                .preference(key: CommittedSlotHeightPreferenceKey.self, value: proxy.size.height)
         }
     }
 
@@ -444,47 +294,12 @@ struct OverlayView: View {
         }
     }
 
-    private func promotionKey(
-        promotionID: UUID?,
-        sourceText: String,
-        translatedText: String
-    ) -> String? {
-        if let promotionID {
-            return "live-caption:\(promotionID.uuidString)"
-        }
-
-        let normalizedSource = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if normalizedSource.isEmpty == false {
-            return "live-caption:\(normalizedSource)"
-        }
-
-        let normalizedTranslation = translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard normalizedTranslation.isEmpty == false else { return nil }
-        return "live-caption:\(normalizedTranslation)"
-    }
-
-    @ViewBuilder
-    private func applyingPromotionTransition<Content: View>(
-        to content: Content,
-        key: String?
-    ) -> some View {
-        if let key {
-            content.matchedGeometryEffect(
-                id: key,
-                in: captionFlowNamespace,
-                properties: .frame,
-                anchor: .bottom
-            )
-        } else {
-            content
-        }
-    }
-
     private func captionPair(
         translated: String,
         translatedColor: Color,
         source: String,
-        sourceColor: Color
+        sourceColor: Color,
+        draftStablePrefixLength: Int? = nil
     ) -> some View {
         let usesFallback = usesSourceAsTranslationFallback(
             translated: translated,
@@ -496,40 +311,52 @@ struct OverlayView: View {
         return VStack(spacing: Self.captionPairSpacing) {
             if model.overlayStyle.translatedFirst {
                 if showsTranslatedSubtitle {
-                    translatedText(
-                        primaryTranslatedText,
-                        color: translatedColor
-                    )
+                    translationRow(primaryTranslatedText, color: translatedColor)
                 }
 
                 if showsSourceLine {
-                    sourceText(
-                        source,
-                        color: sourceColor
-                    )
+                    sourceRow(source, color: sourceColor, draftStablePrefixLength: draftStablePrefixLength)
                 }
             } else {
                 if showsSourceLine {
-                    sourceText(
-                        source,
-                        color: sourceColor
-                    )
+                    sourceRow(source, color: sourceColor, draftStablePrefixLength: draftStablePrefixLength)
                 }
 
                 if showsTranslatedSubtitle {
-                    translatedText(
-                        primaryTranslatedText,
-                        color: translatedColor
-                    )
+                    translationRow(primaryTranslatedText, color: translatedColor)
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func translationRow(_ text: String, color: Color) -> some View {
+        if text.isEmpty {
+            translatedText(" ", color: color).hidden().accessibilityHidden(true)
+        } else {
+            translatedText(text, color: color)
+        }
+    }
+
+    @ViewBuilder
+    private func sourceRow(_ text: String, color: Color, draftStablePrefixLength: Int?) -> some View {
+        if let draftStablePrefixLength {
+            let prefixLength = min(max(draftStablePrefixLength, 0), text.count)
+            captionText(
+                draftSourceAttributedText(stable: String(text.prefix(prefixLength)), mutable: String(text.dropFirst(prefixLength))),
+                rawText: text,
+                fontSize: displayedSourceFontSize,
+                weight: displayedSourceFontWeight
+            )
+        } else {
+            sourceText(text, color: color)
         }
     }
 
     /// usesSourceAsTranslationFallback
     /// Returns true when a translated slot should show source text while translation is pending.
     private func usesSourceAsTranslationFallback(translated: String, source: String) -> Bool {
-        showsTranslatedSubtitle && translated.isEmpty && source.isEmpty == false
+        showsTranslatedSubtitle && !showsOriginalSubtitle && translated.isEmpty && source.isEmpty == false
     }
 
     private var showsOriginalSubtitle: Bool {
@@ -753,8 +580,7 @@ private extension OverlayView {
         blendDuration: 0.08
     )
     static let liveStackSpacing: CGFloat = 10.0
-    static let draftBottomInset: CGFloat = 3.0
-    static let draftHeightJitterTolerance: CGFloat = 6.0
+    static let captionBottomInset: CGFloat = 3.0
     static let captionPairSpacing: CGFloat = 4.0
     static let textOutlineOffsets: [CGSize] = [
         CGSize(width: -1, height: 0),
@@ -768,38 +594,13 @@ private extension OverlayView {
     ]
 }
 
-private struct OverlayFlowAnimationState: Equatable {
-    let captionEpoch: Int
-    let translatedText: String
-    let sourceText: String
-    let committedPromotionID: UUID?
-    let draftPromotionID: UUID?
-    let reservesCommittedSlot: Bool
-}
-
 private struct OverlayHistoryLayoutAnimationState: Equatable {
     let historyIDs: [UUID]
-    let reservesCommittedSlot: Bool
+    let hasCommittedCaption: Bool
     let draftPromotionID: UUID?
-}
-
-private struct DraftSlotHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0.0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
 }
 
 private struct LiveLayersHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0.0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
-private struct CommittedSlotHeightPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0.0
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {

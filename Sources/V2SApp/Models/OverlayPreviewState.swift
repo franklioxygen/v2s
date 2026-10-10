@@ -44,6 +44,15 @@ struct OverlayPreviewState: Equatable {
         draftSourceText?.isEmpty == false
     }
 
+    /// Keep a provisional translation visible until the final caption has one.
+    /// Its text remains draft-only: it may belong to an earlier source revision.
+    var isAwaitingCommittedTranslation: Bool {
+        guard hasActiveDraftLayer, let draftPromotionID,
+              draftPromotionID == committedPromotionID,
+              translatedText.isEmpty else { return false }
+        return visibleDraftTranslatedText(for: draftSourceText ?? "", promotionID: draftPromotionID) != nil
+    }
+
     var hasHistory: Bool {
         history.isEmpty == false
     }
@@ -84,6 +93,24 @@ struct OverlayPreviewState: Equatable {
         }
 
         return draftTranslatedText
+    }
+
+    /// Promote only the translation belonging to this caption. For a split passage,
+    /// retain its context without putting the entire paragraph on the first caption.
+    func promotableDraftTranslatedText(
+        for sourceText: String,
+        promotionID: UUID?,
+        context: SentenceTranslationContext? = nil
+    ) -> String? {
+        guard let promotionID, draftTranslationPromotionID == promotionID,
+              let draftTranslationSourceText, let draftTranslatedText,
+              !draftTranslatedText.isEmpty else { return nil }
+        if let context, context.draftSegmentID == promotionID,
+           context.matchesCaption(sourceText), context.matchesPassage(draftTranslationSourceText) {
+            return context.translatedSentence(from: draftTranslatedText)
+        }
+        return SentenceTranslationContext.equivalentSource(draftTranslationSourceText, sourceText)
+            ? draftTranslatedText : nil
     }
 
     func visibleDraftTranslatedText(for sourceText: String, promotionID: UUID?) -> String? {
