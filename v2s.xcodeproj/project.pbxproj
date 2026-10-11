@@ -46,6 +46,7 @@
 		A0000000000000000000008E /* PopoverOutsideClickMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000008F /* PopoverOutsideClickMonitor.swift */; };
 		A00000000000000000000090 /* SentenceBoundaryHeuristics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000091 /* SentenceBoundaryHeuristics.swift */; };
 		A00000000000000000000094 /* TranscriptSummarizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000095 /* TranscriptSummarizer.swift */; };
+		A000000000000000000000A0 /* JapaneseSentenceAssembler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000A1 /* JapaneseSentenceAssembler.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -89,6 +90,7 @@
 		A0000000000000000000008F /* PopoverOutsideClickMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PopoverOutsideClickMonitor.swift; sourceTree = "<group>"; };
 		A00000000000000000000091 /* SentenceBoundaryHeuristics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SentenceBoundaryHeuristics.swift; sourceTree = "<group>"; };
 		A00000000000000000000095 /* TranscriptSummarizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptSummarizer.swift; sourceTree = "<group>"; };
+		A000000000000000000000A1 /* JapaneseSentenceAssembler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JapaneseSentenceAssembler.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -193,6 +195,7 @@
 				A00000000000000000000093 /* TranslationCoordinator.swift */,
 				A00000000000000000000041 /* LiveTranscriptionSession.swift */,
 				A00000000000000000000091 /* SentenceBoundaryHeuristics.swift */,
+				A000000000000000000000A1 /* JapaneseSentenceAssembler.swift */,
 				A00000000000000000000095 /* TranscriptSummarizer.swift */,
 				A00000000000000000000039 /* SettingsStore.swift */,
 				A0000000000000000000007C /* SileroVADEngine.swift */,
@@ -366,6 +369,7 @@
 				A00000000000000000000067 /* GlossaryService.swift in Sources */,
 				A00000000000000000000092 /* TranslationCoordinator.swift in Sources */,
 				A00000000000000000000090 /* SentenceBoundaryHeuristics.swift in Sources */,
+				A000000000000000000000A0 /* JapaneseSentenceAssembler.swift in Sources */,
 				A00000000000000000000094 /* TranscriptSummarizer.swift in Sources */,
 				A00000000000000000000059 /* SettingsStore.swift in Sources */,
 				A0000000000000000000007B /* SileroVADEngine.swift in Sources */,
