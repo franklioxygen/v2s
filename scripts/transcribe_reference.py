@@ -12,8 +12,10 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import math
 from pathlib import Path
-import subprocess
+# Required for local audio extraction; ffmpeg receives an argument list without a shell.
+import subprocess  # nosec B404
 
 
 def main():
@@ -24,17 +26,24 @@ def main():
     parser.add_argument('--language', default='ja')
     parser.add_argument('--model', action='append', help='Local MLX model path or HF repository; repeat for cross-checks')
     args = parser.parse_args()
-    if args.seconds <= 0:
-        parser.error('--seconds must be positive')
+    if not math.isfinite(args.seconds) or args.seconds <= 0:
+        parser.error('--seconds must be finite and positive')
+    video = args.video.resolve(strict=True)
+    if not video.is_file():
+        parser.error('--video must be a local file')
+    args.output = args.output.resolve()
     import mlx_whisper
     args.output.mkdir(parents=True, exist_ok=True)
     audio = args.output / 'audio.wav'
-    subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-n', '-i', str(args.video),
-                    '-t', str(args.seconds), '-vn', '-ac', '1', '-ar', '16000',
-                    '-c:a', 'pcm_s16le', str(audio)], check=True)
+    # Fixed tool/options, finite duration, and absolute local paths prevent option injection.
+    subprocess.run(  # nosec B603
+        ['ffmpeg', '-v', 'error', '-nostdin', '-n', '-i', str(video),
+         '-t', str(args.seconds), '-vn', '-ac', '1', '-ar', '16000',
+         '-c:a', 'pcm_s16le', str(audio)], check=True, shell=False
+    )
     models = args.model or ['mlx-community/whisper-large-v3-turbo', 'mlx-community/whisper-large-v3-mlx']
     manifest = {
-        'video': str(args.video.resolve()), 'seconds': args.seconds,
+        'video': str(video), 'seconds': args.seconds,
         'audio_sha256': hashlib.sha256(audio.read_bytes()).hexdigest(),
         'mlx_whisper_version': importlib.metadata.version('mlx-whisper'),
         'language': args.language, 'models': models,

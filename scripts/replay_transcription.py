@@ -14,7 +14,8 @@ import argparse
 import os
 from pathlib import Path
 import shutil
-import subprocess
+# Required for the local Git/Xcode tools; calls below use argument lists without a shell.
+import subprocess  # nosec B404
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +51,8 @@ def main():
     parser.add_argument('--ref', help='Git revision to compare; default: current working files')
     parser.add_argument('--tests', action='store_true', help='Also run the regular unit tests')
     args = parser.parse_args()
+    if args.ref is not None and (not args.ref or args.ref.startswith('-')):
+        parser.error('--ref must be a non-empty Git revision, not an option')
     audio = args.audio.resolve(strict=True)
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -60,8 +63,14 @@ def main():
         if args.tests:
             paths.append('Tests')
         if args.ref:
-            archive = subprocess.check_output(['git', 'archive', args.ref, '--', *paths], cwd=ROOT)
-            subprocess.run(['tar', '-x', '-C', str(project)], input=archive, check=True)
+            # The revision follows the option terminator; paths are fixed above.
+            archive = subprocess.check_output(  # nosec B603
+                ['/usr/bin/git', 'archive', '--format=tar', '--', args.ref, *paths], cwd=ROOT, shell=False
+            )
+            # Extract only our local Git archive into the newly created temporary directory.
+            subprocess.run(  # nosec B603
+                ['/usr/bin/tar', '-x', '-C', str(project)], input=archive, check=True, shell=False
+            )
         else:
             for name in paths:
                 source = ROOT / name
@@ -93,13 +102,7 @@ def main():
         tests = project / 'Tests/V2STests'
         tests.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / 'scripts/support/TranscriptionReplayTests.swift', tests / 'ReplayTests.swift')
-        command = [
-            'xcodebuild', '-scheme', 'v2s', '-destination', 'platform=macOS',
-            '-derivedDataPath', str(Path(temporary) / 'derived'), 'COREML_CODEGEN_LANGUAGE=Swift',
-        ]
-        if not args.tests:
-            command += ['-only-testing:v2sTests/ReplayTests']
-        command += ['test']
+        test_selection = [] if args.tests else ['-only-testing:v2sTests/ReplayTests']
         environment = os.environ.copy()
         environment.update({
             'TEST_RUNNER_V2S_REPLAY_AUDIO': str(audio),
@@ -111,7 +114,13 @@ def main():
         print(f'Replaying {audio.name} ({args.locale}, {args.mode}, {args.ref or "working tree"})', flush=True)
         print(f'Build/test log: {log}', flush=True)
         with log.open('w') as handle:
-            result = subprocess.run(command, cwd=project, env=environment, stdout=handle, stderr=subprocess.STDOUT)
+            # Fixed executable/options; media and locale are passed only through the environment.
+            result = subprocess.run(  # nosec B603
+                ['/usr/bin/xcodebuild', '-scheme', 'v2s', '-destination', 'platform=macOS',
+                 '-derivedDataPath', str(Path(temporary) / 'derived'), 'COREML_CODEGEN_LANGUAGE=Swift',
+                 *test_selection, 'test'],
+                cwd=project, env=environment, stdout=handle, stderr=subprocess.STDOUT, shell=False
+            )
         raw = [line.split('V2S_RECOGNITION ', 1)[1] for line in log.read_text().splitlines() if 'V2S_RECOGNITION ' in line]
         output.with_suffix('.recognition.jsonl').write_text('\n'.join(raw) + '\n')
         print(f'Audio buffers dropped: {log.read_text().count("V2S_REPLAY_DROPPED_AUDIO")}')
