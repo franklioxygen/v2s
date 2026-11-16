@@ -1,90 +1,17 @@
 import Foundation
 
-/// A presentation-only sentence window. The complete recognizer passage remains
-/// in OverlayPreviewState for revisions, contextual translation and finalization.
-struct OverlayDraftPage: Equatable {
+/// One sentence of the live draft. Every recognized sentence gets its own row
+/// as soon as it is heard; the full passage stays in OverlayPreviewState.
+struct OverlayDraftRow: Equatable {
     let sourceText: String
     let translatedText: String
     let stablePrefixLength: Int
 }
 
-struct DraftSentencePager {
-    private(set) var index = 0
-    private(set) var isPaginated = false
-    private var identity: UUID?
-    private var pages: [OverlayDraftPage] = []
-    private var visibleKey: [String] = []
-    private var visibleSince = Date.distantPast
-
-    var current: OverlayDraftPage? {
-        isPaginated && pages.indices.contains(index) ? pages[index] : nil
-    }
-
-    enum Reading: Equatable {
-        /// The pager moved past this page after its reading time.
-        case finished
-        /// The page on screen, visible with its current text since `since`.
-        case current(OverlayDraftPage, since: Date)
-    }
-
-    /// What the reader has already seen of one sentence of this draft. A
-    /// finalized sentence that no longer matches its page has not been read.
-    func reading(ofSentenceAt sentenceIndex: Int, sourceText: String, in id: UUID) -> Reading? {
-        guard isPaginated, identity == id, pages.indices.contains(sentenceIndex),
-              SentenceTranslationContext.equivalentSource(pages[sentenceIndex].sourceText, sourceText) else { return nil }
-        if sentenceIndex < index { return .finished }
-        guard sentenceIndex == index, !visibleKey.isEmpty else { return nil }
-        return .current(pages[sentenceIndex], since: visibleSince)
-    }
-
-    /// `firstPageVisibleSince` is when the first sentence became readable, if it
-    /// was already on screen as the whole draft before a second sentence arrived.
-    mutating func update(id: UUID, pages newPages: [OverlayDraftPage], paginate: Bool,
-                         showsSource: Bool, showsTranslation: Bool, now: Date,
-                         firstPageVisibleSince: Date? = nil,
-                         readingDuration: (OverlayDraftPage) -> TimeInterval) {
-        if identity != id {
-            self = DraftSentencePager()
-            identity = id
-        }
-        // A revised earlier sentence must be shown again. Appending/changing the
-        // unshown tail must not restart the current sentence's reading clock.
-        if let changed = zip(pages, newPages).enumerated().first(where: {
-            $0.element.0.sourceText != $0.element.1.sourceText
-        })?.offset, changed < index {
-            index = changed
-            visibleKey = []
-        }
-        pages = newPages
-        let wasPaginated = isPaginated
-        isPaginated = (isPaginated || paginate) && pages.count > 1
-        guard !pages.isEmpty else { index = 0; return }
-        index = min(index, pages.count - 1)
-        guard isPaginated else { return }
-        func key(_ page: OverlayDraftPage) -> [String] {
-            [showsSource ? page.sourceText : "", showsTranslation ? page.translatedText : ""]
-        }
-        if !wasPaginated, index == 0 {
-            visibleKey = key(pages[0])
-            visibleSince = min(now, firstPageVisibleSince ?? now)
-        }
-        let page = pages[index]
-        if visibleKey != key(page) {
-            visibleKey = key(page)
-            visibleSince = now
-        }
-        if showsTranslation && page.translatedText.isEmpty { visibleSince = now }
-        guard now.timeIntervalSince(visibleSince) >= readingDuration(page),
-              pages.indices.contains(index + 1),
-              !showsTranslation || !pages[index + 1].translatedText.isEmpty else { return }
-        index += 1
-        visibleKey = key(pages[index])
-        visibleSince = now
-    }
-
-    /// Only explicit sentence endings are eligible. A comma, decimal, title or
-    /// unfinished clause must never turn into an extra subtitle page.
-    static func sentences(in text: String) -> [String] {
+enum DraftSentences {
+    /// Only explicit sentence endings split a draft. A comma, decimal, title or
+    /// unfinished clause never becomes an extra row.
+    static func split(_ text: String) -> [String] {
         let parts = SentenceTranslationContext.splitSentences(text)
         guard parts.count > 1 else { return [text] }
         for (index, part) in parts.dropLast().enumerated() {

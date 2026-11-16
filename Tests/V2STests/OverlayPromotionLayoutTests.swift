@@ -46,190 +46,61 @@ final class OverlayPromotionLayoutTests: XCTestCase {
         }
     }
 
-    func testLongDraftShowsOneSentenceAndPromotesWithoutReflow() async throws {
+    func testEverySentenceHasItsOwnRowAndPromotesInPlace() async throws {
         guard ProcessInfo.processInfo.environment["V2S_OVERLAY_LAYOUT_INTEGRATION"] == "1" else {
             throw XCTSkip("Set V2S_OVERLAY_LAYOUT_INTEGRATION=1 to render the native overlay")
         }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("paged-layout-\(UUID()).json")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let model = AppModel(settingsStore: SettingsStore(fileURL: url), sourceCatalogService: SourceCatalogService())
-        model.updateOverlayStyle { $0.subtitleColor = OverlayColor(red: 1, green: 0, blue: 0); $0.backgroundOpacity = 0 }
-        let id = UUID(), parts = ["別の仕事探した方がいいかな。", "明日友達に相談してみようかな。"]
-        let source = parts.joined()
-        model.previewOverlayForTesting(OverlayPreviewState(translatedText: "", sourceText: "", sourceName: "Test"))
-        model.receiveDraftForTesting(DraftSegment(segmentId: id, sourceText: source, stablePrefixLength: source.count,
-            mutableTailText: "", avgConfidence: 1, startMs: 0, lastUpdateMs: 1, silenceMs: 0, stabilityScore: 1,
-            boundaryScore: 1, chunkScore: 1, vadProbability: 1, words: []))
-        var state = try XCTUnwrap(model.overlayState)
-        state.setDraftTranslation("要不要找一份别的工作呢。明天找朋友商量一下吧。", sourceText: source, promotionID: id)
-        model.previewOverlayForTesting(state)
-        let host = NSHostingView(rootView: OverlayView(model: model, interactionState: OverlayInteractionState()))
-        let size = NSSize(width: 420, height: 240)
-        let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10000, y: -10000), size: size),
-                              styleMask: [.borderless], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.contentView = host
-        host.frame = NSRect(origin: .zero, size: size)
-        window.orderBack(nil)
+        let parts = ["別の仕事探した方がいいかな。", "明日友達に相談してみようかな。"]
+        let (model, host, window, id) = try makeDraftWindow(
+            parts, translation: "要不要找一份别的工作呢。明天找朋友商量一下吧。", size: NSSize(width: 420, height: 240))
         defer { window.close(); model.stopSession() }
         try await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertEqual(model.draftPresentation?.sourceText, parts[0])
-        let before = try snapshot(host, name: "long-draft-first-sentence")
-        for index in parts.indices {
-            model.enqueueRecognizedSentence(.init(text: parts[index], promotionSegmentID: index == 0 ? id : nil,
-                translationContext: SentenceTranslationContext(sentences: parts, sentenceIndex: index, draftSegmentID: id), recognitionID: UUID()),
-                source: .preview, sourceLanguageID: "ja", targetLanguageID: "zh-Hans")
-        }
+        XCTAssertEqual(model.draftRows.map(\.sourceText), parts)
+        let before = try snapshot(host, name: "rows-draft")
+        XCTAssertEqual(before.count, 4, "Each sentence is its own two-line row")
+
+        // The first sentence takes the caption line; the second keeps its row.
+        enqueue(parts, indices: [0], id: id, on: model)
         try await Task.sleep(nanoseconds: 80_000_000)
         XCTAssertEqual(model.overlayState?.sourceText, parts[0])
-        XCTAssertNil(model.draftPresentation)
-        let promoted = try snapshot(host, name: "long-draft-first-promoted")
-        XCTAssertEqual(before.count, 2)
-        XCTAssertEqual(promoted.count, before.count)
-        for (a, b) in zip(before, promoted) {
-            XCTAssertEqual(a.lowerBound, b.lowerBound, accuracy: 1)
-            XCTAssertEqual(a.upperBound, b.upperBound, accuracy: 1)
-        }
-        print("PAGED DRAFT LAYOUT: draft=\(before), promoted=\(promoted)")
-        let deadline = Date().addingTimeInterval(5)
-        while model.overlayState?.sourceText != parts[1], Date() < deadline {
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
-        XCTAssertEqual(model.overlayState?.sourceText, parts[1])
-        XCTAssertEqual(model.overlayState?.history.first?.sourceText, parts[0])
-        XCTAssertEqual(model.transcriptEntries.map(\.sourceText), parts)
-        try await Task.sleep(nanoseconds: 300_000_000)
-        let second = try snapshot(host, name: "long-draft-second-promoted")
-        XCTAssertEqual(second.count, 4, "Keep the previous complete sentence above the next caption")
-    }
+        XCTAssertEqual(model.draftRows.map(\.sourceText), [parts[1]])
+        assertSameRows(before, try snapshot(host, name: "rows-first-final"))
 
-    func testFinalizingOnTheSecondPageKeepsItInPlaceAndArchivesTheFirst() async throws {
-        guard ProcessInfo.processInfo.environment["V2S_OVERLAY_LAYOUT_INTEGRATION"] == "1" else {
-            throw XCTSkip("Set V2S_OVERLAY_LAYOUT_INTEGRATION=1 to render the native overlay")
-        }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("paged-second-\(UUID()).json")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let model = AppModel(settingsStore: SettingsStore(fileURL: url), sourceCatalogService: SourceCatalogService())
-        model.updateOverlayStyle { $0.subtitleColor = OverlayColor(red: 1, green: 0, blue: 0); $0.backgroundOpacity = 0 }
-        let id = UUID(), parts = ["別の仕事探した方がいいかな。", "明日友達に相談してみようかな。"]
-        let source = parts.joined()
-        model.previewOverlayForTesting(OverlayPreviewState(translatedText: "", sourceText: "", sourceName: "Test"))
-        model.receiveDraftForTesting(DraftSegment(segmentId: id, sourceText: source, stablePrefixLength: source.count,
-            mutableTailText: "", avgConfidence: 1, startMs: 0, lastUpdateMs: 1, silenceMs: 0, stabilityScore: 1,
-            boundaryScore: 1, chunkScore: 1, vadProbability: 1, words: []))
-        var state = try XCTUnwrap(model.overlayState)
-        state.setDraftTranslation("要不要找一份别的工作呢。明天找朋友商量一下吧。", sourceText: source, promotionID: id)
-        model.previewOverlayForTesting(state)
-        let host = NSHostingView(rootView: OverlayView(model: model, interactionState: OverlayInteractionState()))
-        let size = NSSize(width: 420, height: 240)
-        let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10000, y: -10000), size: size),
-                              styleMask: [.borderless], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.contentView = host
-        host.frame = NSRect(origin: .zero, size: size)
-        window.orderBack(nil)
-        defer { window.close(); model.stopSession() }
-        let deadline = Date().addingTimeInterval(5)
-        while model.draftPresentation?.sourceText != parts[1], Date() < deadline {
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
-        XCTAssertEqual(model.draftPresentation?.sourceText, parts[1])
-        let before = try snapshot(host, name: "paged-second-draft")
-        for index in parts.indices {
-            model.enqueueRecognizedSentence(.init(text: parts[index], promotionSegmentID: index == 0 ? id : nil,
-                translationContext: SentenceTranslationContext(sentences: parts, sentenceIndex: index, draftSegmentID: id), recognitionID: UUID()),
-                source: .preview, sourceLanguageID: "ja", targetLanguageID: "zh-Hans")
-        }
+        // The second follows and the first rolls up into history. Nothing moves.
+        enqueue(parts, indices: [1], id: id, on: model)
         try await Task.sleep(nanoseconds: 80_000_000)
         XCTAssertEqual(model.overlayState?.sourceText, parts[1])
         XCTAssertEqual(model.overlayState?.history.map(\.sourceText), [parts[0]])
-        XCTAssertNil(model.draftPresentation)
-        let promoted = try snapshot(host, name: "paged-second-promoted")
-        XCTAssertEqual(before.count, 2)
-        XCTAssertEqual(promoted.count, 4, "The finished sentence is archived above the open one")
-        for (a, b) in zip(before, promoted.suffix(2)) {
-            XCTAssertEqual(a.lowerBound, b.lowerBound, accuracy: 1)
-            XCTAssertEqual(a.upperBound, b.upperBound, accuracy: 1)
-        }
-        print("PAGED SECOND LAYOUT: draft=\(before), promoted=\(promoted)")
+        XCTAssertTrue(model.draftRows.isEmpty)
+        let after = try snapshot(host, name: "rows-both-final")
+        assertSameRows(before, after)
+        print("ROW LAYOUT: draft=\(before), final=\(after)")
     }
 
     func testBothSplitSentencesRemainVisibleAfterPromotion() async throws {
         guard ProcessInfo.processInfo.environment["V2S_OVERLAY_LAYOUT_INTEGRATION"] == "1" else {
             throw XCTSkip("Set V2S_OVERLAY_LAYOUT_INTEGRATION=1 to render the native overlay")
         }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("split-layout-\(UUID()).json")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let model = AppModel(settingsStore: SettingsStore(fileURL: url), sourceCatalogService: SourceCatalogService())
-        model.updateOverlayStyle { style in
-            style.subtitleColor = OverlayColor(red: 1, green: 0, blue: 0)
-            style.backgroundOpacity = 0
-        }
-        let id = UUID(), sentences = ["ただいま。", "おかえり。"]
-        let source = sentences.joined()
-        model.previewOverlayForTesting(OverlayPreviewState(translatedText: "", sourceText: "", sourceName: "Test"))
-        model.receiveDraftForTesting(DraftSegment(
-            segmentId: id, sourceText: source, stablePrefixLength: source.count, mutableTailText: "",
-            avgConfidence: 1, startMs: 0, lastUpdateMs: 1, silenceMs: 0, stabilityScore: 1,
-            boundaryScore: 1, chunkScore: 1, vadProbability: 1, words: []
-        ), target: "ja")
-        var draft = try XCTUnwrap(model.overlayState)
-        draft.setDraftTranslation("我回来了。欢迎回来。", sourceText: source, promotionID: id)
-        model.previewOverlayForTesting(draft)
-        let host = NSHostingView(rootView: OverlayView(model: model, interactionState: OverlayInteractionState()))
         // Leave room for both sentences. A short window can conceal a missing
         // history entry and falsely pass a test that only checks the latest line.
-        let size = NSSize(width: 540, height: 240)
-        let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10000, y: -10000), size: size),
-                              styleMask: [.borderless], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.contentView = host
-        host.frame = NSRect(origin: .zero, size: size)
-        window.orderBack(nil)
+        let sentences = ["ただいま。", "おかえり。"]
+        let (model, host, window, id) = try makeDraftWindow(
+            sentences, translation: "我回来了。欢迎回来。", size: NSSize(width: 540, height: 240))
         defer { window.close(); model.stopSession() }
-        // Finalize while the first sentence is still the open draft page: each
-        // sentence is its own subtitle, so only that sentence is on screen. The
-        // synchronous pixel snapshot below takes about a second of that page's
-        // two-second reading time, so do not wait long before it.
         try await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertEqual(model.draftPresentation?.sourceText, sentences[0])
+        XCTAssertEqual(model.draftRows.map(\.sourceText), sentences)
         let before = try snapshot(host, name: "split-draft")
-        for index in sentences.indices {
-            let context = try XCTUnwrap(SentenceTranslationContext(sentences: sentences, sentenceIndex: index, draftSegmentID: id))
-            model.enqueueRecognizedSentence(
-                RecognizedSentence(text: sentences[index], promotionSegmentID: index == 0 ? id : nil,
-                                   translationContext: context, recognitionID: UUID()),
-                source: .preview, sourceLanguageID: "ja", targetLanguageID: "zh-Hans"
-            )
-        }
+        enqueue(sentences, indices: [0, 1], id: id, on: model)
         model.receiveDraftForTesting(nil)
         try await Task.sleep(nanoseconds: 80_000_000)
-        XCTAssertEqual(model.overlayState?.sourceText, sentences[0])
-        XCTAssertEqual(model.overlayState?.translatedText, "我回来了。")
-        XCTAssertTrue(model.overlayState?.history.isEmpty == true)
-        XCTAssertEqual(model.transcriptEntries.map(\.sourceText), sentences)
-        // Pixel analysis is synchronous and can take longer than this caption's
-        // one-second remaining hold. Assert state before capture; timing itself
-        // is exercised without bitmap work in CaptionLatencyTests.
-        let during = try snapshot(host, name: "split-first-promoted")
-        XCTAssertFalse(before.isEmpty)
-        XCTAssertEqual(during.count, before.count)
-        for (a, b) in zip(before, during) {
-            XCTAssertEqual(a.lowerBound, b.lowerBound, accuracy: 1)
-            XCTAssertEqual(a.upperBound, b.upperBound, accuracy: 1)
-        }
-        print("SPLIT LAYOUT: draft=\(before), first=\(during)")
-
-        // The preceding sentence must remain visible without scrolling when the
-        // second arrives. Counting only transcript entries missed this regression.
-        let secondDeadline = Date().addingTimeInterval(4)
-        while model.overlayState?.sourceText != sentences[1], Date() < secondDeadline {
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
         XCTAssertEqual(model.overlayState?.sourceText, sentences[1])
+        XCTAssertEqual(model.overlayState?.translatedText, "欢迎回来。")
         XCTAssertEqual(model.overlayState?.history.map(\.sourceText), [sentences[0]])
-        try await Task.sleep(nanoseconds: 300_000_000)
-        let second = try snapshot(host, name: "split-second-reading")
+        XCTAssertEqual(model.transcriptEntries.map(\.sourceText), sentences)
+        let promoted = try snapshot(host, name: "split-promoted")
+        assertSameRows(before, promoted)
+
+        // After its reading time the caption rolls up too; both stay visible.
         let archiveDeadline = Date().addingTimeInterval(4)
         while model.overlayState?.sourceText.isEmpty == false, Date() < archiveDeadline {
             try await Task.sleep(nanoseconds: 10_000_000)
@@ -237,22 +108,55 @@ final class OverlayPromotionLayoutTests: XCTestCase {
         XCTAssertEqual(model.overlayState?.history.map(\.sourceText), sentences)
         try await Task.sleep(nanoseconds: 300_000_000)
         let archived = try snapshot(host, name: "split-finished")
-        for rows in [second, archived] {
-            XCTAssertEqual(rows.count, 4, "Both sentences must remain visible; do not hide every preceding sentence")
-            for (a, b) in zip(before, rows.suffix(2)) {
-                XCTAssertEqual(a.lowerBound, b.lowerBound, accuracy: 1)
-                XCTAssertEqual(a.upperBound, b.upperBound, accuracy: 1)
-            }
-        }
-        print("SPLIT RETENTION: draft=\(before), second=\(second), archived=\(archived)")
+        assertSameRows(before, archived)
+        print("SPLIT RETENTION: draft=\(before), promoted=\(promoted), archived=\(archived)")
 
-        // A larger window must show both sentences automatically, without making
-        // the user scroll back just to recover the previous sentence.
+        // A larger window shows both sentences without scrolling back.
         window.setContentSize(NSSize(width: 540, height: 420))
         try await Task.sleep(nanoseconds: 200_000_000)
-        let history = try snapshot(host, name: "split-full-history")
-        XCTAssertEqual(history.count, 4)
+        XCTAssertEqual(try snapshot(host, name: "split-full-history").count, 4)
         XCTAssertEqual(model.overlayHistoryScrollOffset, 0)
+    }
+
+    private func makeDraftWindow(_ parts: [String], translation: String, size: NSSize) throws
+        -> (AppModel, NSHostingView<OverlayView>, NSWindow, UUID) {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("row-layout-\(UUID()).json")
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        let model = AppModel(settingsStore: SettingsStore(fileURL: url), sourceCatalogService: SourceCatalogService())
+        model.updateOverlayStyle { $0.subtitleColor = OverlayColor(red: 1, green: 0, blue: 0); $0.backgroundOpacity = 0 }
+        let id = UUID(), source = parts.joined()
+        model.previewOverlayForTesting(OverlayPreviewState(translatedText: "", sourceText: "", sourceName: "Test"))
+        model.receiveDraftForTesting(DraftSegment(segmentId: id, sourceText: source, stablePrefixLength: source.count,
+            mutableTailText: "", avgConfidence: 1, startMs: 0, lastUpdateMs: 1, silenceMs: 0, stabilityScore: 1,
+            boundaryScore: 1, chunkScore: 1, vadProbability: 1, words: []))
+        var state = try XCTUnwrap(model.overlayState)
+        state.setDraftTranslation(translation, sourceText: source, promotionID: id)
+        model.previewOverlayForTesting(state)
+        let host = NSHostingView(rootView: OverlayView(model: model, interactionState: OverlayInteractionState()))
+        let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10000, y: -10000), size: size),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        host.frame = NSRect(origin: .zero, size: size)
+        window.orderBack(nil)
+        return (model, host, window, id)
+    }
+
+    private func enqueue(_ parts: [String], indices: [Int], id: UUID, on model: AppModel) {
+        for index in indices {
+            model.enqueueRecognizedSentence(.init(text: parts[index], promotionSegmentID: index == 0 ? id : nil,
+                translationContext: SentenceTranslationContext(sentences: parts, sentenceIndex: index, draftSegmentID: id),
+                recognitionID: UUID()), source: .preview, sourceLanguageID: "ja", targetLanguageID: "zh-Hans")
+        }
+    }
+
+    private func assertSameRows(_ expected: [ClosedRange<CGFloat>], _ actual: [ClosedRange<CGFloat>],
+                                file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(actual.count, expected.count, "Glyph row count changed", file: file, line: line)
+        for (a, b) in zip(expected, actual) {
+            XCTAssertEqual(a.lowerBound, b.lowerBound, accuracy: 1, file: file, line: line)
+            XCTAssertEqual(a.upperBound, b.upperBound, accuracy: 1, file: file, line: line)
+        }
     }
 
     private func checkPromotion(

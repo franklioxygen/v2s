@@ -5,34 +5,24 @@ import XCTest
 #if DEBUG
 @MainActor
 final class SplitCaptionReadabilityTests: XCTestCase {
-    func testSplitDraftKeepsSentenceBoundariesAndGivesFirstSentenceTimeToRead() async throws {
+    func testSplitDraftKeepsSentenceBoundaries() async throws {
         try await withModel { model in
             let id = UUID(), sentences = ["ただいま。", "おかえり。"]
             installJapaneseDraft(sentences.joined(), translation: "我回来了。欢迎回来。", id: id, on: model)
-            var firstShown: Date?, secondShown: Date?
             var committedTexts: [String] = []
             let observation = model.$overlayState.compactMap { $0 }.sink { state in
-                if state.sourceText == sentences[0], state.translatedText == "我回来了。", firstShown == nil {
-                    firstShown = Date()
-                }
-                if state.sourceText == sentences[1], secondShown == nil { secondShown = Date() }
                 if !state.sourceText.isEmpty { committedTexts.append(state.sourceText) }
             }
             defer { observation.cancel() }
             try enqueuePassage(sentences, id: id, on: model)
-            try await waitUntil { firstShown != nil }
+            try await waitUntil { model.overlayState?.sourceText == sentences[1] }
+            // The first sentence rolled up into history and stays readable there.
+            XCTAssertEqual(model.overlayState?.history.map(\.sourceText), [sentences[0]])
+            XCTAssertEqual(model.overlayState?.history.map(\.translatedText), ["我回来了。"])
+            XCTAssertEqual(model.overlayState?.translatedText, "欢迎回来。")
             XCTAssertEqual(model.transcriptEntries.map(\.sourceText), sentences)
             XCTAssertEqual(model.transcriptEntries.map(\.translatedText), ["我回来了。", "欢迎回来。"])
-            try await Task.sleep(nanoseconds: 1_500_000_000)
-            XCTAssertEqual(model.overlayState?.sourceText, sentences[0])
-            XCTAssertTrue(model.overlayState?.history.isEmpty == true)
-            try await waitUntil { secondShown != nil }
-            let duration = try XCTUnwrap(secondShown).timeIntervalSince(try XCTUnwrap(firstShown))
-            XCTAssertGreaterThanOrEqual(duration, 1.95, "The finalized first sentence needs its own reading window")
-            XCTAssertEqual(model.overlayState?.sourceText, sentences[1])
-            XCTAssertEqual(model.overlayState?.history.map(\.sourceText), [sentences[0]])
-            XCTAssertTrue(committedTexts.allSatisfy { sentences.contains($0) }, "Never merge finalized sentences to fix display timing")
-            print("SPLIT CAPTION: first sentence visible for \(duration) seconds; transcript=\(model.transcriptEntries.map(\.sourceText))")
+            XCTAssertTrue(committedTexts.allSatisfy { sentences.contains($0) }, "Never merge finalized sentences")
         }
     }
 
@@ -46,12 +36,12 @@ final class SplitCaptionReadabilityTests: XCTestCase {
             ] {
                 try await withModel { model in
                     model.subtitleDisplayMode = mode
-                    let id = UUID()
+                    let id = UUID(), trimmed = sentences.map { $0.trimmingCharacters(in: .whitespaces) }
                     model.receiveDraftForTesting(draft(sentences.joined(), id: id), language: language, target: language)
                     try enqueuePassage(sentences, id: id, on: model, language: language, target: language)
-                    try await waitUntil { model.overlayState?.committedPromotionID == id }
-                    XCTAssertEqual(model.overlayState?.sourceText, sentences[0])
-                    XCTAssertEqual(model.transcriptEntries.map(\.sourceText), sentences.map { $0.trimmingCharacters(in: .whitespaces) })
+                    try await waitUntil { model.overlayState?.sourceText == trimmed[1] }
+                    XCTAssertEqual(model.overlayState?.history.map(\.sourceText), [trimmed[0]], "\(language) \(mode)")
+                    XCTAssertEqual(model.transcriptEntries.map(\.sourceText), trimmed)
                 }
             }
         }
@@ -62,28 +52,27 @@ final class SplitCaptionReadabilityTests: XCTestCase {
             let id = UUID(), sentences = ["ただいま。", "おかえり。"]
             installJapaneseDraft(sentences.joined(), translation: "我回来了，欢迎回来。", id: id, on: model)
             try enqueuePassage(sentences, id: id, on: model)
-            try await waitUntil { model.overlayState?.committedPromotionID == id }
+            try await waitUntil { model.overlayState?.sourceText == sentences[1] }
             XCTAssertEqual(model.transcriptEntries.map(\.sourceText), sentences)
             XCTAssertTrue(model.transcriptEntries.allSatisfy { $0.translatedText.isEmpty })
-            XCTAssertTrue(model.overlayState?.isAwaitingCommittedTranslation == true)
-            model.finishCaptionTranslationForTesting(promotionID: id, text: "我回来了。")
-            try await Task.sleep(nanoseconds: 1_500_000_000)
-            XCTAssertEqual(model.overlayState?.sourceText, sentences[0])
-            XCTAssertEqual(model.overlayState?.translatedText, "我回来了。")
+            XCTAssertEqual(model.overlayState?.history.first?.translatedText, "")
+            let ids = model.transcriptEntries.map(\.id)
+            model.finishCaptionTranslationForTesting(captionID: ids[0], text: "我回来了。")
+            model.finishCaptionTranslationForTesting(captionID: ids[1], text: "欢迎回来。")
+            XCTAssertEqual(model.overlayState?.history.first?.translatedText, "我回来了。")
+            XCTAssertEqual(model.overlayState?.translatedText, "欢迎回来。")
             XCTAssertNil(model.overlayState?.draftSourceText)
         }
     }
 
-    func testOrdinarySingleSentencesKeepTheirExistingTiming() async throws {
+    func testOrdinarySingleSentencesAppearInOrder() async throws {
         try await withModel { model in
-            let firstID = UUID(), secondID = UUID()
-            for (id, text) in [(firstID, "はい。"), (secondID, "いいえ。") ] {
-                model.enqueueRecognizedSentence(RecognizedSentence(text: text, promotionSegmentID: id, recognitionID: UUID()),
+            for text in ["はい。", "いいえ。"] {
+                model.enqueueRecognizedSentence(RecognizedSentence(text: text, promotionSegmentID: UUID(), recognitionID: UUID()),
                                                 source: .preview, sourceLanguageID: "ja", targetLanguageID: "ja")
             }
-            try await waitUntil { model.overlayState?.committedPromotionID == firstID }
-            try await Task.sleep(nanoseconds: 1_500_000_000)
-            XCTAssertEqual(model.overlayState?.committedPromotionID, secondID)
+            try await waitUntil { model.overlayState?.sourceText == "いいえ。" }
+            XCTAssertEqual(model.overlayState?.history.map(\.sourceText), ["はい。"])
             XCTAssertEqual(model.transcriptEntries.map(\.sourceText), ["はい。", "いいえ。"])
         }
     }
@@ -94,9 +83,10 @@ final class SplitCaptionReadabilityTests: XCTestCase {
             installJapaneseDraft(sentences.joined(), translation: "我回来了。欢迎回来。", id: id, on: model)
             try enqueuePassage(sentences, id: id, on: model)
             model.receiveDraftForTesting(draft("今日もお疲れさま。", id: nextID), target: "ja")
-            try await waitUntil { model.overlayState?.committedPromotionID == id }
-            XCTAssertEqual(model.overlayState?.sourceText, sentences[0])
+            try await waitUntil { model.overlayState?.sourceText == sentences[1] }
+            XCTAssertEqual(model.overlayState?.history.map(\.sourceText), [sentences[0]])
             XCTAssertEqual(model.overlayState?.draftPromotionID, nextID)
+            XCTAssertEqual(model.draftRows.map(\.sourceText), ["今日もお疲れさま。"])
             XCTAssertEqual(model.transcriptEntries.map(\.sourceText), sentences)
         }
     }

@@ -163,24 +163,24 @@ struct OverlayView: View {
 
     // MARK: - Draft layer (50–65% opacity, stable prefix slightly brighter)
 
+    /// One row per sentence being heard. Sentences already on the caption line
+    /// are not among the rows, so nothing is drawn twice.
     private func draftLayer(_ state: OverlayPreviewState) -> some View {
-        let draftText = state.draftSourceText ?? ""
-        let page = model.draftPresentation
-        return captionPair(
-            translated: page?.translatedText ?? state.visibleDraftTranslatedText(for: draftText, promotionID: state.draftPromotionID) ?? "",
-            translatedColor: subtitleColor(opacity: 0.55),
-            source: page?.sourceText ?? draftText,
-            sourceColor: subtitleColor(opacity: 0.48),
-            draftStablePrefixLength: page?.stablePrefixLength ?? state.draftStablePrefixLength
-        )
+        VStack(alignment: .center, spacing: Self.liveStackSpacing) {
+            ForEach(Array(model.draftRows.enumerated()), id: \.offset) { _, row in
+                captionPair(
+                    translated: row.translatedText,
+                    translatedColor: subtitleColor(opacity: 0.55),
+                    source: row.sourceText,
+                    sourceColor: subtitleColor(opacity: 0.48),
+                    draftStablePrefixLength: row.stablePrefixLength
+                )
+            }
+        }
     }
 
     private func showsDraftLayer(_ state: OverlayPreviewState) -> Bool {
-        guard state.hasActiveDraftLayer else { return false }
-        // Promotion updates the committed text before clearing the draft. Avoid
-        // briefly rendering the same utterance twice during those updates.
-        return state.draftPromotionID == nil || state.draftPromotionID != state.committedPromotionID
-            || keepsDraftVisibleDuringPromotion(state)
+        state.hasActiveDraftLayer && model.draftRows.isEmpty == false
     }
 
     private func keepsDraftVisibleDuringPromotion(_ state: OverlayPreviewState) -> Bool {
@@ -256,7 +256,8 @@ struct OverlayView: View {
         OverlayHistoryLayoutAnimationState(
             historyIDs: visibleHistoryEntries.map(\.id),
             hasCommittedCaption: hasCommittedCaption(state),
-            draftPromotionID: showsDraftLayer(state) ? state.draftPromotionID : nil
+            draftPromotionID: showsDraftLayer(state) ? state.draftPromotionID : nil,
+            draftRowCount: showsDraftLayer(state) ? model.draftRows.count : 0
         )
     }
 
@@ -276,7 +277,7 @@ struct OverlayView: View {
     }
 
     private func estimatedLiveLayersHeight(for state: OverlayPreviewState) -> CGFloat {
-        let count = (hasCommittedCaption(state) ? 1 : 0) + (showsDraftLayer(state) ? 1 : 0)
+        let count = (hasCommittedCaption(state) ? 1 : 0) + (showsDraftLayer(state) ? model.draftRows.count : 0)
         let pairHeight = estimatedCaptionPairHeight(showsTranslated: showsTranslatedSubtitle, showsSource: showsOriginalSubtitle)
         return CGFloat(count) * pairHeight + CGFloat(max(count - 1, 0)) * Self.liveStackSpacing + Self.captionBottomInset
     }
@@ -599,6 +600,7 @@ private struct OverlayHistoryLayoutAnimationState: Equatable {
     let historyIDs: [UUID]
     let hasCommittedCaption: Bool
     let draftPromotionID: UUID?
+    let draftRowCount: Int
 }
 
 private struct LiveLayersHeightPreferenceKey: PreferenceKey {

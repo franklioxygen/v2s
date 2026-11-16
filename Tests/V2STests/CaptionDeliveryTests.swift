@@ -32,10 +32,10 @@ final class CaptionDeliveryTests: XCTestCase {
             try await waitUntil { visible.last == sentences.last }
             XCTAssertEqual(model.transcriptEntries.map(\.sourceText), sentences)
             XCTAssertEqual(visible, sentences, "Being saved in the transcript is not enough: every caption must reach the screen")
+            // Roll-up: earlier sentences stay readable in history instead of
+            // holding later ones back.
             XCTAssertEqual(model.overlayState?.history.map(\.sourceText), Array(sentences.dropLast()))
-            for (first, next) in zip(shownAt, shownAt.dropFirst()) {
-                XCTAssertGreaterThanOrEqual(next.timeIntervalSince(first), 0.95, "Even during catch-up, keep a full second to read short replies")
-            }
+            XCTAssertLessThan(shownAt.last!.timeIntervalSince(shownAt.first!), 1.5, "No sentence waits for the one before it")
             print("CAPTION DELIVERY pairs: expected=\(sentences), displayed=\(visible)")
         }
     }
@@ -93,19 +93,11 @@ final class CaptionDeliveryTests: XCTestCase {
         }
     }
 
-    func testDelayedTranslationKeepsItsPlaceInABacklog() async throws {
+    func testDelayedTranslationFillsInItsOwnRowWithoutHoldingOthers() async throws {
         try await withModel { model in
             let sources = ["一番です。", "二番です。", "三番です。", "四番です。"]
             let translations = ["第一。", "第二。", "第三。", "第四。"]
             let ids = sources.map { _ in UUID() }
-            var translated: [UUID: String] = [:]
-            let observation = model.$overlayState.compactMap { $0 }.sink { state in
-                if let id = state.committedPromotionID, let index = ids.firstIndex(of: id),
-                   state.sourceText == sources[index], state.translatedText == translations[index] {
-                    translated[id] = state.translatedText
-                }
-            }
-            defer { observation.cancel() }
             for index in sources.indices {
                 model.enqueueRecognizedSentence(
                     RecognizedSentence(text: sources[index], promotionSegmentID: ids[index], recognitionID: UUID()),
@@ -113,12 +105,13 @@ final class CaptionDeliveryTests: XCTestCase {
                 )
                 if index != 1 { model.finishCaptionTranslationForTesting(promotionID: ids[index], text: translations[index]) }
             }
-            try await waitUntil { model.overlayState?.committedPromotionID == ids[1] }
-            XCTAssertEqual(model.overlayState?.sourceText, sources[1])
-            XCTAssertEqual(model.overlayState?.translatedText, "")
+            // The untranslated second sentence does not hold the third and fourth back.
+            try await waitUntil { model.overlayState?.sourceText == sources[3] }
+            XCTAssertEqual(model.overlayState?.history.map(\.sourceText), Array(sources.dropLast()))
+            XCTAssertEqual(model.overlayState?.history.map(\.translatedText), ["第一。", "", "第三。"])
             model.finishCaptionTranslationForTesting(promotionID: ids[1], text: translations[1])
-            try await waitUntil { translated[ids[3]] != nil }
-            XCTAssertEqual(ids.compactMap { translated[$0] }, translations)
+            XCTAssertEqual(model.overlayState?.history.map(\.translatedText), Array(translations.dropLast()))
+            XCTAssertEqual(model.overlayState?.translatedText, translations[3])
             XCTAssertEqual(model.transcriptEntries.map(\.translatedText), translations)
         }
     }
