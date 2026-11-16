@@ -18,6 +18,13 @@ final class TranslationCoordinator: ObservableObject {
     /// nearly every caption. Pair switches do not wait for this timeout —
     /// the runner yields as soon as an operation for another pair arrives.
     private static let runnerIdleTimeout: TimeInterval = 10.0
+    /// While live captions run the session stays warm: after 15 s of silence a
+    /// sentence took 0.73 s on the same session and 1.10 s on a new one, against
+    /// 0.40 s warm (reports/translation-context-experiment/speed-benchmark.txt).
+    /// An idle runner re-translates a few words this often, for this long after
+    /// the last real request.
+    private static let keepWarmInterval: TimeInterval = 6.0
+    private static let keepWarmDuration: TimeInterval = 180.0
     private static let translationMemoLimit = 256
 
     private struct LanguagePair: Hashable {
@@ -138,6 +145,12 @@ final class TranslationCoordinator: ObservableObject {
     private var translationMemo: [MemoKey: String] = [:]
     private var translationMemoOrder: [MemoKey] = []
     var consecutiveTimeouts: Int = 0
+    /// Set while live captions run: the runner keeps its session instead of
+    /// releasing it after an idle interval.
+    var keepsSessionWarm = false
+    private var lastTranslatedText: String?
+    private var lastRequestedAt = Date.distantPast
+    private var lastWaitTimedOut = false
 
     func prepareIfNeeded(
         from sourceIdentifier: String,
@@ -181,6 +194,7 @@ final class TranslationCoordinator: ObservableObject {
         _ text: String,
         from sourceIdentifier: String,
         to targetIdentifier: String,
+        context: SentenceTranslationContext? = nil,
         priority: Priority = .normal
     ) async throws -> String {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -190,6 +204,21 @@ final class TranslationCoordinator: ObservableObject {
 
         guard sourceIdentifier != targetIdentifier else {
             return trimmedText
+        }
+
+        // The standalone memo may contain a different meaning of a short phrase
+        // (e.g. ただいま -> "now"). Resolve the passage before consulting that memo.
+        if let context, context.matchesCaption(trimmedText) {
+            do {
+                let passage = try await translate(
+                    context.sourceText, from: sourceIdentifier, to: targetIdentifier, priority: priority
+                )
+                if let sentence = context.translatedSentence(from: passage) { return sentence }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // A failed or unalignable passage can still be translated individually.
+            }
         }
 
         let pair = LanguagePair(source: sourceIdentifier, target: targetIdentifier)
@@ -276,8 +305,16 @@ final class TranslationCoordinator: ObservableObject {
             guard let operation = await nextOperation(
                 for: anchoredPair,
                 generation: runnerGeneration,
-                idleTimeout: Self.runnerIdleTimeout
+                idleTimeout: keepsSessionWarm ? Self.keepWarmInterval : Self.runnerIdleTimeout
             ) else {
+                // Through a pause in live captions, keep the model warm with a few
+                // words of the last sentence rather than releasing the session.
+                if lastWaitTimedOut, keepsSessionWarm, runnerGeneration == generation, Task.isCancelled == false,
+                   Date().timeIntervalSince(lastRequestedAt) < Self.keepWarmDuration,
+                   let text = lastTranslatedText {
+                    _ = try? await session.translate(String(text.prefix(12)))
+                    continue
+                }
                 return
             }
 
@@ -293,6 +330,13 @@ final class TranslationCoordinator: ObservableObject {
                 }
 
             case .translate(let id, _, let pair, let text, _, let continuation):
+                // Several captions can request the same passage before the first
+                // request finishes. Recheck here so that passage is translated once.
+                if let memoized = translationMemo[MemoKey(pair: pair, text: text)] {
+                    finishOperation(id: id, continuation: continuation, result: memoized)
+                    continue
+                }
+                lastTranslatedText = text
                 do {
                     let response = try await session.translate(text)
                     let translatedText = response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -370,6 +414,7 @@ final class TranslationCoordinator: ObservableObject {
     }
 
     private func enqueue(_ operation: PendingOperation) {
+        if case .translate = operation { lastRequestedAt = Date() }
         activate(pair: operation.pair)
         pendingOperations.append(operation)
         signalOperationWaiters()
@@ -450,6 +495,7 @@ final class TranslationCoordinator: ObservableObject {
         idleTimeout: TimeInterval
     ) async -> PendingOperation? {
         let deadline = Date().addingTimeInterval(idleTimeout)
+        lastWaitTimedOut = false
 
         while Task.isCancelled == false {
             guard generation == self.generation else {
@@ -477,6 +523,7 @@ final class TranslationCoordinator: ObservableObject {
             }
 
             if await waitForOperationSignal(for: pair, generation: generation, until: deadline) == .timedOut {
+                lastWaitTimedOut = true
                 return nil
             }
         }
