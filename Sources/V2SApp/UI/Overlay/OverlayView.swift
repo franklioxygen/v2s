@@ -165,12 +165,13 @@ struct OverlayView: View {
 
     private func draftLayer(_ state: OverlayPreviewState) -> some View {
         let draftText = state.draftSourceText ?? ""
+        let page = model.draftPresentation
         return captionPair(
-            translated: state.visibleDraftTranslatedText(for: draftText, promotionID: state.draftPromotionID) ?? "",
+            translated: page?.translatedText ?? state.visibleDraftTranslatedText(for: draftText, promotionID: state.draftPromotionID) ?? "",
             translatedColor: subtitleColor(opacity: 0.55),
-            source: draftText,
+            source: page?.sourceText ?? draftText,
             sourceColor: subtitleColor(opacity: 0.48),
-            draftStablePrefixLength: state.draftStablePrefixLength
+            draftStablePrefixLength: page?.stablePrefixLength ?? state.draftStablePrefixLength
         )
     }
 

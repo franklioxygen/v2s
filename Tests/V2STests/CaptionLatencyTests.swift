@@ -5,19 +5,35 @@ import XCTest
 #if DEBUG
 @MainActor
 final class CaptionLatencyTests: XCTestCase {
-    func testRecordedGreetingDraftDoesNotReceiveASecondFullReadingWindow() async throws {
+    func testRecordedGreetingContinuesWithTheSentenceBeingRead() async throws {
         try await withModel { model in
             let id = UUID(), sentences = ["ただいま。", "おかえり。"]
             installDraft(sentences.joined(), translation: "我回来了。欢迎回来。", id: id, on: model)
-            // The recorded video delivered this combined draft at 26.228s and
-            // both finalized sentences at 29.120s. Keep that real handoff delay.
+            // The recorded video delivered this draft at 26.228s and both finalized
+            // sentences at 29.120s. By then the first page has been read and the
+            // reader is on the second sentence.
             try await Task.sleep(nanoseconds: 2_892_000_000)
-            let duration = try await measureFirstHold(sentences, id: id, on: model)
-            XCTAssertGreaterThanOrEqual(duration, 0.95)
-            XCTAssertLessThan(duration, 1.5, "Already-read draft text must count toward the formal reading window")
+            XCTAssertEqual(model.draftPresentation?.sourceText, sentences[1])
+            var live: [String] = []
+            let observation = model.$overlayState.compactMap { $0?.sourceText }.removeDuplicates().sink { live.append($0) }
+            defer { observation.cancel() }
+            let finalizedAt = Date()
+            for index in sentences.indices {
+                model.enqueueRecognizedSentence(
+                    RecognizedSentence(text: sentences[index], promotionSegmentID: index == 0 ? id : nil,
+                                       translationContext: SentenceTranslationContext(sentences: sentences, sentenceIndex: index, draftSegmentID: id),
+                                       recognitionID: UUID()),
+                    source: .preview, sourceLanguageID: "ja", targetLanguageID: "zh-Hans")
+            }
+            while model.overlayState?.sourceText != sentences[1], Date().timeIntervalSince(finalizedAt) < 3 {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            let handoff = Date().timeIntervalSince(finalizedAt)
+            XCTAssertLessThan(handoff, 0.3, "The sentence being read promotes in place")
+            XCTAssertFalse(live.contains(sentences[0]), "A sentence already read must not return")
             XCTAssertEqual(model.transcriptEntries.map(\.translatedText), ["我回来了。", "欢迎回来。"])
             XCTAssertEqual(model.overlayState?.history.map(\.sourceText), [sentences[0]])
-            print("CAPTION LATENCY recorded greeting: formal first hold=\(duration)s")
+            print("CAPTION LATENCY recorded greeting: second sentence after \(handoff)s")
         }
     }
 
@@ -40,7 +56,8 @@ final class CaptionLatencyTests: XCTestCase {
         try await withModel { model in
             let id = UUID(), sentences = ["ただいま。", "おかえり。"]
             installDraft(sentences.joined(), translation: "今です。戻って。", id: id, on: model)
-            try await Task.sleep(nanoseconds: 2_000_000_000)
+            // Finalize while the first sentence is still the open draft page.
+            try await Task.sleep(nanoseconds: 1_000_000_000)
             let duration = try await measureFirstHold(sentences, id: id, on: model, finalFirstTranslation: "我回来了。")
             XCTAssertGreaterThanOrEqual(duration, 1.95, "A correction is new reading, even if the old draft was visible for a long time")
             XCTAssertEqual(model.transcriptEntries.first?.translatedText, "我回来了。")
@@ -51,7 +68,8 @@ final class CaptionLatencyTests: XCTestCase {
         try await withModel { model in
             let id = UUID(), sentences = ["ただいま。", "おかえり。"]
             installDraft(sentences.joined(), translation: "现在。回来。", id: id, on: model)
-            try await Task.sleep(nanoseconds: 2_000_000_000)
+            // Finalize while the first sentence is still the open draft page.
+            try await Task.sleep(nanoseconds: 1_000_000_000)
             var state = try XCTUnwrap(model.overlayState)
             state.setDraftTranslation("我回来了。欢迎回来。", sourceText: sentences.joined(), promotionID: id)
             model.previewOverlayForTesting(state)
@@ -64,7 +82,8 @@ final class CaptionLatencyTests: XCTestCase {
         try await withModel { model in
             let id = UUID(), sentences = ["ただいま。", "おかえり。"]
             installDraft(sentences.joined(), translation: "今です。戻って。", id: id, on: model)
-            try await Task.sleep(nanoseconds: 2_000_000_000)
+            // Finalize while the first sentence is still the open draft page.
+            try await Task.sleep(nanoseconds: 1_000_000_000)
             let correction = Task { @MainActor in
                 try await Task.sleep(nanoseconds: 600_000_000)
                 model.finishCaptionTranslationForTesting(promotionID: id, text: "我回来了。")
@@ -81,7 +100,8 @@ final class CaptionLatencyTests: XCTestCase {
             model.subtitleDisplayMode = .originalOnly
             let id = UUID(), sentences = ["ただいま。", "おかえり。"]
             installDraft(sentences.joined(), translation: "我回来了。欢迎回来。", id: id, on: model)
-            try await Task.sleep(nanoseconds: 2_000_000_000)
+            // Finalize while the first sentence is still the open draft page.
+            try await Task.sleep(nanoseconds: 1_000_000_000)
             model.subtitleDisplayMode = .both
             let duration = try await measureFirstHold(sentences, id: id, on: model)
             XCTAssertGreaterThanOrEqual(duration, 1.95)
@@ -98,7 +118,7 @@ final class CaptionLatencyTests: XCTestCase {
                 model.subtitleDisplayMode = mode
                 let id = UUID()
                 model.receiveDraftForTesting(draft(sentences.joined(), id: id), language: language, target: language)
-                try await Task.sleep(nanoseconds: 2_500_000_000)
+                try await Task.sleep(nanoseconds: 1_000_000_000)
                 let duration = try await measureFirstHold(sentences, id: id, on: model, language: language, target: language)
                 XCTAssertGreaterThanOrEqual(duration, 0.95, language)
                 XCTAssertLessThan(duration, 1.5, language)

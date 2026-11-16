@@ -49,7 +49,7 @@ struct SentenceTranslationContext: Equatable, Sendable {
         return !key(lhs).isEmpty && key(lhs) == key(rhs)
     }
 
-    private static func splitSentences(_ text: String) -> [String] {
+    static func splitSentences(_ text: String) -> [String] {
         let source = text as NSString
         return SentenceBoundaryHeuristics.sentenceRanges(in: source).compactMap {
             let sentence = source.substring(with: $0).trimmingCharacters(in: .whitespacesAndNewlines)
