@@ -187,11 +187,13 @@ struct SettingsView: View {
                             .toggleStyle(.switch)
                             .labelsHidden()
                     }
-                    Divider()
-                    settingsRow(model.localized(.checkForUpdatesAutomatically)) {
-                        Toggle("", isOn: $updaterService.automaticallyChecksForUpdates)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
+                    if UpdaterService.isAvailable {
+                        Divider()
+                        settingsRow(model.localized(.checkForUpdatesAutomatically)) {
+                            Toggle("", isOn: $updaterService.automaticallyChecksForUpdates)
+                                .toggleStyle(.switch)
+                                .labelsHidden()
+                        }
                     }
                     if launchAtLoginService.requiresApproval {
                         Text(model.localized(.enableAtLoginInSystemSettings))
@@ -216,16 +218,18 @@ struct SettingsView: View {
                             .foregroundStyle(.red)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    HStack {
-                        Spacer()
-                        Button {
-                            updaterService.checkForUpdates()
-                        } label: {
-                            Label(model.localized(.checkForUpdates), systemImage: "arrow.clockwise")
-                                .font(.caption)
+                    if UpdaterService.isAvailable {
+                        HStack {
+                            Spacer()
+                            Button {
+                                updaterService.checkForUpdates()
+                            } label: {
+                                Label(model.localized(.checkForUpdates), systemImage: "arrow.clockwise")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
                     }
                 }
                 VersionLink(

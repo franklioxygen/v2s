@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Mac App Store build. The App Store requires the App Sandbox. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- Microphone and app-audio (Core Audio process tap) capture. -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<!-- Server-based speech recognition for languages without an on-device model. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>

@@ -70,6 +70,113 @@ jobs:
             esac
           done
 
+      # Developer ID signing + notarization. Runs only when the signing secrets
+      # are configured; otherwise the release stays ad-hoc signed as before.
+      - name: Import Developer ID certificate
+        id: signing
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          if [ -z "$DEVELOPER_ID_P12_BASE64" ]; then
+            echo "::warning::DEVELOPER_ID_P12_BASE64 is not set; publishing an unsigned (ad-hoc) build."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+
+          echo "$DEVELOPER_ID_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT_PATH" -P "$DEVELOPER_ID_P12_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$CERT_PATH"
+
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep 'Developer ID Application' | head -1 | awk '{print $2}')"
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No 'Developer ID Application' identity found in the imported certificate"
+            exit 1
+          fi
+
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+          echo "keychain=$KEYCHAIN" >> "$GITHUB_OUTPUT"
+
+      - name: Sign app with Developer ID
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          IDENTITY: ${{ steps.signing.outputs.identity }}
+          KEYCHAIN: ${{ steps.signing.outputs.keychain }}
+        run: |
+          APP_PATH=".build/release/Build/Products/Release/v2s.app"
+          SIGN=(codesign --force --timestamp --options runtime --keychain "$KEYCHAIN" --sign "$IDENTITY")
+
+          # Sign Sparkle's nested helpers inside-out, as Sparkle's docs require.
+          SPARKLE="$APP_PATH/Contents/Frameworks/Sparkle.framework"
+          if [ -d "$SPARKLE" ]; then
+            SPARKLE_B="$SPARKLE/Versions/B"
+            [ -d "$SPARKLE_B/XPCServices/Installer.xpc" ] && "${SIGN[@]}" "$SPARKLE_B/XPCServices/Installer.xpc"
+            [ -d "$SPARKLE_B/XPCServices/Downloader.xpc" ] && "${SIGN[@]}" --preserve-metadata=entitlements "$SPARKLE_B/XPCServices/Downloader.xpc"
+            [ -e "$SPARKLE_B/Autoupdate" ] && "${SIGN[@]}" "$SPARKLE_B/Autoupdate"
+            [ -d "$SPARKLE_B/Updater.app" ] && "${SIGN[@]}" "$SPARKLE_B/Updater.app"
+            "${SIGN[@]}" "$SPARKLE"
+          fi
+
+          # Any other embedded frameworks or dylibs.
+          find "$APP_PATH/Contents/Frameworks" -maxdepth 1 \( -name '*.framework' -o -name '*.dylib' \) \
+            ! -name 'Sparkle.framework' -print0 2>/dev/null \
+            | while IFS= read -r -d '' item; do "${SIGN[@]}" "$item"; done
+
+          "${SIGN[@]}" --entitlements Config/v2s.entitlements "$APP_PATH"
+
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          codesign -d --entitlements - "$APP_PATH"
+
+      - name: Notarize and staple
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8_BASE64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+        run: |
+          if [ -z "$ASC_API_KEY_ID" ] || [ -z "$ASC_API_ISSUER_ID" ] || [ -z "$ASC_API_KEY_P8_BASE64" ]; then
+            echo "::error::Developer ID signing is enabled but the ASC_API_* notarization secrets are missing"
+            exit 1
+          fi
+
+          APP_PATH=".build/release/Build/Products/Release/v2s.app"
+          KEY_PATH="$RUNNER_TEMP/AuthKey_${ASC_API_KEY_ID}.p8"
+          SUBMIT_ZIP="$RUNNER_TEMP/v2s-notarize.zip"
+
+          echo "$ASC_API_KEY_P8_BASE64" | base64 --decode > "$KEY_PATH"
+          ditto -c -k --keepParent "$APP_PATH" "$SUBMIT_ZIP"
+
+          xcrun notarytool submit "$SUBMIT_ZIP" \
+            --key "$KEY_PATH" --key-id "$ASC_API_KEY_ID" --issuer "$ASC_API_ISSUER_ID" \
+            --wait --timeout 30m --output-format json | tee "$RUNNER_TEMP/notary.json"
+
+          STATUS="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$RUNNER_TEMP/notary.json")"
+          if [ "$STATUS" != "Accepted" ]; then
+            SUBMISSION_ID="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$RUNNER_TEMP/notary.json")"
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --key "$KEY_PATH" --key-id "$ASC_API_KEY_ID" --issuer "$ASC_API_ISSUER_ID" || true
+            echo "::error::Notarization status: $STATUS"
+            exit 1
+          fi
+
+          xcrun stapler staple "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          spctl --assess --type execute --verbose=4 "$APP_PATH"
+          rm -f "$KEY_PATH" "$SUBMIT_ZIP"
+
       - name: Package app
         id: package
         run: |
@@ -193,3 +300,7 @@ jobs:
 
           git commit -m "v2s ${VERSION}"
           git push
+
+      - name: Remove signing keychain
+        if: always() && steps.signing.outputs.keychain != ''
+        run: security delete-keychain "${{ steps.signing.outputs.keychain }}" || true

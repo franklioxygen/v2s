@@ -3,10 +3,16 @@ import Combine
 import Foundation
 import ServiceManagement
 import os.log
+#if !APPSTORE
 import Sparkle
+#endif
 
+#if !APPSTORE
 @MainActor
 final class UpdaterService: ObservableObject {
+    /// Whether in-app updates exist in this build. The Mac App Store build updates through the store.
+    static let isAvailable = true
+
     private let updaterController: SPUStandardUpdaterController
     private var observation: AnyCancellable?
     private(set) var isStarted = false
@@ -49,6 +55,17 @@ final class UpdaterService: ObservableObject {
         }
     }
 }
+#else
+/// Mac App Store build: updates are delivered by the App Store, so Sparkle is not linked.
+@MainActor
+final class UpdaterService: ObservableObject {
+    static let isAvailable = false
+
+    @Published var automaticallyChecksForUpdates = false
+
+    func checkForUpdates() {}
+}
+#endif
 
 @MainActor
 final class LaunchAtLoginService: ObservableObject {
