@@ -143,6 +143,54 @@ final class DraftRowsTests: XCTestCase {
         }
     }
 
+    func testFailedRowTranslationIsRetried() async throws {
+        try await withModel { model in
+            // A recovered translation session cancels requests in flight. The
+            // sentence used to stay untranslated for the rest of the draft.
+            var calls: [String] = []
+            model.draftRowTranslatorForTesting = { text, _ in
+                calls.append(text)
+                if calls.filter({ $0 == "そうなのね。" }).count == 1, text == "そうなのね。" { throw CancellationError() }
+                return "译：" + text
+            }
+            receive("味付いも違うですけど。そうなのね。私みたいな", id: UUID(), on: model)
+            try await waitUntil { model.draftRows.allSatisfy { !$0.translatedText.isEmpty } }
+            XCTAssertEqual(model.draftRows.map(\.translatedText), ["译：味付いも違うですけど。", "译：そうなのね。", "译：私みたいな"])
+            XCTAssertEqual(calls.filter { $0 == "そうなのね。" }.count, 2)
+        }
+    }
+
+    func testRowContextStaysTwoSentencesHoweverLongTheDraft() async throws {
+        try await withModel { model in
+            var contexts: [String: [String]] = [:]
+            model.draftRowTranslatorForTesting = { text, context in
+                contexts[text] = context?.sentences ?? [text]
+                return "译：" + text
+            }
+            let parts = ["一つ目です。", "二つ目です。", "三つ目です。", "四つ目です。", "五つ目"]
+            receive(parts.joined(), id: UUID(), on: model)
+            try await waitUntil { model.draftRows.allSatisfy { !$0.translatedText.isEmpty } }
+            XCTAssertEqual(contexts["一つ目です。"], ["一つ目です。"])
+            XCTAssertEqual(contexts["二つ目です。"], Array(parts[0...1]))
+            XCTAssertEqual(contexts["五つ目"], Array(parts[2...4]), "Only the two sentences before it are context")
+        }
+    }
+
+    func testUntranslatableRowIsNotRequestedForever() async throws {
+        try await withModel { model in
+            var calls = 0
+            let source = "シャリシャリシャリシャリ。"
+            model.draftRowTranslatorForTesting = { text, _ in
+                calls += 1
+                return text  // The model hands the words back unchanged.
+            }
+            receive(source, id: UUID(), on: model)
+            try await Task.sleep(nanoseconds: 500_000_000)
+            XCTAssertEqual(calls, 1)
+            XCTAssertEqual(model.draftRows.first?.translatedText, "")
+        }
+    }
+
     func testSingleLongSentenceAndCommaClauseStayOneRow() async throws {
         try await withModel { model in
             let source = "今日は一緒に公園を散歩してから、晩ご飯を食べに行きましょう。"

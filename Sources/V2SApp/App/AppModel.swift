@@ -53,6 +53,11 @@ final class AppModel: ObservableObject {
     /// Per-sentence translations of the current draft, by sentence text.
     private var draftRowCache = DraftRowCache()
     private var draftRowTranslationTask: Task<Void, Never>?
+    /// When any translation last completed, to tell a busy session from a stuck one.
+    private var lastTranslationProgressAt = Date.distantPast
+    #if DEBUG
+    var draftRowTranslatorForTesting: ((String, SentenceTranslationContext?) async throws -> String)?
+    #endif
     private var committedCaptionArchiveTask: Task<Void, Never>?
     private var languageResourcePreparationTask: Task<Void, Never>?
     private var languageCatalogRefreshTask: Task<Void, Never>?
@@ -1730,18 +1735,34 @@ final class AppModel: ObservableObject {
         draftRowTranslationTask = Task { @MainActor [weak self] in
             while let self, !Task.isCancelled, let next = self.nextDraftRowToTranslate() {
                 let part = next.parts[next.index]
-                self.draftRowCache.attempted.insert(part)
-                let context = SentenceTranslationContext(sentences: next.parts, sentenceIndex: next.index, draftSegmentID: next.id)
-                let result = try? await self.translationCoordinator.translate(part, from: from, to: to, context: context)
+                // The two sentences before it are enough context, and keep each
+                // request the same size however long the draft grows.
+                let window = max(0, next.index - 2)...next.index
+                let context = SentenceTranslationContext(sentences: Array(next.parts[window]),
+                                                         sentenceIndex: next.index - window.lowerBound, draftSegmentID: next.id)
+                let result: String
+                do {
+                    result = try await self.translateDraftRow(part, from: from, to: to, context: context)
+                } catch {
+                    guard !Task.isCancelled, self.draftRowCache.draftID == next.id else { return }
+                    // A failed or cancelled request (a recovered session cancels
+                    // everything in flight) is retried; the sentence must not
+                    // stay untranslated for the rest of the draft.
+                    self.draftRowCache.failures[part, default: 0] += 1
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    continue
+                }
                 guard !Task.isCancelled, self.draftRowCache.draftID == next.id else { return }
-                if let result {
-                    let translated = self.sanitizedDisplayText(self.glossaryService.apply(to: result, glossary: self.glossary))
-                    if !translated.isEmpty, !self.shouldTreatAsMissingTranslation(
-                        translated, sourceText: part, sourceLanguageID: from, targetLanguageID: to) {
-                        self.draftRowCache.translations[part] = translated
-                        self.draftRowCache.lastShown[next.index] = translated
-                        self.refreshDraftRows()
-                    }
+                self.lastTranslationProgressAt = Date()
+                let translated = self.sanitizedDisplayText(self.glossaryService.apply(to: result, glossary: self.glossary))
+                if !translated.isEmpty, !self.shouldTreatAsMissingTranslation(
+                    translated, sourceText: part, sourceLanguageID: from, targetLanguageID: to) {
+                    self.draftRowCache.translations[part] = translated
+                    self.draftRowCache.lastShown[next.index] = translated
+                    self.refreshDraftRows()
+                } else {
+                    // The model returned no translation; asking again will not help.
+                    self.draftRowCache.failures[part] = Self.draftRowTranslationAttempts
                 }
             }
             // A cancelled task was already replaced by its successor.
@@ -1755,9 +1776,20 @@ final class AppModel: ObservableObject {
         let parts = DraftSentences.split(source)
         let finalized = finalizedDraftRowCount(parts)
         guard let index = parts.indices.first(where: {
-            $0 >= finalized && draftRowCache.translations[parts[$0]] == nil && !draftRowCache.attempted.contains(parts[$0])
+            $0 >= finalized && draftRowCache.translations[parts[$0]] == nil
+                && draftRowCache.failures[parts[$0], default: 0] < Self.draftRowTranslationAttempts
         }) else { return nil }
         return (parts, index, id)
+    }
+
+    private func translateDraftRow(_ text: String, from: String, to: String,
+                                   context: SentenceTranslationContext?) async throws -> String {
+        #if DEBUG
+        if let draftRowTranslatorForTesting {
+            return try await draftRowTranslatorForTesting(text, context)
+        }
+        #endif
+        return try await translationCoordinator.translate(text, from: from, to: to, context: context)
     }
 
     private func handlePartialDraft(
@@ -2438,7 +2470,11 @@ final class AppModel: ObservableObject {
         Task { @MainActor [weak self] in
             do { try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000)) } catch { return }
             guard let self, liveTranscriptionSession != nil,
-                  transcriptEntries.first(where: { $0.id == caption.id })?.translatedText.isEmpty == true else { return }
+                  transcriptEntries.first(where: { $0.id == caption.id })?.translatedText.isEmpty == true,
+                  // A busy queue still finishes translations; only a session that
+                  // has finished none for the whole interval is stuck. Resetting a
+                  // busy one cancelled every request in flight.
+                  Date().timeIntervalSince(lastTranslationProgressAt) >= timeout else { return }
             translationCoordinator.consecutiveTimeouts += 1
             guard translationCoordinator.consecutiveTimeouts >= 2 else { return }
             translationCoordinator.recoverSession(source: caption.sourceLanguageID, target: caption.targetLanguageID)
@@ -2702,6 +2738,7 @@ final class AppModel: ObservableObject {
         }
 
         if let translatedText, translatedText.isEmpty == false {
+            lastTranslationProgressAt = Date()
             translationCoordinator.consecutiveTimeouts = 0
             applyLateCaptionTranslation(translatedText, for: captionID)
         }
@@ -3164,6 +3201,7 @@ private enum StatusDescriptor: Equatable {
 
 private extension AppModel {
     static let overlayHistoryLimit = 120
+    static let draftRowTranslationAttempts = 3
     static let committedCaptionIdleArchiveDelay: TimeInterval = 0.9
     static let archivedCaptionReplaySuppressionWindow: TimeInterval = 1.8
     static let archivedCaptionReplaySimilarityThreshold = 0.18
@@ -3212,8 +3250,8 @@ private struct DraftRowCache {
     var languages = ""
     /// Translation of each sentence of this draft, by its exact text.
     var translations: [String: String] = [:]
-    /// Sentences already sent for translation, so a failure is not retried in a loop.
-    var attempted: Set<String> = []
+    /// Failed requests per sentence; a sentence is retried up to a limit.
+    var failures: [String: Int] = [:]
     /// Last translation shown on each row, kept while a revision is translated.
     var lastShown: [Int: String] = [:]
     /// Sentences of this draft that already reached the caption line, in order.
