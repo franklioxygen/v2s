@@ -191,6 +191,21 @@ final class DraftRowsTests: XCTestCase {
         }
     }
 
+    func testFinalThatOnlyAddsPunctuationKeepsTheDraftTranslation() async throws {
+        try await withModel { model in
+            // The final result adds a comma and a full stop: same words, so the
+            // translation already on screen is final and needs no new request.
+            let id = UUID(), draft = "いや俺の方こそごめん"
+            receive(draft, id: id, on: model)
+            model.finishDraftRowTranslationForTesting(draft, text: "不，是我对不起。")
+            model.enqueueRecognizedSentence(.init(text: "いや、俺の方こそごめん。", promotionSegmentID: id, recognitionID: UUID()),
+                                            source: .preview, sourceLanguageID: "ja", targetLanguageID: "zh-Hans")
+            XCTAssertEqual(model.overlayState?.translatedText, "不，是我对不起。")
+            XCTAssertFalse(model.overlayState?.committedTranslationIsProvisional == true)
+            XCTAssertEqual(model.transcriptEntries.last?.translatedText, "不，是我对不起。")
+        }
+    }
+
     func testSingleLongSentenceAndCommaClauseStayOneRow() async throws {
         try await withModel { model in
             let source = "今日は一緒に公園を散歩してから、晩ご飯を食べに行きましょう。"

@@ -35,7 +35,10 @@ final class AppModel: ObservableObject {
     private let translationCoordinator = TranslationCoordinator()
     private let glossaryService = GlossaryService()
     private let speedMonitor = SpeedMonitor()
-    private var liveTranscriptionSession: LiveTranscriptionSession?
+    private var liveTranscriptionSession: LiveTranscriptionSession? {
+        // Live captions keep the translation model warm between sentences.
+        didSet { translationCoordinator.keepsSessionWarm = liveTranscriptionSession != nil }
+    }
     private var liveTranscriptionSessions: [LiveTranscriptionSession] = []
     // Sources whose capture actually started. A multi-source session tolerates inputs
     // that fail to open, so this can be a subset of `selectedSources` while running.
@@ -2633,7 +2636,7 @@ final class AppModel: ObservableObject {
         // A sentence's own draft row translation, if that row is this caption.
         let rowTranslation = draftRowCache.draftID == promotionID
             ? DraftSentences.split(state.draftSourceText ?? "")
-                .first { SentenceTranslationContext.equivalentSource($0, sourceText) }
+                .first { SentenceTranslationContext.equivalentSource($0, sourceText) || sameWords($0, sourceText) }
                 .flatMap { draftRowCache.translations[$0] }
             : nil
         guard let currentDraftTranslation = state.promotableDraftTranslatedText(
@@ -2641,6 +2644,16 @@ final class AppModel: ObservableObject {
         ) ?? rowTranslation else { return nil }
         let draftTranslation = sanitizedDisplayText(currentDraftTranslation)
         return draftTranslation.isEmpty ? nil : draftTranslation
+    }
+
+    /// The same words, ignoring punctuation and spacing: a final result that only
+    /// adds a comma or a full stop does not need a translation of its own.
+    private func sameWords(_ lhs: String, _ rhs: String) -> Bool {
+        func words(_ text: String) -> String {
+            String(String.UnicodeScalarView(text.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }))
+        }
+        let left = words(lhs)
+        return left.isEmpty == false && left == words(rhs)
     }
 
     private func markDraftPromotionFinalized(_ id: UUID) {
