@@ -59,6 +59,26 @@ final class LiveTranscriptionSessionTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testFallbackKeepsTheDraftTheTranscriberHadNotFinalized() async throws {
+        // Review on PR #41: a results-stream or analyzer failure switched to the
+        // legacy recognizer and dropped words already shown as the draft.
+        for (text, locale) in [("We should leave before it gets dark", "en_US"),
+                               ("I went to the store and", "en_US"),
+                               ("Deberíamos salir antes de que oscurezca", "es_ES")] {
+            let session = LiveTranscriptionSession()
+            let received = expectation(description: text)
+            received.assertForOverFulfill = false
+            var committed: [String] = []
+            session.failOverWithPendingDraftForTesting(text, localeIdentifier: locale) { sentence in
+                committed.append(sentence.text)
+                received.fulfill()
+            }
+            await fulfillment(of: [received], timeout: 2)
+            XCTAssertEqual(committed.joined(separator: " "), text, "A held fragment is flushed too")
+        }
+    }
+
     func testJapaneseClauseEndingOnACommaIsAFragment() {
         XCTAssertTrue(isFragment("最初は水をあげすぎてしまい、", language: "ja"))
         XCTAssertTrue(isFragment("そこで近所の園芸店の方に相談したところ、", language: "ja"))

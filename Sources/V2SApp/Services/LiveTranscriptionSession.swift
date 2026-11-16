@@ -608,6 +608,34 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Words the transcriber reported but had not finalized are already heard;
+    /// stopping the analyzer would discard them with its state. A fragment this
+    /// holds is flushed by stopModernSpeechRecognizer. Japanese drafts stay
+    /// speculative until finalized: its sentence assembler is flushed instead.
+    private func commitPendingModernDraft() {
+        guard activeHeuristicLanguage != .japanese else { return }
+        let pending = latestModernText.trimmingCharacters(in: .whitespacesAndNewlines)
+        latestModernText = ""
+        guard pending.isEmpty == false else { return }
+        commitModernText(pending, clearDraftAfter: true)
+    }
+
+    #if DEBUG
+    /// Runs the fallback's commit-and-stop on the capture queue, without starting
+    /// the legacy recognizer, for a draft the transcriber had not finalized.
+    func failOverWithPendingDraftForTesting(_ text: String, localeIdentifier: String,
+                                            transcriptHandler: @escaping @MainActor (RecognizedSentence) -> Void) {
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            self.transcriptHandler = transcriptHandler
+            self.activeLocaleIdentifier = localeIdentifier
+            self.latestModernText = text
+            self.commitPendingModernDraft()
+            self.stopModernSpeechRecognizer()
+        }
+    }
+    #endif
+
     private func fallbackFromSpeechAnalyzer(_ error: Error) {
         captureQueue.async { [weak self] in
             guard let self,
@@ -616,6 +644,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
                 return
             }
 
+            self.commitPendingModernDraft()
             self.stopModernSpeechRecognizer()
 
             do {
