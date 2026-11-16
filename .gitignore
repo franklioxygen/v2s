@@ -31,3 +31,6 @@ docs/notes/
 
 #Ignore cursor AI rules
 .cursor/rules/codacy.mdc
+
+# Python bytecode from running scripts and their tests
+__pycache__/
