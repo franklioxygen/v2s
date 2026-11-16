@@ -14,6 +14,19 @@ final class DraftSentenceSplitTests: XCTestCase {
             XCTAssertEqual(DraftSentences.split(text), expected, text)
         }
     }
+
+    func testCurrentLineIsTheNewestCompleteSentence() {
+        func rows(_ sources: [String]) -> [OverlayDraftRow] {
+            sources.map { OverlayDraftRow(sourceText: $0, translatedText: "", stablePrefixLength: 0) }
+        }
+        // Recorded at ~50 s: two finished sentences and one still being spoken.
+        XCTAssertEqual(DraftSentences.currentRowIndex(in: rows(["いただきますまいは職場の先輩だったが。", "綺麗で優しくて仕事もできる。", "結婚して1年になる"])), 1)
+        XCTAssertEqual(DraftSentences.currentRowIndex(in: rows(["夫婦なんだから助け合いましょう。", "ありがとう。"])), 1)
+        XCTAssertNil(DraftSentences.currentRowIndex(in: rows(["結婚して1年になる"])), "Only an unfinished sentence: the caption stays current")
+        XCTAssertNil(DraftSentences.currentRowIndex(in: []))
+        XCTAssertEqual(DraftSentences.currentRowIndex(in: rows(["We met there.", "I called Mr."])), 0, "An abbreviation does not end a sentence")
+        XCTAssertEqual(DraftSentences.currentRowIndex(in: rows(["¿Dónde estás?", "「行こう」"])), 0)
+    }
 }
 
 /// Roll-up drafts: each recognized sentence is its own row as soon as it is
@@ -98,6 +111,35 @@ final class DraftRowsTests: XCTestCase {
             model.finishCaptionTranslationForTesting(promotionID: id, text: "麻衣是职场前辈。")
             XCTAssertEqual(model.overlayState?.translatedText, "麻衣是职场前辈。")
             XCTAssertEqual(model.draftRows.map(\.sourceText), ["綺麗で"], "The old wording must not stay beside its correction")
+        }
+    }
+
+    func testCaptionWithoutItsOwnTranslationShowsItsRowsLatestOne() async throws {
+        try await withModel { model in
+            // Recorded at 51–58 s: the sentence finalized before the translation
+            // of its last revision arrived, and the caption line used to be empty.
+            let id = UUID(), first = "結婚して1年になるが"
+            receive(first, id: id, on: model)
+            model.finishDraftRowTranslationForTesting(first, text: "结婚一年了")
+            receive(first + "、なんで俺みたいな男と", id: id, on: model)
+            XCTAssertEqual(model.draftRows.first?.translatedText, "结婚一年了", "A revision keeps the last translation meanwhile")
+            let final = "結婚して1年になるが、なんで俺みたいな男と一緒になってくれたのか"
+            model.enqueueRecognizedSentence(.init(text: final, promotionSegmentID: id, recognitionID: UUID()),
+                                            source: .preview, sourceLanguageID: "ja", targetLanguageID: "zh-Hans")
+            XCTAssertEqual(model.overlayState?.sourceText, final)
+            XCTAssertEqual(model.overlayState?.translatedText, "结婚一年了")
+            XCTAssertTrue(model.overlayState?.committedTranslationIsProvisional == true)
+            XCTAssertTrue(model.draftRows.isEmpty)
+            XCTAssertEqual(model.transcriptEntries.last?.translatedText, "", "The transcript keeps only real translations")
+
+            // Rolled up into history, the stand-in is still replaced by the real translation.
+            model.enqueueRecognizedSentence(.init(text: "今でもわからない", recognitionID: UUID()),
+                                            source: .preview, sourceLanguageID: "ja", targetLanguageID: "zh-Hans")
+            XCTAssertEqual(model.overlayState?.history.last?.translatedText, "结婚一年了")
+            let real = "结婚一年了，为什么会和我这样的男人在一起"
+            model.finishCaptionTranslationForTesting(promotionID: id, text: real)
+            XCTAssertEqual(model.overlayState?.history.last?.translatedText, real)
+            XCTAssertEqual(model.transcriptEntries.first?.translatedText, real)
         }
     }
 

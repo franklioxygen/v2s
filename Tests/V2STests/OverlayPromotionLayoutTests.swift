@@ -40,7 +40,7 @@ final class OverlayPromotionLayoutTests: XCTestCase {
         try await checkPromotion(mode: .both, archivesAfterPromotion: true)
     }
 
-    func testDraftRemainsVisibleWhileCommittedTranslationIsPending() async throws {
+    func testProvisionalTranslationKeepsTheRowsInPlace() async throws {
         for mode in [SubtitleDisplayMode.both, .translatedOnly] {
             try await checkPromotion(mode: mode, waitsForTranslation: true)
         }
@@ -77,6 +77,34 @@ final class OverlayPromotionLayoutTests: XCTestCase {
         print("ROW LAYOUT: draft=\(before), final=\(after)")
     }
 
+    func testNewestCompleteSentenceIsTheCurrentLineBeforeItIsFinalized() async throws {
+        guard ProcessInfo.processInfo.environment["V2S_OVERLAY_LAYOUT_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set V2S_OVERLAY_LAYOUT_INTEGRATION=1 to render the native overlay")
+        }
+        // Recorded at ~50 s: the caption line held 美味しそう食べよう while two newer,
+        // complete sentences waited on draft rows for the recognizer to finalize them.
+        let parts = ["まいは先輩だった。", "綺麗で優しい。", "結婚して"]
+        let (model, host, window, _) = try makeDraftWindow(
+            parts, translation: "麻衣是前辈。漂亮又温柔。结婚", size: NSSize(width: 540, height: 420))
+        defer { window.close(); model.stopSession() }
+        var state = try XCTUnwrap(model.overlayState)
+        state.translatedText = "看起来很好吃"
+        state.sourceText = "美味しそう食べよう"
+        state.committedPromotionID = UUID()
+        model.previewOverlayForTesting(state)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(model.draftRows.map(\.sourceText), parts)
+        let rows = try rowPeakOpacities(host, name: "current-line")
+        print("CURRENT LINE opacities: \(rows.map { String(format: "%.2f", $0) })")
+        // caption tr/src, row 1 tr/src, row 2 tr/src, row 3 tr/src
+        XCTAssertEqual(rows.count, 8)
+        guard rows.count == 8 else { return }
+        XCTAssertGreaterThan(rows[4], 0.9, "The newest complete sentence is the bright current line")
+        XCTAssertLessThan(rows[0], 0.8, "The older caption reads as history")
+        XCTAssertLessThan(rows[2], 0.8)
+        XCTAssertLessThan(rows[6], 0.7, "The unfinished sentence still looks like a draft")
+    }
+
     func testBothSplitSentencesRemainVisibleAfterPromotion() async throws {
         guard ProcessInfo.processInfo.environment["V2S_OVERLAY_LAYOUT_INTEGRATION"] == "1" else {
             throw XCTSkip("Set V2S_OVERLAY_LAYOUT_INTEGRATION=1 to render the native overlay")
@@ -92,7 +120,8 @@ final class OverlayPromotionLayoutTests: XCTestCase {
         let before = try snapshot(host, name: "split-draft")
         enqueue(sentences, indices: [0, 1], id: id, on: model)
         model.receiveDraftForTesting(nil)
-        try await Task.sleep(nanoseconds: 80_000_000)
+        // Let the roll-up animation settle before reading glyph rows.
+        try await Task.sleep(nanoseconds: 400_000_000)
         XCTAssertEqual(model.overlayState?.sourceText, sentences[1])
         XCTAssertEqual(model.overlayState?.translatedText, "欢迎回来。")
         XCTAssertEqual(model.overlayState?.history.map(\.sourceText), [sentences[0]])
@@ -147,6 +176,27 @@ final class OverlayPromotionLayoutTests: XCTestCase {
             model.enqueueRecognizedSentence(.init(text: parts[index], promotionSegmentID: index == 0 ? id : nil,
                 translationContext: SentenceTranslationContext(sentences: parts, sentenceIndex: index, draftSegmentID: id),
                 recognitionID: UUID()), source: .preview, sourceLanguageID: "ja", targetLanguageID: "zh-Hans")
+        }
+    }
+
+    /// The strongest text opacity in each glyph row, top to bottom.
+    private func rowPeakOpacities(_ host: NSView, name: String) throws -> [CGFloat] {
+        let ranges = try snapshot(host, name: name)
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        let captured = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: captured)
+        let scale = CGFloat(captured.pixelsHigh) / host.bounds.height
+        return ranges.map { range in
+            var peak: CGFloat = 0
+            for y in Int(range.lowerBound * scale)...Int(range.upperBound * scale) where y < captured.pixelsHigh {
+                for x in stride(from: 0, to: captured.pixelsWide, by: 2) {
+                    guard let color = captured.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                          color.redComponent > color.greenComponent * 2 else { continue }
+                    peak = max(peak, color.alphaComponent)
+                }
+            }
+            return peak
         }
     }
 
@@ -212,7 +262,9 @@ final class OverlayPromotionLayoutTests: XCTestCase {
         let name = "\(mode.rawValue)-\(Int(width))-\(translation == nil ? "pending" : "translated")-\(hasPreviousCaption)-\(keepsDraftDuringPromotion)-\(archivesAfterPromotion)-\(waitsForTranslation)"
         try await Task.sleep(nanoseconds: 500_000_000)
         let before = try snapshot(host, name: name + "-draft")
-        var committed = OverlayPreviewState(translatedText: waitsForTranslation ? "" : (translation ?? ""), sourceText: source, sourceName: "Test")
+        var committed = OverlayPreviewState(translatedText: translation ?? "", sourceText: source, sourceName: "Test")
+        // While waiting for its own translation the caption shows the draft's.
+        committed.committedTranslationIsProvisional = waitsForTranslation && translation != nil
         committed.history = draft.history
         if hasPreviousCaption {
             committed.history.append(OverlayHistoryEntry(translatedText: draft.translatedText, sourceText: draft.sourceText))
@@ -229,6 +281,7 @@ final class OverlayPromotionLayoutTests: XCTestCase {
         try await Task.sleep(nanoseconds: 80_000_000)
         let during = try snapshot(host, name: name + "-promotion")
         committed.translatedText = translation ?? ""
+        committed.committedTranslationIsProvisional = false
         committed.draftSourceText = nil
         committed.draftPromotionID = nil
         committed.clearDraftTranslation()

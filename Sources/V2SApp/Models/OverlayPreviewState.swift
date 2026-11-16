@@ -23,6 +23,21 @@ enum DraftSentences {
         }
         return parts
     }
+
+    /// The sentence has ended, even if the recognizer has not finalized it yet.
+    static func isComplete(_ sentence: String) -> Bool {
+        let body = sentence.trimmingCharacters(in: CharacterSet(charactersIn: "\"'”’」』）)]} \n"))
+        return SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: body)
+    }
+
+    /// The draft row that is the current line: the newest complete sentence.
+    /// The recognizer may finalize sentences only at a pause, so during
+    /// continuous speech the caption line would otherwise stay on an old one.
+    static func currentRowIndex(in rows: [OverlayDraftRow]) -> Int? {
+        guard let last = rows.last else { return nil }
+        let complete = isComplete(last.sourceText) ? rows.count : rows.count - 1
+        return complete > 0 ? complete - 1 : nil
+    }
 }
 
 struct OverlayHistoryEntry: Identifiable, Equatable {
@@ -63,19 +78,14 @@ struct OverlayPreviewState: Equatable {
     /// a draft translation was already visible and is being directly replaced.
     var skipCommittedFadeIn: Bool = false
 
+    /// The committed translation is the draft's, standing in until the
+    /// caption's own translation arrives.
+    var committedTranslationIsProvisional: Bool = false
+
     // MARK: Derived helpers
 
     var hasActiveDraftLayer: Bool {
         draftSourceText?.isEmpty == false
-    }
-
-    /// Keep a provisional translation visible until the final caption has one.
-    /// Its text remains draft-only: it may belong to an earlier source revision.
-    var isAwaitingCommittedTranslation: Bool {
-        guard hasActiveDraftLayer, let draftPromotionID,
-              draftPromotionID == committedPromotionID,
-              translatedText.isEmpty else { return false }
-        return visibleDraftTranslatedText(for: draftSourceText ?? "", promotionID: draftPromotionID) != nil
     }
 
     var hasHistory: Bool {

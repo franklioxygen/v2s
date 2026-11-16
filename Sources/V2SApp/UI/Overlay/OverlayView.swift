@@ -128,13 +128,23 @@ struct OverlayView: View {
         .transaction { $0.animation = nil }
     }
 
+    /// The current line is the newest complete sentence. When that is still a
+    /// draft row, the caption above it reads like the newest history entry.
     private func committedLayer(_ state: OverlayPreviewState) -> some View {
-        captionPair(
+        let isCurrent = currentDraftRowIndex == nil
+        return captionPair(
             translated: state.translatedText,
-            translatedColor: baseSubtitleColor,
+            translatedColor: isCurrent
+                // A provisional translation is dimmed until the caption's own arrives.
+                ? (state.committedTranslationIsProvisional ? subtitleColor(opacity: 0.6) : baseSubtitleColor)
+                : subtitleColor(opacity: Self.recentTranslatedOpacity),
             source: state.sourceText,
-            sourceColor: subtitleColor(opacity: 0.82)
+            sourceColor: subtitleColor(opacity: isCurrent ? 0.82 : Self.recentSourceOpacity)
         )
+    }
+
+    private var currentDraftRowIndex: Int? {
+        DraftSentences.currentRowIndex(in: model.draftRows)
     }
 
     private func translatedText(_ text: String, color: Color) -> some View {
@@ -164,27 +174,35 @@ struct OverlayView: View {
     // MARK: - Draft layer (50–65% opacity, stable prefix slightly brighter)
 
     /// One row per sentence being heard. Sentences already on the caption line
-    /// are not among the rows, so nothing is drawn twice.
+    /// are not among the rows, so nothing is drawn twice. A complete sentence
+    /// reads as a caption before the recognizer finalizes it; only the sentence
+    /// still being spoken looks like a draft.
     private func draftLayer(_ state: OverlayPreviewState) -> some View {
-        VStack(alignment: .center, spacing: Self.liveStackSpacing) {
-            ForEach(Array(model.draftRows.enumerated()), id: \.offset) { _, row in
-                captionPair(
-                    translated: row.translatedText,
-                    translatedColor: subtitleColor(opacity: 0.55),
-                    source: row.sourceText,
-                    sourceColor: subtitleColor(opacity: 0.48),
-                    draftStablePrefixLength: row.stablePrefixLength
-                )
+        let current = currentDraftRowIndex
+        return VStack(alignment: .center, spacing: Self.liveStackSpacing) {
+            ForEach(Array(model.draftRows.enumerated()), id: \.offset) { index, row in
+                if let current, index <= current {
+                    captionPair(
+                        translated: row.translatedText,
+                        translatedColor: index == current ? baseSubtitleColor : subtitleColor(opacity: Self.recentTranslatedOpacity),
+                        source: row.sourceText,
+                        sourceColor: subtitleColor(opacity: index == current ? 0.82 : Self.recentSourceOpacity)
+                    )
+                } else {
+                    captionPair(
+                        translated: row.translatedText,
+                        translatedColor: subtitleColor(opacity: 0.55),
+                        source: row.sourceText,
+                        sourceColor: subtitleColor(opacity: 0.48),
+                        draftStablePrefixLength: row.stablePrefixLength
+                    )
+                }
             }
         }
     }
 
     private func showsDraftLayer(_ state: OverlayPreviewState) -> Bool {
         state.hasActiveDraftLayer && model.draftRows.isEmpty == false
-    }
-
-    private func keepsDraftVisibleDuringPromotion(_ state: OverlayPreviewState) -> Bool {
-        showsTranslatedSubtitle && state.isAwaitingCommittedTranslation
     }
 
     private func historyEntry(
@@ -240,7 +258,6 @@ struct OverlayView: View {
     }
 
     private func hasCommittedCaption(_ state: OverlayPreviewState) -> Bool {
-        guard !keepsDraftVisibleDuringPromotion(state) else { return false }
         return usesSourceAsTranslationFallback(
             translated: state.translatedText,
             source: state.sourceText
@@ -582,6 +599,9 @@ private extension OverlayView {
         blendDuration: 0.08
     )
     static let liveStackSpacing: CGFloat = 10.0
+    /// The newest history entry's opacities (see historyEntry).
+    static let recentTranslatedOpacity = 0.68
+    static let recentSourceOpacity = 0.46
     static let captionBottomInset: CGFloat = 3.0
     static let captionPairSpacing: CGFloat = 4.0
     static let textOutlineOffsets: [CGSize] = [

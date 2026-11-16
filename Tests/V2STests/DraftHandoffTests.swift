@@ -52,25 +52,28 @@ final class DraftHandoffTests: XCTestCase {
             enqueue(final, id: id, on: model)
             model.receiveDraftForTesting(nil)
             try await waitUntil { model.overlayState?.committedPromotionID == id }
-            try await Task.sleep(nanoseconds: 300_000_000)
-            XCTAssertEqual(model.overlayState?.draftTranslatedText, "今天去公园。")
-            XCTAssertTrue(model.overlayState?.isAwaitingCommittedTranslation == true)
-            XCTAssertEqual(model.overlayState?.translatedText, "")
+            // The caption line shows the draft's translation, dimmed, instead of an
+            // empty line; the transcript waits for the real one.
+            XCTAssertEqual(model.overlayState?.translatedText, "今天去公园。")
+            XCTAssertTrue(model.overlayState?.committedTranslationIsProvisional == true)
+            XCTAssertNil(model.overlayState?.draftSourceText)
             XCTAssertEqual(model.transcriptEntries.last?.translatedText, "")
 
-            // The display queue's 3-second translation timeout must not blank
-            // the draft either; a late translation can still take over.
+            // A slow translation never blanks it: after its reading time the caption
+            // rolls up into history with the stand-in, which is replaced there.
             try await Task.sleep(nanoseconds: 3_100_000_000)
-            XCTAssertTrue(model.overlayState?.isAwaitingCommittedTranslation == true)
-            XCTAssertEqual(model.overlayState?.draftTranslatedText, "今天去公园。")
+            XCTAssertEqual(model.overlayState?.history.last?.translatedText, "今天去公园。")
+            XCTAssertEqual(model.overlayState?.translatedText, "")
+            XCTAssertFalse(model.overlayState?.committedTranslationIsProvisional == true)
 
             model.finishCaptionTranslationForTesting(promotionID: id, text: "今天我要去公园。")
-            try await waitUntil { model.overlayState?.translatedText == "今天我要去公园。" }
-            XCTAssertNil(model.overlayState?.draftSourceText)
+            XCTAssertEqual(model.overlayState?.history.last?.translatedText, "今天我要去公园。")
             XCTAssertEqual(model.transcriptEntries.last?.translatedText, "今天我要去公园。")
+            let shown = ["今天去公园。", "今天我要去公园。"]
             XCTAssertTrue(states.allSatisfy { state in
-                state.draftTranslatedText == "今天去公园。" || state.translatedText == "今天我要去公园。"
-            }, "Every published state must retain the draft or its final replacement")
+                state.draftTranslatedText == "今天去公园。" || shown.contains(state.translatedText)
+                    || shown.contains(state.history.last?.translatedText ?? "")
+            }, "Every published state must show the draft's translation or its replacement")
         }
     }
 
@@ -90,7 +93,7 @@ final class DraftHandoffTests: XCTestCase {
             let id = UUID(), nextID = UUID()
             installTranslatedDraft("今日は公園へ。", translation: "今天去公园。", id: id, on: model)
             enqueue("今日は公園へ行きます。", id: id, on: model)
-            try await waitUntil { model.overlayState?.isAwaitingCommittedTranslation == true }
+            try await waitUntil { model.overlayState?.committedTranslationIsProvisional == true }
             model.receiveDraftForTesting(draft("一緒に行こう。", id: nextID), target: "ja")
             model.finishCaptionTranslationForTesting(promotionID: id, text: "今天我要去公园。")
             XCTAssertEqual(model.overlayState?.draftPromotionID, nextID)
@@ -110,12 +113,13 @@ final class DraftHandoffTests: XCTestCase {
         }
     }
 
-    func testStoppingSessionClearsAHeldDraft() async throws {
+    func testStoppingSessionClearsTheDraft() async throws {
         try await withModel { model in
             let id = UUID()
             installTranslatedDraft("今日は公園へ。", translation: "今天去公园。", id: id, on: model)
             enqueue("今日は公園へ行きます。", id: id, on: model)
-            try await waitUntil { model.overlayState?.isAwaitingCommittedTranslation == true }
+            model.receiveDraftForTesting(draft("一緒に行こう。", id: UUID()), target: "ja")
+            try await waitUntil { model.overlayState?.hasActiveDraftLayer == true }
             model.stopSession()
             XCTAssertFalse(model.overlayState?.hasActiveDraftLayer == true)
         }

@@ -1662,10 +1662,11 @@ final class AppModel: ObservableObject {
             if !draftRows.isEmpty { draftRows = [] }
             return
         }
-        if draftRowCache.draftID != id {
+        let languages = "\(activeDraftSourceLanguageID ?? "")>\(activeDraftTargetLanguageID ?? "")"
+        if draftRowCache.draftID != id || draftRowCache.languages != languages {
             draftRowTranslationTask?.cancel()
             draftRowTranslationTask = nil
-            draftRowCache = DraftRowCache(draftID: id)
+            draftRowCache = DraftRowCache(draftID: id, languages: languages)
         }
         let parts = DraftSentences.split(source)
         if let whole = state.currentDraftTranslatedText(for: source, promotionID: id) {
@@ -1674,8 +1675,7 @@ final class AppModel: ObservableObject {
                 for (part, translation) in zip(parts, aligned) { draftRowCache.translations[part] = translation }
             }
         }
-        // A caption still waiting for its translation keeps its draft visible.
-        let finalized = state.isAwaitingCommittedTranslation ? 0 : finalizedDraftRowCount(parts)
+        let finalized = finalizedDraftRowCount(parts)
         var rows: [OverlayDraftRow] = []
         var offset = source.startIndex
         for (index, part) in parts.enumerated() {
@@ -1700,7 +1700,10 @@ final class AppModel: ObservableObject {
     /// Leading sentences of the draft that already reached the caption line. A
     /// final result may reword a sentence, so fall back to their count.
     private func finalizedDraftRowCount(_ parts: [String]) -> Int {
-        guard !draftRowCache.finalized.isEmpty else { return 0 }
+        guard !draftRowCache.finalized.isEmpty else {
+            // The caption line already holds this draft's first sentence.
+            return overlayState?.committedPromotionID == draftRowCache.draftID && draftRowCache.draftID != nil ? 1 : 0
+        }
         func letters(_ text: String) -> String {
             String(String.UnicodeScalarView(text.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }))
         }
@@ -1717,7 +1720,9 @@ final class AppModel: ObservableObject {
 
     /// Completed sentences are translated once each, in order, with the passage
     /// as context; the sentence still being heard follows its latest revision.
-    /// A single-sentence draft is translated whole by scheduleDraftTranslation.
+    /// A newer revision never cancels a translation in progress: the result is
+    /// shown as soon as it arrives and the newest revision is translated next,
+    /// so a row's translation is at most one revision behind its words.
     private func translateMissingDraftRows() {
         guard draftRowTranslationTask == nil, showsTranslatedSubtitle,
               let from = activeDraftSourceLanguageID, let to = activeDraftTargetLanguageID, from != to,
@@ -1734,6 +1739,7 @@ final class AppModel: ObservableObject {
                     if !translated.isEmpty, !self.shouldTreatAsMissingTranslation(
                         translated, sourceText: part, sourceLanguageID: from, targetLanguageID: to) {
                         self.draftRowCache.translations[part] = translated
+                        self.draftRowCache.lastShown[next.index] = translated
                         self.refreshDraftRows()
                     }
                 }
@@ -1747,7 +1753,6 @@ final class AppModel: ObservableObject {
         guard let state = overlayState, let id = state.draftPromotionID, id == draftRowCache.draftID,
               let source = state.draftSourceText, !source.isEmpty else { return nil }
         let parts = DraftSentences.split(source)
-        guard parts.count > 1 else { return nil }
         let finalized = finalizedDraftRowCount(parts)
         guard let index = parts.indices.first(where: {
             $0 >= finalized && draftRowCache.translations[parts[$0]] == nil && !draftRowCache.attempted.contains(parts[$0])
@@ -1846,7 +1851,6 @@ final class AppModel: ObservableObject {
               draftID == draftRowCache.draftID, !draftRowCache.finalized.isEmpty, draftRows.isEmpty else { return }
         // A visible, older draft translation can remain useful while the final
         // source is being translated, but must not become the committed result.
-        guard !showsTranslatedSubtitle || !state.isAwaitingCommittedTranslation else { return }
         clearDraftOverlay()
     }
 
@@ -1858,9 +1862,9 @@ final class AppModel: ObservableObject {
     ) {
         draftTranslationTask?.cancel()
         draftTranslationGeneration &+= 1
-        // A draft of several sentences is translated one row at a time
-        // (translateMissingDraftRows), so finished sentences keep their wording.
-        guard sourceLanguageID == targetLanguageID || DraftSentences.split(text).count == 1 else {
+        // Drafts are translated one row at a time (translateMissingDraftRows).
+        // Here a same-language draft only mirrors its own words.
+        guard sourceLanguageID == targetLanguageID else {
             draftTranslationTask = nil
             return
         }
@@ -1932,6 +1936,7 @@ final class AppModel: ObservableObject {
         cancelCommittedCaptionArchive()
         clearDraftOverlay()
         overlayState?.translatedText = ""
+        overlayState?.committedTranslationIsProvisional = false
         overlayState?.sourceText = ""
         overlayState?.committedPromotionID = nil
         displayedCaption = nil
@@ -1957,7 +1962,8 @@ final class AppModel: ObservableObject {
         translatedText: String,
         sourceText: String,
         promotionID: UUID? = nil,
-        bumpEpoch: Bool = false
+        bumpEpoch: Bool = false,
+        provisional: Bool = false
     ) {
         let sourceIsVisible = showsOriginalSubtitle || (showsTranslatedSubtitle && translatedText.isEmpty)
         let visibleTextChanged = (sourceIsVisible && overlayState?.sourceText != sourceText)
@@ -1967,6 +1973,7 @@ final class AppModel: ObservableObject {
         }
 
         overlayState?.translatedText = translatedText
+        overlayState?.committedTranslationIsProvisional = provisional && translatedText.isEmpty == false
         overlayState?.sourceText = sourceText
         if let promotionID {
             overlayState?.committedPromotionID = promotionID
@@ -2383,14 +2390,20 @@ final class AppModel: ObservableObject {
 
         let initialTranslation = initialCaptionTranslation(for: caption)
         let translationExpected = caption.sourceLanguageID != caption.targetLanguageID
-        let shownTranslation = initialTranslation ?? (translationExpected ? "" : caption.sourceText)
+        // Until the caption's own translation arrives, its draft row's latest one
+        // holds the line (dimmed), so the caption never appears untranslated.
+        let provisional = initialTranslation == nil && translationExpected
+            ? provisionalDraftTranslation(for: caption, draftID: draftID) : nil
+        let shownTranslation = initialTranslation ?? provisional ?? (translationExpected ? "" : caption.sourceText)
         displayedCaption = caption
         // A translation already readable on the draft row appears without a fade.
         overlayState?.skipCommittedFadeIn = initialTranslation?.isEmpty == false
         updateCommittedOverlay(translatedText: shownTranslation, sourceText: caption.sourceText,
-                               promotionID: caption.promotionID, bumpEpoch: true)
+                               promotionID: caption.promotionID, bumpEpoch: true, provisional: provisional != nil)
         overlayState?.sourceName = caption.sourceName
-        upsertTranscriptEntry(id: caption.id, sourceText: caption.sourceText, translatedText: shownTranslation)
+        // The transcript keeps only real translations.
+        upsertTranscriptEntry(id: caption.id, sourceText: caption.sourceText,
+                              translatedText: provisional == nil ? shownTranslation : "")
         if shownTranslation.isEmpty == false {
             translationRevisions[caption.id] = shownTranslation
         }
@@ -2403,6 +2416,19 @@ final class AppModel: ObservableObject {
         if translationExpected, initialTranslation == nil {
             watchCaptionTranslation(caption)
         }
+    }
+
+    /// The draft row's latest translation for this sentence, even one made for an
+    /// earlier revision of its words.
+    private func provisionalDraftTranslation(for caption: QueuedCaption, draftID: UUID) -> String? {
+        guard draftID == draftRowCache.draftID, let source = overlayState?.draftSourceText else { return nil }
+        let parts = DraftSentences.split(source)
+        let index = parts.firstIndex { SentenceTranslationContext.equivalentSource($0, caption.sourceText) }
+            ?? min(finalizedDraftRowCount(parts), parts.count - 1)
+        guard parts.indices.contains(index),
+              let translation = draftRowCache.translations[parts[index]] ?? draftRowCache.lastShown[index] else { return nil }
+        let shown = sanitizedDisplayText(translation)
+        return shown.isEmpty ? nil : shown
     }
 
     /// Two captions in a row that never receive a translation mean the
@@ -3182,6 +3208,8 @@ private struct QueuedCaption: Identifiable, Equatable {
 
 private struct DraftRowCache {
     var draftID: UUID?
+    /// Source and target language the cached translations are for.
+    var languages = ""
     /// Translation of each sentence of this draft, by its exact text.
     var translations: [String: String] = [:]
     /// Sentences already sent for translation, so a failure is not retried in a loop.
