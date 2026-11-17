@@ -86,6 +86,7 @@
 		B00000000000000000000024 /* LiveTranscriptionSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000041 /* LiveTranscriptionSession.swift */; };
 		B00000000000000000000025 /* UpdaterService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000085 /* UpdaterService.swift */; };
 		B00000000000000000000026 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000070 /* Assets.xcassets */; };
+		B00000000000000000000032 /* container-migration.plist in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000033 /* container-migration.plist */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -132,6 +133,7 @@
 		A000000000000000000000A1 /* JapaneseSentenceAssembler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JapaneseSentenceAssembler.swift; sourceTree = "<group>"; };
 		B00000000000000000000027 /* v2s.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = v2s.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000028 /* Info-AppStore.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Info-AppStore.plist"; sourceTree = "<group>"; };
+		B00000000000000000000033 /* container-migration.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "container-migration.plist"; sourceTree = "<group>"; };
 		B00000000000000000000029 /* v2s-AppStore.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "v2s-AppStore.entitlements"; sourceTree = "<group>"; };
 		B0000000000000000000002A /* v2s.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = v2s.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -312,6 +314,7 @@
 			children = (
 				A00000000000000000000015 /* Info.plist */,
 				B00000000000000000000028 /* Info-AppStore.plist */,
+				B00000000000000000000033 /* container-migration.plist */,
 				B0000000000000000000002A /* v2s.entitlements */,
 				B00000000000000000000029 /* v2s-AppStore.entitlements */,
 			);
@@ -423,6 +426,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B00000000000000000000026 /* Assets.xcassets in Resources */,
+				B00000000000000000000032 /* container-migration.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

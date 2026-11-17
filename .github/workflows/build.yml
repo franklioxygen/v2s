@@ -43,7 +43,16 @@ jobs:
               echo "::error::App Store binary links Sparkle"
               exit 1
             fi
+            # Moves existing settings into the sandbox container on first launch.
+            if [ ! -f "$APP/Contents/Resources/container-migration.plist" ]; then
+              echo "::error::container-migration.plist is missing from the App Store build"
+              exit 1
+            fi
           else
             test -d "$APP/Contents/Frameworks/Sparkle.framework"
+            if [ -e "$APP/Contents/Resources/container-migration.plist" ]; then
+              echo "::error::container-migration.plist belongs only in the App Store build"
+              exit 1
+            fi
           fi
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist"
