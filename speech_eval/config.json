@@ -1,0 +1,37 @@
+{
+  "mode": "balanced",
+  "tail_seconds": 4.0,
+  "recognition": {
+    "wer": {
+      "gate": 0.1,
+      "goal": 0.05
+    },
+    "cer": {
+      "gate": 0.08,
+      "goal": 0.04
+    },
+    "regression_tolerance": 0.01
+  },
+  "translation": {
+    "coverage_gate": 0.98,
+    "context_window": 2,
+    "chrf_regression_tolerance": 2.0,
+    "calibration": "calibration/TRANSLATION.md (run 20261116-213644): gate = lowest correct-word score, goal = 5th percentile",
+    "targets": {
+      "default": {
+        "chrf_order": 6,
+        "retention_gate": 0.94,
+        "retention_goal": 0.98
+      },
+      "zh-Hans": {
+        "chrf_order": 3,
+        "retention_gate": 0.92,
+        "retention_goal": 0.96
+      }
+    }
+  },
+  "lag": {
+    "p50_goal": 2.0,
+    "p90_goal": 4.0
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "id": "ru",
+  "name": "Russian",
+  "speech_locale": "ru_RU",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Milena"
+      ],
+      "b_pitch": 0.84,
+      "rate": 192
+    },
+    "news": {
+      "voices": [
+        "Milena"
+      ],
+      "rate": 225
+    }
+  },
+  "normalize": {
+    "replace": [
+      [
+        "ё",
+        "е"
+      ]
+    ],
+    "why": "ё is optional in standard Russian writing."
+  }
+}

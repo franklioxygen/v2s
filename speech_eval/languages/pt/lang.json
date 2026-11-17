@@ -1,0 +1,26 @@
+{
+  "id": "pt",
+  "name": "Portuguese",
+  "speech_locale": "pt_BR",
+  "expected_backend": "on-device",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Luciana"
+      ],
+      "b_pitch": 0.84,
+      "rate": 218
+    },
+    "news": {
+      "voices": [
+        "Luciana"
+      ],
+      "rate": 286
+    }
+  }
+}

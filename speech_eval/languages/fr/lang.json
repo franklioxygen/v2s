@@ -1,0 +1,26 @@
+{
+  "id": "fr",
+  "name": "French",
+  "speech_locale": "fr_FR",
+  "expected_backend": "on-device",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Thomas",
+        "Jacques"
+      ],
+      "rate": 180
+    },
+    "news": {
+      "voices": [
+        "Thomas"
+      ],
+      "rate": 230
+    }
+  }
+}

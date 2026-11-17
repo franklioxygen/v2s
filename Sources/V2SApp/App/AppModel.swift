@@ -60,6 +60,8 @@ final class AppModel: ObservableObject {
     private var lastTranslationProgressAt = Date.distantPast
     #if DEBUG
     var draftRowTranslatorForTesting: ((String, SentenceTranslationContext?) async throws -> String)?
+    /// Translates committed captions in place of the translation session.
+    var captionTranslatorForTesting: ((String) async throws -> String)?
     #endif
     private var committedCaptionArchiveTask: Task<Void, Never>?
     private var languageResourcePreparationTask: Task<Void, Never>?
@@ -1792,7 +1794,7 @@ final class AppModel: ObservableObject {
             return try await draftRowTranslatorForTesting(text, context)
         }
         #endif
-        return try await translationCoordinator.translate(text, from: from, to: to, context: context)
+        return try await translationCoordinator.translate(text, from: from, to: to, context: context, quality: .preview)
     }
 
     private func handlePartialDraft(
@@ -1935,7 +1937,8 @@ final class AppModel: ObservableObject {
             let translated = try? await translationCoordinator.translate(
                 text,
                 from: sourceLanguageID,
-                to: targetLanguageID
+                to: targetLanguageID,
+                quality: .preview
             )
 
             guard !Task.isCancelled,
@@ -2130,6 +2133,10 @@ final class AppModel: ObservableObject {
             targetLanguageID: targetLanguageID,
             context: sentence.translationContext
         )
+        // A draft translated by the low-latency model only stands in for the caption's own.
+        let promotedDraftTranslationIsPreview = translationCoordinator.hasServedPreviews(
+            from: sourceLanguageID, to: targetLanguageID
+        )
         if let promotionID = sentence.promotionSegmentID {
             guard isFinalizedDraftPromotionID(promotionID) == false else {
                 return
@@ -2150,6 +2157,7 @@ final class AppModel: ObservableObject {
                 sourceLanguageID: sourceLanguageID,
                 targetLanguageID: targetLanguageID,
                 promotedDraftTranslation: promotedDraftTranslation,
+                promotedDraftTranslationIsPreview: promotedDraftTranslationIsPreview,
                 translationContext: sentence.translationContext
             )
 
@@ -2172,6 +2180,7 @@ final class AppModel: ObservableObject {
                 sourceLanguageID: sourceLanguageID,
                 targetLanguageID: targetLanguageID,
                 promotedDraftTranslation: promotedDraftTranslation,
+                promotedDraftTranslationIsPreview: promotedDraftTranslationIsPreview,
                 translationContext: sentence.translationContext
             )
 
@@ -2317,6 +2326,11 @@ final class AppModel: ObservableObject {
 
     func receiveDraftForTesting(_ draft: DraftSegment?, source: InputSource = .preview, language: String = "ja", target: String = "zh-Hans") {
         handlePartialDraft(draft, source: source, sourceLanguageID: language, targetLanguageID: target)
+    }
+
+    /// As if this pair's drafts were translated by the low-latency model.
+    func markDraftTranslationsAsPreviewsForTesting(from source: String = "ja", to target: String = "zh-Hans") {
+        translationCoordinator.markPreviewsServedForTesting(from: source, to: target)
     }
 
     func finishCaptionTranslationForTesting(promotionID: UUID, text: String) {
@@ -2823,9 +2837,18 @@ final class AppModel: ObservableObject {
         // This translation was validated against this caption's words (or its
         // sentence in the full passage). Promotion is not a reason to replace it
         // with a new, context-free translation. Retries and refreshes use it too.
-        if let promoted = caption.promotedDraftTranslation, !promoted.isEmpty {
+        // One from the low-latency draft model is shown until the caption's own,
+        // more accurate translation arrives.
+        if let promoted = caption.promotedDraftTranslation, !promoted.isEmpty,
+           caption.promotedDraftTranslationIsPreview == false {
             return promoted
         }
+
+        #if DEBUG
+        if let captionTranslatorForTesting {
+            return try? await captionTranslatorForTesting(caption.sourceText)
+        }
+        #endif
 
         // The committed caption display path has its own wait timeout. Keep this
         // request alive so a slow translation can still backfill overlay history
@@ -3254,6 +3277,8 @@ private struct QueuedCaption: Identifiable, Equatable {
     let sourceLanguageID: String
     let targetLanguageID: String
     let promotedDraftTranslation: String?
+    /// The promoted translation came from the low-latency draft model.
+    let promotedDraftTranslationIsPreview: Bool
     let translationContext: SentenceTranslationContext?
 }
 

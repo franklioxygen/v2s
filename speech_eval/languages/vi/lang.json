@@ -1,0 +1,26 @@
+{
+  "id": "vi",
+  "name": "Vietnamese",
+  "speech_locale": "vi_VN",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Linh"
+      ],
+      "b_pitch": 0.84,
+      "rate": 206
+    },
+    "news": {
+      "voices": [
+        "Linh"
+      ],
+      "rate": 248
+    }
+  }
+}

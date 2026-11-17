@@ -1,0 +1,26 @@
+{
+  "id": "ms",
+  "name": "Malay",
+  "speech_locale": "ms_MY",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Amira"
+      ],
+      "b_pitch": 0.84,
+      "rate": 220
+    },
+    "news": {
+      "voices": [
+        "Amira"
+      ],
+      "rate": 261
+    }
+  }
+}

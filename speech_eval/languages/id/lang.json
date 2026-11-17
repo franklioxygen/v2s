@@ -1,0 +1,26 @@
+{
+  "id": "id",
+  "name": "Indonesian",
+  "speech_locale": "id_ID",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Damayanti"
+      ],
+      "b_pitch": 0.84,
+      "rate": 228
+    },
+    "news": {
+      "voices": [
+        "Damayanti"
+      ],
+      "rate": 280
+    }
+  }
+}

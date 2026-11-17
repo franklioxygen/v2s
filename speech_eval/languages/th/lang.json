@@ -1,0 +1,26 @@
+{
+  "id": "th",
+  "name": "Thai",
+  "speech_locale": "th_TH",
+  "expected_backend": "server",
+  "metric": "cer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Kanya"
+      ],
+      "b_pitch": 0.84,
+      "rate": 226
+    },
+    "news": {
+      "voices": [
+        "Kanya"
+      ],
+      "rate": 294
+    }
+  }
+}

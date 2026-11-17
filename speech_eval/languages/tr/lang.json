@@ -1,0 +1,47 @@
+{
+  "id": "tr",
+  "name": "Turkish",
+  "speech_locale": "tr_TR",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Yelda"
+      ],
+      "b_pitch": 0.84,
+      "rate": 207
+    },
+    "news": {
+      "voices": [
+        "Yelda"
+      ],
+      "rate": 264
+    }
+  },
+  "normalize": {
+    "replace": [
+      [
+        "İ",
+        "i"
+      ],
+      [
+        "I",
+        "ı"
+      ],
+      [
+        "â",
+        "a"
+      ],
+      [
+        "Â",
+        "a"
+      ]
+    ],
+    "why": "Turkish dotted/dotless i casing; circumflex is optional."
+  }
+}

@@ -10,6 +10,11 @@ import Translation
 /// sentences so the session (and its loaded translation models) remains warm
 /// during a live captioning session, and yields promptly when the language
 /// pair changes so a fresh session can be configured.
+///
+/// Drafts are the exception: where the system has a low-latency model installed
+/// (macOS 26.4+), they are translated on a session of their own with it, about ten
+/// times faster and slightly less accurate (speech_eval/calibration/STRATEGY.md).
+/// Committed captions are always translated by the view-anchored session.
 @MainActor
 final class TranslationCoordinator: ObservableObject {
     /// How long the runner keeps the current session alive while idle.
@@ -35,6 +40,14 @@ final class TranslationCoordinator: ObservableObject {
     private struct MemoKey: Hashable {
         let pair: LanguagePair
         let text: String
+    }
+
+    enum Quality {
+        /// Committed captions and the transcript: the system's most accurate model.
+        case final
+        /// Drafts, which a committed caption replaces: the low-latency model where
+        /// it is installed, else the same model as `final`.
+        case preview
     }
 
     enum Priority {
@@ -152,6 +165,37 @@ final class TranslationCoordinator: ObservableObject {
     private var lastRequestedAt = Date.distantPast
     private var lastWaitTimedOut = false
 
+    /// Low-latency sessions per pair, as `TranslationSession`s: a stored property
+    /// cannot require a newer system than its type.
+    private var previewSessions: [LanguagePair: AnyObject] = [:]
+    /// Pairs without an installed low-latency model, or whose model failed.
+    private var pairsWithoutPreviewModel: Set<LanguagePair> = []
+    /// Pairs for which some translation came from the low-latency model.
+    private var pairsWithPreviews: Set<LanguagePair> = []
+    /// Low-latency translations, kept apart so no committed caption reuses one.
+    private var previewMemo: [MemoKey: String] = [:]
+    private var previewMemoOrder: [MemoKey] = []
+    /// The latest low-latency request; each waits for the one before it.
+    private var previewTail: Task<Void, Never>?
+    #if DEBUG
+    /// Stands in for an installed low-latency model.
+    var previewTranslatorForTesting: ((String) async throws -> String)?
+
+    func markPreviewsServedForTesting(from source: String, to target: String) {
+        pairsWithPreviews.insert(LanguagePair(source: source, target: target))
+    }
+
+    func memoizedTranslationForTesting(_ text: String, from source: String, to target: String) -> String? {
+        translationMemo[MemoKey(pair: LanguagePair(source: source, target: target), text: text)]
+    }
+    #endif
+
+    /// Whether a draft translation for this pair may have come from the
+    /// low-latency model, so a caption promoted from it still needs its own.
+    func hasServedPreviews(from source: String, to target: String) -> Bool {
+        pairsWithPreviews.contains(LanguagePair(source: source, target: target))
+    }
+
     func prepareIfNeeded(
         from sourceIdentifier: String,
         to targetIdentifier: String
@@ -195,7 +239,8 @@ final class TranslationCoordinator: ObservableObject {
         from sourceIdentifier: String,
         to targetIdentifier: String,
         context: SentenceTranslationContext? = nil,
-        priority: Priority = .normal
+        priority: Priority = .normal,
+        quality: Quality = .final
     ) async throws -> String {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedText.isEmpty == false else {
@@ -211,7 +256,8 @@ final class TranslationCoordinator: ObservableObject {
         if let context, context.matchesCaption(trimmedText) {
             do {
                 let passage = try await translate(
-                    context.sourceText, from: sourceIdentifier, to: targetIdentifier, priority: priority
+                    context.sourceText, from: sourceIdentifier, to: targetIdentifier, priority: priority,
+                    quality: quality
                 )
                 if let sentence = context.translatedSentence(from: passage) { return sentence }
             } catch is CancellationError {
@@ -224,6 +270,9 @@ final class TranslationCoordinator: ObservableObject {
         let pair = LanguagePair(source: sourceIdentifier, target: targetIdentifier)
         if let memoized = translationMemo[MemoKey(pair: pair, text: trimmedText)] {
             return memoized
+        }
+        if quality == .preview, let previewed = try await previewTranslation(of: trimmedText, pair: pair) {
+            return previewed
         }
 
         let requestGeneration = generation
@@ -368,6 +417,115 @@ final class TranslationCoordinator: ObservableObject {
         installedPairs.removeAll()
         translationMemo.removeAll()
         translationMemoOrder.removeAll()
+        resetPreviews()
+    }
+
+    private func resetPreviews() {
+        if #available(macOS 26.0, *) {
+            for session in previewSessions.values {
+                (session as? TranslationSession)?.cancel()
+            }
+        }
+        previewSessions.removeAll()
+        pairsWithoutPreviewModel.removeAll()
+        pairsWithPreviews.removeAll()
+        previewMemo.removeAll()
+        previewMemoOrder.removeAll()
+        previewTail = nil
+    }
+
+    /// The low-latency model's translation, or nil when the pair has none installed
+    /// or it failed; the caller then translates as for a caption.
+    private func previewTranslation(of text: String, pair: LanguagePair) async throws -> String? {
+        let key = MemoKey(pair: pair, text: text)
+        if let memoized = previewMemo[key] {
+            return memoized
+        }
+        guard pairsWithoutPreviewModel.contains(pair) == false else {
+            return nil
+        }
+
+        let requestGeneration = generation
+        guard let translator = await previewTranslator(for: pair) else {
+            return nil
+        }
+        guard requestGeneration == generation else {
+            throw CancellationError()
+        }
+
+        let previous = previewTail
+        let request = Task { @MainActor in
+            await previous?.value
+            try Task.checkCancellation()
+            return try await translator(text)
+        }
+        previewTail = Task { _ = try? await request.value }
+
+        let translated: String
+        do {
+            translated = try await withTaskCancellationHandler {
+                try await request.value
+            } onCancel: {
+                request.cancel()
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Stay on the caption model for this pair rather than fail every draft.
+            pairsWithoutPreviewModel.insert(pair)
+            previewSessions.removeValue(forKey: pair)
+            return nil
+        }
+        guard requestGeneration == generation else {
+            throw CancellationError()
+        }
+
+        let trimmed = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            return nil
+        }
+        pairsWithPreviews.insert(pair)
+        previewMemo[key] = trimmed
+        previewMemoOrder.append(key)
+        if previewMemoOrder.count > Self.translationMemoLimit {
+            previewMemo.removeValue(forKey: previewMemoOrder.removeFirst())
+        }
+        return trimmed
+    }
+
+    /// Translates with the pair's low-latency session, made once it is known to be
+    /// installed. Never starts a download: a model the user has not installed is
+    /// simply not used.
+    private func previewTranslator(for pair: LanguagePair) async -> ((String) async throws -> String)? {
+        #if DEBUG
+        if let previewTranslatorForTesting {
+            return previewTranslatorForTesting
+        }
+        #endif
+        guard #available(macOS 26.4, *) else {
+            pairsWithoutPreviewModel.insert(pair)
+            return nil
+        }
+
+        let session: TranslationSession
+        if let existing = previewSessions[pair] as? TranslationSession {
+            session = existing
+        } else {
+            let source = Locale.Language(identifier: localeIdentifier(for: pair.source))
+            let target = Locale.Language(identifier: localeIdentifier(for: pair.target))
+            let status = await LanguageAvailability(preferredStrategy: .lowLatency).status(from: source, to: target)
+            guard status == .installed else {
+                pairsWithoutPreviewModel.insert(pair)
+                return nil
+            }
+            if let made = previewSessions[pair] as? TranslationSession {
+                session = made
+            } else {
+                session = TranslationSession(installedSource: source, target: target, preferredStrategy: .lowLatency)
+                previewSessions[pair] = session
+            }
+        }
+        return { text in try await session.translate(text).targetText }
     }
 
     /// Invalidate the current TranslationSession so SwiftUI's `.translationTask()`

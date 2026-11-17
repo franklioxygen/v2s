@@ -1,0 +1,26 @@
+{
+  "id": "da",
+  "name": "Danish",
+  "speech_locale": "da_DK",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Sara"
+      ],
+      "b_pitch": 0.84,
+      "rate": 180
+    },
+    "news": {
+      "voices": [
+        "Sara"
+      ],
+      "rate": 205
+    }
+  }
+}

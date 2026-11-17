@@ -1,0 +1,25 @@
+{
+  "id": "yue",
+  "name": "Cantonese",
+  "speech_locale": "yue_CN",
+  "expected_backend": "on-device",
+  "metric": "cer",
+  "translation_targets": [
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Sinji"
+      ],
+      "b_pitch": 0.84,
+      "rate": 202
+    },
+    "news": {
+      "voices": [
+        "Sinji"
+      ],
+      "rate": 228
+    }
+  }
+}

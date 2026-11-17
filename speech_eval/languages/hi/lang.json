@@ -1,0 +1,39 @@
+{
+  "id": "hi",
+  "name": "Hindi",
+  "speech_locale": "hi_IN",
+  "expected_backend": "on-device",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Lekha"
+      ],
+      "b_pitch": 0.84,
+      "rate": 219
+    },
+    "news": {
+      "voices": [
+        "Lekha"
+      ],
+      "rate": 232
+    }
+  },
+  "normalize": {
+    "replace": [
+      [
+        "़",
+        ""
+      ],
+      [
+        "ँ",
+        "ं"
+      ]
+    ],
+    "why": "Nukta and chandrabindu are often dropped or swapped."
+  }
+}

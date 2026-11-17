@@ -1,0 +1,6 @@
+# Generated locally: TTS audio, per-run raw outputs, build cache
+languages/*/audio/
+languages/*/runs/
+.cache/
+calibration/translation/
+calibration/strategy/

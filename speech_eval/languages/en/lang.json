@@ -1,0 +1,25 @@
+{
+  "id": "en",
+  "name": "English",
+  "speech_locale": "en_US",
+  "expected_backend": "on-device",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Samantha",
+        "Daniel"
+      ],
+      "rate": 180
+    },
+    "news": {
+      "voices": [
+        "Samantha"
+      ],
+      "rate": 197
+    }
+  }
+}

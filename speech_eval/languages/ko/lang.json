@@ -1,0 +1,26 @@
+{
+  "id": "ko",
+  "name": "Korean",
+  "speech_locale": "ko_KR",
+  "expected_backend": "on-device",
+  "metric": "cer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Yuna"
+      ],
+      "b_pitch": 0.84,
+      "rate": 180
+    },
+    "news": {
+      "voices": [
+        "Yuna"
+      ],
+      "rate": 218
+    }
+  }
+}

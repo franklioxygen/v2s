@@ -88,6 +88,43 @@ final class DraftHandoffTests: XCTestCase {
         }
     }
 
+    // The low-latency model's draft translation stands in until the caption's own,
+    // more accurate one arrives.
+    func testCaptionPromotedFromALowLatencyDraftGetsItsOwnTranslation() async throws {
+        try await withModel { model in
+            let id = UUID()
+            var asked: [String] = []
+            model.captionTranslatorForTesting = { text in
+                asked.append(text)
+                return "我回来了。"
+            }
+            model.markDraftTranslationsAsPreviewsForTesting()
+            installTranslatedDraft("ただいま。", translation: "回来了。", id: id, on: model)
+            enqueue("ただいま。", id: id, on: model)
+            try await waitUntil { model.overlayState?.committedPromotionID == id && asked == ["ただいま。"] }
+            model.finishCaptionTranslationForTesting(promotionID: id, text: "我回来了。")
+            XCTAssertEqual(model.overlayState?.translatedText, "我回来了。")
+            XCTAssertEqual(model.transcriptEntries.last?.translatedText, "我回来了。")
+        }
+    }
+
+    func testValidatedDraftTranslationIsKeptWhenNoLowLatencyModelTranslatedIt() async throws {
+        try await withModel { model in
+            let id = UUID()
+            var asked: [String] = []
+            model.captionTranslatorForTesting = { text in
+                asked.append(text)
+                return "别的译文。"
+            }
+            installTranslatedDraft("ただいま。", translation: "我回来了。", id: id, on: model)
+            enqueue("ただいま。", id: id, on: model)
+            try await waitUntil { model.overlayState?.committedPromotionID == id }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            XCTAssertEqual(model.overlayState?.translatedText, "我回来了。")
+            XCTAssertEqual(asked, [])
+        }
+    }
+
     func testLateTranslationDoesNotClearTheFollowingDraft() async throws {
         try await withModel { model in
             let id = UUID(), nextID = UUID()

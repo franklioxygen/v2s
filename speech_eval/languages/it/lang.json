@@ -1,0 +1,26 @@
+{
+  "id": "it",
+  "name": "Italian",
+  "speech_locale": "it_IT",
+  "expected_backend": "on-device",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Alice"
+      ],
+      "b_pitch": 0.84,
+      "rate": 180
+    },
+    "news": {
+      "voices": [
+        "Alice"
+      ],
+      "rate": 217
+    }
+  }
+}

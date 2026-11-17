@@ -1,0 +1,26 @@
+{
+  "id": "nb",
+  "name": "Norwegian Bokmål",
+  "speech_locale": "nb_NO",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Nora"
+      ],
+      "b_pitch": 0.84,
+      "rate": 193
+    },
+    "news": {
+      "voices": [
+        "Nora"
+      ],
+      "rate": 213
+    }
+  }
+}

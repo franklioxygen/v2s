@@ -178,7 +178,15 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var analyzerInputFormat: AVAudioFormat?
     private var japaneseSentenceAssembler = JapaneseSentenceAssembler()
     private var latestModernText = ""
+    /// Where the audio of the latest volatile result ends, in seconds of analyzer input.
+    private var latestModernAudioEnd: TimeInterval?
+    /// Text committed from volatile results that no final has reissued yet. Later
+    /// results start with its audio again (see `pendingModernText(from:isFinal:audioEnd:)`).
     private var modernCommittedPrefixText = ""
+    /// The prefix of the latest result that repeats `modernCommittedPrefixText`.
+    private var modernCommittedSourceText = ""
+    /// Where the audio of `modernCommittedPrefixText` ends at the latest, in seconds.
+    private var modernCommittedAudioEnd: TimeInterval?
     /// Committed text that stops mid-sentence, held for the next commit (see `commitModernText`).
     private var modernHeldFragmentText = ""
     private var modernHeldFragmentSince: Date?
@@ -710,7 +718,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
     private func resetModernTranscriptionState() {
         latestModernText = ""
+        latestModernAudioEnd = nil
         modernCommittedPrefixText = ""
+        modernCommittedSourceText = ""
+        modernCommittedAudioEnd = nil
     }
 
     private func resetLegacyTranscriptionState() {
@@ -1698,46 +1709,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         SentenceBoundaryHeuristics.sentenceRanges(in: text)
     }
 
-    private func pendingModernText(from fullText: String) -> String {
-        guard modernCommittedPrefixText.isEmpty == false else {
-            return fullText
-        }
-        if fullText.hasPrefix(modernCommittedPrefixText) {
-            return String(fullText.dropFirst(modernCommittedPrefixText.count))
-        }
-
-        let committedSentences = splitRecognizedSentences(in: modernCommittedPrefixText)
-        let nsFullText = fullText as NSString
-        let fullSentenceRanges = sentenceRanges(in: nsFullText)
-        let fullSentences = fullSentenceRanges.map {
-            nsFullText.substring(with: $0).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        guard committedSentences.isEmpty == false,
-              fullSentences.isEmpty == false else {
-            return fullText
-        }
-
-        let committedComparable = committedSentences.map(comparableCommittedSentenceText)
-        let fullComparable = fullSentences.map(comparableCommittedSentenceText)
-        let maxOverlap = min(committedComparable.count, fullComparable.count)
-
-        for overlap in stride(from: maxOverlap, through: 1, by: -1) {
-            if Array(committedComparable.suffix(overlap)) == Array(fullComparable.prefix(overlap)) {
-                let matchedRange = fullSentenceRanges[overlap - 1]
-                let nextLocation = matchedRange.location + matchedRange.length
-                guard nextLocation < nsFullText.length else {
-                    return ""
-                }
-
-                return nsFullText.substring(from: nextLocation)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        }
-
-        return fullText
-    }
-
     private func committableModernText(in rawText: String) -> (committedRawText: String, remainingRawText: String)? {
         let trimmedText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedText.isEmpty == false else {
@@ -2100,20 +2071,28 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             processJapaneseRecognitionResult(result)
             return
         }
+        processModernRecognition(text: result.text, isFinal: result.isFinal, range: result.range)
+    }
+
+    /// Drafts or commits one transcriber result in a language other than Japanese.
+    @available(macOS 26.0, *)
+    private func processModernRecognition(text transcribed: AttributedString, isFinal: Bool, range: CMTimeRange) {
         let now = Date()
         lastRecognitionResultTime = now
-        let fullText = normalizedTranscriberText(result.text)
-        let pendingRawText = pendingModernText(from: fullText)
-        let text = pendingRawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fullText = normalizedTranscriberText(transcribed)
+        let audioEnd = range.end.seconds.isFinite ? range.end.seconds : nil
 
-        if result.isFinal {
-            let identity = modernResultIdentity(for: result)
+        if isFinal {
+            let identity = "\(cmTimeMilliseconds(range.start)):\(cmTimeMilliseconds(range.duration)):\(fullText)"
             guard identity != lastModernCommittedResultIdentity else { return }
             lastModernCommittedResultIdentity = identity
 
             cancelSilenceTimer()
             cancelVADSilenceTimer()
-            resetModernTranscriptionState()
+            let text = pendingModernText(from: fullText, isFinal: true, audioEnd: audioEnd)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            latestModernText = ""
+            latestModernAudioEnd = nil
 
             if text.isEmpty == false {
                 commitModernText(text, clearDraftAfter: true)
@@ -2123,6 +2102,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             }
             return
         }
+
+        let pendingRawText = pendingModernText(from: fullText, isFinal: false, audioEnd: audioEnd)
+        let text = pendingRawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        latestModernAudioEnd = audioEnd
 
         guard text.isEmpty == false else {
             latestModernText = ""
@@ -2151,18 +2134,303 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
             cancelSilenceTimer()
             cancelVADSilenceTimer()
-            modernCommittedPrefixText += split.committedRawText
+            markModernDraftCommitted(split.committedRawText)
             latestModernText = split.remainingRawText
             commitModernText(committedText, clearDraftAfter: true)
             return
         }
 
         emitDraftUpdate(
-            from: result,
+            from: transcribed,
             text: Self.joiningHeldFragment(modernHeldFragmentText, to: text, languageCode: activeLanguageCode)
         )
         scheduleSilenceCommit()
     }
+
+    /// Records that `rawText`, the start of `latestModernText`, is committed. Every
+    /// later result up to the final that reissues its audio starts with it again.
+    private func markModernDraftCommitted(_ rawText: String) {
+        modernCommittedPrefixText += rawText
+        modernCommittedSourceText += rawText
+        if let end = latestModernAudioEnd {
+            modernCommittedAudioEnd = max(modernCommittedAudioEnd ?? end, end)
+        }
+    }
+
+    /// The part of a transcriber result after the text committed from earlier volatile
+    /// results, raw.
+    ///
+    /// Volatile results carry no word times, only the span of all their audio, and a
+    /// final arrives long after its sentences were committed from drafts. Both reissue
+    /// the committed words, often revised: a comma dropped, a word respelled. So the
+    /// committed words are found by aligning them with the result's words (see
+    /// `committedOverlap(of:in:allowingUnreachedCommitted:)`), not as an exact prefix.
+    private func pendingModernText(from fullText: String, isFinal: Bool, audioEnd: TimeInterval?) -> String {
+        guard modernCommittedPrefixText.isEmpty == false else {
+            return fullText
+        }
+
+        let pendingStart: String.Index
+        var unreachedCommitted = ""
+        if let start = Self.endOfExactPrefix(modernCommittedSourceText, in: fullText) {
+            pendingStart = start
+        } else {
+            // A final that ends before the committed audio does reissues only part of it.
+            let mayEndInsideCommitted = isFinal
+                && (audioEnd ?? .infinity) < (modernCommittedAudioEnd ?? -.infinity)
+            let overlap = Self.committedOverlap(
+                of: modernCommittedPrefixText,
+                in: fullText,
+                allowingUnreachedCommitted: mayEndInsideCommitted
+            )
+            if overlap.pendingStart == fullText.startIndex, overlap.unreachedCommitted.isEmpty,
+               let start = endOfCommittedSentenceOverlap(in: fullText) {
+                pendingStart = start
+            } else {
+                pendingStart = overlap.pendingStart
+                unreachedCommitted = overlap.unreachedCommitted
+            }
+            modernCommittedSourceText = String(fullText[..<pendingStart])
+        }
+
+        if isFinal {
+            // Results after a final start where its audio ends.
+            modernCommittedPrefixText = unreachedCommitted
+            modernCommittedSourceText = unreachedCommitted
+            if unreachedCommitted.isEmpty {
+                modernCommittedAudioEnd = nil
+            }
+        }
+        return String(fullText[pendingStart...])
+    }
+
+    /// Where the text after the committed sentences starts, when `text` starts with
+    /// the last of them, word for word.
+    private func endOfCommittedSentenceOverlap(in text: String) -> String.Index? {
+        let committedSentences = splitRecognizedSentences(in: modernCommittedPrefixText)
+        let nsText = text as NSString
+        let ranges = sentenceRanges(in: nsText)
+        guard committedSentences.isEmpty == false, ranges.isEmpty == false else {
+            return nil
+        }
+
+        let committedComparable = committedSentences.map(comparableCommittedSentenceText)
+        let textComparable = ranges.map {
+            comparableCommittedSentenceText(nsText.substring(with: $0).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        for overlap in stride(from: min(committedComparable.count, textComparable.count), through: 1, by: -1)
+        where Array(committedComparable.suffix(overlap)) == Array(textComparable.prefix(overlap)) {
+            let matched = ranges[overlap - 1]
+            return String.Index(utf16Offset: matched.location + matched.length, in: text)
+        }
+        return nil
+    }
+
+    /// Where `prefix` ends in `text`, if `text` starts with it and does not continue
+    /// its last word.
+    static func endOfExactPrefix(_ prefix: String, in text: String) -> String.Index? {
+        guard prefix.isEmpty == false, text.hasPrefix(prefix) else {
+            return nil
+        }
+        let end = text.index(text.startIndex, offsetBy: prefix.count)
+        if end < text.endIndex, let last = prefix.last,
+           isWordCharacter(last), isWordCharacter(text[end]),
+           isSeparatelyComparable(last) == false, isSeparatelyComparable(text[end]) == false {
+            return nil
+        }
+        return end
+    }
+
+    /// How a transcriber result repeats committed text.
+    struct CommittedOverlap: Equatable {
+        /// Where the result's new text starts.
+        let pendingStart: String.Index
+        /// The end of the committed text, when the result stops before reaching it.
+        let unreachedCommitted: String
+    }
+
+    /// Aligns the words of `committed` with the start of `text`, tolerating the
+    /// revisions a recognizer makes to words it already reported, and returns where
+    /// the words after them start.
+    ///
+    /// With `allowingUnreachedCommitted`, `text` may also end inside `committed` (a
+    /// final that stops before the committed audio does): then all of `text` repeats,
+    /// and the rest of `committed` is returned for the results that follow. When the
+    /// words do not line up — fewer than half of them match — nothing is left out.
+    static func committedOverlap(
+        of committed: String,
+        in text: String,
+        allowingUnreachedCommitted: Bool
+    ) -> CommittedOverlap {
+        let committedTokens = comparableTokens(in: committed)
+        let textTokens = comparableTokens(in: text)
+        guard committedTokens.isEmpty == false else {
+            return CommittedOverlap(pendingStart: text.startIndex, unreachedCommitted: "")
+        }
+        guard textTokens.isEmpty == false else {
+            return CommittedOverlap(
+                pendingStart: allowingUnreachedCommitted ? text.endIndex : text.startIndex,
+                unreachedCommitted: allowingUnreachedCommitted ? committed : ""
+            )
+        }
+
+        // Edit distance between the first i committed words and the first k words of
+        // `text`, within a band around the diagonal: revisions shift words only a little.
+        let committedCount = committedTokens.count
+        let textCount = textTokens.count
+        let band = max(8, committedCount / 4)
+        let columns = min(textCount, committedCount + band)
+        var previous = [Double](repeating: .infinity, count: columns + 1)
+        var current = previous
+        for k in 0...min(columns, band) {
+            previous[k] = Double(k)
+        }
+        var unreached: (cost: Double, committedWords: Int)?
+        for i in 1...committedCount {
+            let lower = max(0, i - band)
+            let upper = min(columns, i + band)
+            for k in 0...columns {
+                current[k] = .infinity
+            }
+            if lower == 0 {
+                current[0] = Double(i)
+            }
+            if max(1, lower) <= upper {
+                for k in max(1, lower)...upper {
+                    let substitution = previous[k - 1]
+                        + substitutionCost(committedTokens[i - 1].key, textTokens[k - 1].key)
+                    current[k] = min(substitution, previous[k] + 1, current[k - 1] + 1)
+                }
+            }
+            if allowingUnreachedCommitted, i < committedCount, columns == textCount,
+               current[textCount] <= (unreached?.cost ?? .infinity) {
+                unreached = (current[textCount], i)
+            }
+            swap(&previous, &current)
+        }
+
+        var reached = (cost: Double(committedCount), textWords: 0)
+        for k in 0...columns where previous[k] < reached.cost {
+            reached = (previous[k], k)
+        }
+
+        if let unreached, unreached.cost < reached.cost,
+           unreached.cost <= Double(textCount) / 3 {
+            let rest = committed[committedTokens[unreached.committedWords].start...]
+            return CommittedOverlap(pendingStart: text.endIndex, unreachedCommitted: String(rest))
+        }
+        guard reached.textWords > 0, reached.cost <= Double(committedCount) / 2 else {
+            return CommittedOverlap(pendingStart: text.startIndex, unreachedCommitted: "")
+        }
+        // Punctuation that closes the last repeated word belongs to it.
+        var start = textTokens[reached.textWords - 1].end
+        while start < text.endIndex, closingPunctuation.contains(text[start]) {
+            start = text.index(after: start)
+        }
+        return CommittedOverlap(pendingStart: start, unreachedCommitted: "")
+    }
+
+    private static let closingPunctuation: Set<Character> = [
+        ".", ",", "!", "?", ";", ":", "…", ")", "]", "}", "»", "”", "’",
+        "。", "，", "、", "！", "？", "；", "：", "．", "）", "」", "』", "】",
+    ]
+
+    /// A word of transcriber text, folded for comparison: a run of letters and digits,
+    /// or one ideograph or kana, which are written without spaces between words.
+    private struct ComparableToken {
+        let key: [Character]
+        let start: String.Index
+        let end: String.Index
+    }
+
+    private static func comparableTokens(in text: String) -> [ComparableToken] {
+        var tokens: [ComparableToken] = []
+        var wordStart: String.Index?
+        func endWord(at end: String.Index) {
+            guard let start = wordStart else { return }
+            tokens.append(ComparableToken(key: foldedKey(text[start..<end]), start: start, end: end))
+            wordStart = nil
+        }
+
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            let next = text.index(after: index)
+            if isSeparatelyComparable(character) {
+                endWord(at: index)
+                tokens.append(ComparableToken(key: foldedKey(text[index..<next]), start: index, end: next))
+            } else if isWordCharacter(character) {
+                if wordStart == nil {
+                    wordStart = index
+                }
+            } else {
+                endWord(at: index)
+            }
+            index = next
+        }
+        endWord(at: text.endIndex)
+        return tokens
+    }
+
+    private static func foldedKey(_ word: Substring) -> [Character] {
+        Array(word.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil))
+    }
+
+    private static func isWordCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber
+    }
+
+    private static func isSeparatelyComparable(_ character: Character) -> Bool {
+        guard let scalar = character.unicodeScalars.first else { return false }
+        return scalar.properties.isIdeographic || (0x3040...0x30FF).contains(scalar.value)
+    }
+
+    /// 0 for the same word, a fraction for a respelling one or two letters apart, else 1.
+    private static func substitutionCost(_ committed: [Character], _ revised: [Character]) -> Double {
+        if committed == revised {
+            return 0
+        }
+        let longer = max(committed.count, revised.count)
+        guard longer >= 3, abs(committed.count - revised.count) <= 2 else {
+            return 1
+        }
+        var previous = Array(0...revised.count)
+        var current = previous
+        for i in 1...committed.count {
+            current[0] = i
+            for j in 1...revised.count {
+                current[j] = min(
+                    previous[j - 1] + (committed[i - 1] == revised[j - 1] ? 0 : 1),
+                    previous[j] + 1,
+                    current[j - 1] + 1
+                )
+            }
+            swap(&previous, &current)
+        }
+        let distance = previous[revised.count]
+        guard distance == 1 || (distance == 2 && longer >= 6) else {
+            return 1
+        }
+        return Double(distance) / Double(longer)
+    }
+
+    #if DEBUG
+    /// Hands the session a transcriber result for a language other than Japanese, as
+    /// the SpeechAnalyzer results stream does.
+    @available(macOS 26.0, *)
+    func processModernResultForTesting(
+        _ text: AttributedString, isFinal: Bool, range: CMTimeRange, localeIdentifier: String,
+        transcriptHandler: @escaping @MainActor (RecognizedSentence) -> Void
+    ) {
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            self.transcriptHandler = transcriptHandler
+            self.activeLocaleIdentifier = localeIdentifier
+            self.recognitionBackend = .speechAnalyzer
+            self.processModernRecognition(text: text, isFinal: isFinal, range: range)
+        }
+    }
+    #endif
 
     /// Keep speculative Japanese words on the draft line. Fast results arrive in
     /// roughly one-second batches; an inactivity/VAD timer between batches cannot
@@ -2174,7 +2442,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let text = normalizedTranscriberText(result.text)
         if !result.isFinal {
             latestModernText = text
-            emitDraftUpdate(from: result, text: japaneseSentenceAssembler.preview(appending: text))
+            emitDraftUpdate(from: result.text, text: japaneseSentenceAssembler.preview(appending: text))
             return
         }
 
@@ -2191,7 +2459,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             clearHeldFragment()
         } else {
             if !sentences.isEmpty || modernHeldFragmentSince == nil { modernHeldFragmentSince = Date() }
-            emitDraftUpdate(from: result, text: japaneseSentenceAssembler.pendingText)
+            emitDraftUpdate(from: result.text, text: japaneseSentenceAssembler.pendingText)
             scheduleHeldFragmentCheck()
         }
     }
@@ -2550,7 +2818,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     }
 
     @available(macOS 26.0, *)
-    private func emitDraftUpdate(from result: SpeechTranscriber.Result, text: String) {
+    private func emitDraftUpdate(from transcribed: AttributedString, text: String) {
         let now = Date()
         observeDraftText(text, at: now)
         let draftStability = currentDraftStability(at: now)
@@ -2559,7 +2827,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         let boundaryScore: Float = SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: text) ? 0.9 : 0.45
         let lengthFitScore = draftLengthFitScore(for: text)
-        let averageConfidence = transcriberAverageConfidence(result.text)
+        let averageConfidence = transcriberAverageConfidence(transcribed)
 
         let chunkScore = ChunkScorer.score(
             vadProbability: lastVADProbability,
@@ -2571,7 +2839,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
 
         let stablePrefixLen = computeStablePrefixLength(text: text, now: now)
         let mutableTail = String(text.dropFirst(min(stablePrefixLen, text.count)))
-        let timeRange = transcriberTimeRange(result.text)
+        let timeRange = transcriberTimeRange(transcribed)
         let startMs = timeRange.map { cmTimeMilliseconds($0.start) } ?? 0
 
         let draft = DraftSegment(
@@ -2625,13 +2893,6 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         }
 
         return nil
-    }
-
-    @available(macOS 26.0, *)
-    private func modernResultIdentity(for result: SpeechTranscriber.Result) -> String {
-        let startMs = cmTimeMilliseconds(result.range.start)
-        let durationMs = cmTimeMilliseconds(result.range.duration)
-        return "\(startMs):\(durationMs):\(normalizedTranscriberText(result.text))"
     }
 
     private func draftLengthFitScore(for text: String) -> Float {
@@ -2776,7 +3037,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
                 return
             }
 
-            modernCommittedPrefixText += committedRawText
+            markModernDraftCommitted(committedRawText)
             latestModernText = remainingRawText
             commitModernText(
                 text,

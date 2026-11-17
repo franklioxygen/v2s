@@ -1,0 +1,26 @@
+{
+  "id": "es",
+  "name": "Spanish",
+  "speech_locale": "es_ES",
+  "expected_backend": "on-device",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Mónica",
+        "Paulina"
+      ],
+      "rate": 161
+    },
+    "news": {
+      "voices": [
+        "Mónica"
+      ],
+      "rate": 205
+    }
+  }
+}
