@@ -57,6 +57,30 @@ class CheckImportsTests(unittest.TestCase):
         cls.weak = cls.root / "weak"
         cls.compile("-arch", cls.arch, source, f"-Wl,-weak_library,{library}", "-o", cls.weak)
 
+        # An umbrella library that exists but re-exports a library that does not. The
+        # linker needs the re-exported library at its install path, so it is removed
+        # only after everything that links it is built.
+        cls.reexported = cls.root / "libreexported_fixture.dylib"
+        library_source.write_text("int reexported_fixture(void) { return 0; }\n")
+        cls.compile(
+            "-arch", cls.arch, "-dynamiclib", library_source,
+            "-install_name", cls.reexported, "-o", cls.reexported,
+        )
+        umbrella_source = cls.root / "umbrella.c"
+        umbrella_source.write_text("int umbrella_fixture(void) { return 0; }\n")
+        cls.umbrella = cls.root / "libumbrella_fixture.dylib"
+        cls.compile(
+            "-arch", cls.arch, "-dynamiclib", umbrella_source,
+            "-install_name", cls.umbrella, f"-Wl,-reexport_library,{cls.reexported}", "-o", cls.umbrella,
+        )
+        source.write_text(
+            "extern int reexported_fixture(void);\n"
+            "int main(void) { return reexported_fixture(); }\n"
+        )
+        cls.through_umbrella = cls.root / "through-umbrella"
+        cls.compile("-arch", cls.arch, source, cls.umbrella, "-o", cls.through_umbrella)
+        cls.reexported.unlink()
+
         # libc++ is installed as libc++.1.dylib, which nm calls "libc++".
         cxx_source = cls.root / "main.cpp"
         cxx_source.write_text('#include <string>\nint main() { return std::string("x").size() != 1; }\n')
@@ -109,6 +133,12 @@ class CheckImportsTests(unittest.TestCase):
         result = self.check(self.strong)
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn(f"STRONG {self.missing_library} is not on this macOS", result.stdout)
+
+    def test_missing_reexported_library_is_noted(self):
+        result = self.check(self.through_umbrella)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"note   {self.umbrella} re-exports {self.reexported}, which is not on this macOS", result.stdout)
+        self.assertIn("STRONG libumbrella_fixture: _reexported_fixture", result.stdout)
 
     def test_missing_weak_library_passes(self):
         result = self.check(self.weak)

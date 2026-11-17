@@ -103,8 +103,14 @@ def exported_symbols(path, cache, seen=frozenset()):
         symbols = set(re.findall(r"^\s+0x[0-9A-Fa-f]+\s+(\S+)", output, re.M))
         symbols |= set(re.findall(r"^\s+\[re-export\]\s+(\S+)", output, re.M))
         for reexported in re.findall(r"^\s+re-export\s+(\S+)", run("dyld_info", "-linked_dylibs", path), re.M):
-            if reexported not in seen:
-                symbols |= exported_symbols(reexported, cache, seen | {path}) or set()
+            if reexported in seen:
+                continue
+            reexported_symbols = exported_symbols(reexported, cache, seen | {path})
+            if reexported_symbols is None:
+                # Its symbols then show up below as missing imports from this library.
+                print(f"note   {path} re-exports {reexported}, which is not on this macOS")
+            else:
+                symbols |= reexported_symbols
         cache[path] = symbols
     return cache[path]
 
