@@ -52,6 +52,18 @@ def library_exists(path):
     return _shared_cache_contains_path(os.fsencode(path)) or os.path.exists(path)
 
 
+LINK_COMMANDS = ("LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_LOAD_UPWARD_DYLIB", "LC_REEXPORT_DYLIB")
+
+
+def short_name(path):
+    """The name `nm -m` prints for a library: its file name up to the first dot.
+
+    That drops the version and extension, so /usr/lib/libc++.1.dylib is "libc++" and
+    /usr/lib/libSystem.B.dylib is "libSystem". A framework binary has no dot.
+    """
+    return path.rsplit("/", 1)[-1].split(".", 1)[0]
+
+
 def linked_libraries(binary, arch):
     """Maps each library name `nm` prints to its install path and whether it is weak-linked."""
     libraries = {}
@@ -60,10 +72,9 @@ def linked_libraries(binary, arch):
         line = line.strip()
         if line.startswith("cmd "):
             load_command = line.split()[1]
-        elif line.startswith("name ") and load_command in ("LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB"):
+        elif line.startswith("name ") and load_command in LINK_COMMANDS:
             path = line.split()[1]
-            name = re.sub(r"(\.[AB])?\.dylib$", "", path.rsplit("/", 1)[-1])
-            libraries[name] = (path, load_command == "LC_LOAD_WEAK_DYLIB")
+            libraries[short_name(path)] = (path, load_command == "LC_LOAD_WEAK_DYLIB")
     return libraries
 
 
@@ -121,6 +132,8 @@ def main():
     missing_weak = 0
 
     for library, symbols in sorted(imports.items()):
+        if library not in libraries:
+            raise ValueError(f"{binary} imports symbols from {library}, which none of its load commands names")
         path, library_is_weak = libraries[library]
         if path.startswith("@rpath/"):
             # Embedded frameworks such as Sparkle ship inside the app bundle.

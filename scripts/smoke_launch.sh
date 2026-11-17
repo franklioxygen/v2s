@@ -78,7 +78,8 @@ for key in ("exception", "termination", "asi"):
 images = crash.get("usedImages", [])
 thread = crash["threads"][crash.get("faultingThread", 0)]
 for frame in thread.get("frames", [])[:40]:
-    image = images[frame["imageIndex"]] if frame.get("imageIndex", -1) < len(images) else {}
+    index = frame.get("imageIndex", -1)
+    image = images[index] if 0 <= index < len(images) else {}
     print(f"  {image.get('name', '?'):<32} {frame.get('symbol', hex(frame.get('imageOffset', 0)))}")
 PY
 fi

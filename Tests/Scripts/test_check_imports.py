@@ -57,10 +57,16 @@ class CheckImportsTests(unittest.TestCase):
         cls.weak = cls.root / "weak"
         cls.compile("-arch", cls.arch, source, f"-Wl,-weak_library,{library}", "-o", cls.weak)
 
+        # libc++ is installed as libc++.1.dylib, which nm calls "libc++".
+        cxx_source = cls.root / "main.cpp"
+        cxx_source.write_text('#include <string>\nint main() { return std::string("x").size() != 1; }\n')
+        cls.versioned = cls.root / "versioned"
+        cls.compile("-arch", cls.arch, cxx_source, "-o", cls.versioned, compiler="clang++")
+
     @staticmethod
-    def compile(*args):
+    def compile(*args, compiler="clang"):
         """Compile only the generated fixtures with Apple's fixed tool path."""
-        command = ["/usr/bin/xcrun", "clang", *map(str, args)]
+        command = ["/usr/bin/xcrun", compiler, *map(str, args)]
         subprocess.run(command, capture_output=True, text=True, check=True)  # nosec B603  # nosemgrep
 
     def check(self, binary):
@@ -91,6 +97,11 @@ class CheckImportsTests(unittest.TestCase):
 
     def test_native_binary_passes(self):
         result = self.check(self.native)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("0 strong", result.stdout)
+
+    def test_versioned_library_passes(self):
+        result = self.check(self.versioned)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("0 strong", result.stdout)
 
