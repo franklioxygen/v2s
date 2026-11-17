@@ -2,7 +2,8 @@
 import json
 from pathlib import Path
 
-STATUS_ICON = {'goal': '🟢 goal', 'pass': '🟡 pass', 'fail': '🔴 fail', 'skipped': '⚪ skipped', 'error': '⛔ error'}
+# 'pass' is a result status, not a password.
+STATUS_ICON = {'goal': '🟢 goal', 'pass': '🟡 pass', 'fail': '🔴 fail', 'skipped': '⚪ skipped', 'error': '⛔ error'}  # nosec B105
 
 
 def load(lang_dir):

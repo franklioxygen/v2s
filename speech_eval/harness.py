@@ -77,18 +77,15 @@ RESULT_HOOK = (RESULT + '\n        v2sEvalResultObserver?(result.isFinal, result
                'run.audioTimeRange?.end.seconds) })')
 
 
-def _run(command, **kwargs):
-    return subprocess.run(command, shell=False, **kwargs)  # nosec B603
-
-
 def git_revision(ref='HEAD'):
-    return _run(['/usr/bin/git', 'rev-parse', '--short', ref, '--'], cwd=ROOT, check=True,
-                capture_output=True, text=True).stdout.split()[0]
+    return subprocess.run(['/usr/bin/git', 'rev-parse', '--short', ref, '--'],  # nosec B603
+                          cwd=ROOT, check=True, capture_output=True, text=True).stdout.split()[0]
 
 
 def worktree_dirty():
-    status = _run(['/usr/bin/git', 'status', '--porcelain', '--', 'Sources', 'Package.swift', 'Package.resolved'],
-                  cwd=ROOT, check=True, capture_output=True, text=True).stdout
+    status = subprocess.run(['/usr/bin/git', 'status', '--porcelain', '--',  # nosec B603
+                             'Sources', 'Package.swift', 'Package.resolved'],
+                            cwd=ROOT, check=True, capture_output=True, text=True).stdout
     return bool(status.strip())
 
 
@@ -106,9 +103,10 @@ def prepare(ref=None):
     package.mkdir(parents=True, exist_ok=True)
     if ref:
         if not (package / 'Package.swift').exists():
-            archive = _run(['/usr/bin/git', 'archive', '--format=tar', '--', ref, 'Sources', 'Package.swift',
-                            'Package.resolved'], cwd=ROOT, check=True, capture_output=True).stdout
-            _run(['/usr/bin/tar', '-x', '-C', str(package)], input=archive, check=True)
+            archive = subprocess.run(['/usr/bin/git', 'archive', '--format=tar', '--', ref,  # nosec B603
+                                      'Sources', 'Package.swift', 'Package.resolved'],
+                                     cwd=ROOT, check=True, capture_output=True).stdout
+            subprocess.run(['/usr/bin/tar', '-x', '-C', str(package)], input=archive, check=True)  # nosec B603
         session_source = base / 'LiveTranscriptionSession.original.swift'
         if not session_source.exists():
             shutil.copy2(package / SESSION, session_source)
@@ -118,12 +116,9 @@ def prepare(ref=None):
         for name in ('Sources', 'Package.swift', 'Package.resolved'):
             source = ROOT / name
             target = package / name
-            command = ['/usr/bin/rsync', '-a', '--delete', '--exclude', Path(SESSION).name]
-            if source.is_dir():
-                command += [f'{source}/', f'{target}/']
-            else:
-                command += [str(source), str(target)]
-            _run(command, check=True)
+            paths = [f'{source}/', f'{target}/'] if source.is_dir() else [str(source), str(target)]
+            subprocess.run(['/usr/bin/rsync', '-a', '--delete', '--exclude', Path(SESSION).name,  # nosec B603
+                            *paths], check=True)
         original = (ROOT / SESSION).read_text()
     if YIELD not in original:
         raise SystemExit(f'Instrumentation anchor not found in {SESSION}: {YIELD}')
@@ -145,8 +140,8 @@ def run_test(package, test, plan, plan_path, log_path):
     environment = os.environ.copy()
     environment['TEST_RUNNER_V2S_EVAL_PLAN'] = str(plan_path)
     with log_path.open('w') as handle:
-        result = _run(['/usr/bin/xcodebuild', '-scheme', 'v2s', '-destination', 'platform=macOS',
-                       '-derivedDataPath', str(package.parent / 'derived'), 'COREML_CODEGEN_LANGUAGE=Swift',
-                       f'-only-testing:v2sTests/SpeechEvalHarness/{test}', 'test'],
-                      cwd=package, env=environment, stdout=handle, stderr=subprocess.STDOUT)
+        result = subprocess.run(['/usr/bin/xcodebuild', '-scheme', 'v2s', '-destination', 'platform=macOS',  # nosec B603
+                                 '-derivedDataPath', str(package.parent / 'derived'), 'COREML_CODEGEN_LANGUAGE=Swift',
+                                 f'-only-testing:v2sTests/SpeechEvalHarness/{test}', 'test'],
+                                cwd=package, env=environment, stdout=handle, stderr=subprocess.STDOUT)
     return result.returncode == 0

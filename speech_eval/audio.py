@@ -44,11 +44,9 @@ def _say(text, voice, rate, output):
         handle.write(text)
         text_path = handle.name
     try:
-        command = ['/usr/bin/say', '-v', voice, '-f', text_path, '-o', str(output),
-                   '--file-format=WAVE', f'--data-format=LEI16@{SAMPLE_RATE}']
-        if rate:
-            command[1:1] = ['-r', str(rate)]
-        subprocess.run(command, check=True, shell=False)  # nosec B603
+        rate_option = ['-r', str(rate)] if rate else []
+        subprocess.run(['/usr/bin/say', *rate_option, '-v', voice, '-f', text_path, '-o', str(output),  # nosec B603
+                        '--file-format=WAVE', f'--data-format=LEI16@{SAMPLE_RATE}'], check=True, shell=False)
     finally:
         Path(text_path).unlink(missing_ok=True)
 
@@ -57,8 +55,9 @@ def _pitch_shift(source, output, factor):
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
         raise SystemExit('ffmpeg is required to make a second dialogue voice')
+    # env runs the ffmpeg found above; the command itself names a fixed program.
     subprocess.run([  # nosec B603
-        ffmpeg, '-v', 'error', '-nostdin', '-y', '-i', str(source), '-af',
+        '/usr/bin/env', ffmpeg, '-v', 'error', '-nostdin', '-y', '-i', str(source), '-af',
         f'asetrate={SAMPLE_RATE * factor:.0f},aresample={SAMPLE_RATE},atempo={1 / factor:.4f}',
         '-ac', '1', '-ar', str(SAMPLE_RATE), '-c:a', 'pcm_s16le', str(output),
     ], check=True, shell=False)

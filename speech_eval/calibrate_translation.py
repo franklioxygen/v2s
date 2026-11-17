@@ -26,7 +26,6 @@ from datetime import datetime
 import json
 from pathlib import Path
 import random
-import re
 import statistics
 import sys
 import unicodedata
@@ -61,7 +60,7 @@ def _units(text, char_level):
 
 def corrupt(lines, rate, char_level, seed):
     """Simulated recognition errors: per unit, substitute (50%), delete (30%) or insert (20%)."""
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # nosec B311 - reproducible test damage, nothing secret
     vocabulary = [line[a:b] for line in lines for a, b in _units(line, char_level)]
     out = []
     for line in lines:
@@ -92,7 +91,7 @@ def noise_items(variant, lines, lang):
 
 
 def damaged_items(variant, lines, lang, seed, window):
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # nosec B311 - reproducible test damage, nothing secret
     char_level = lang['metric'] == 'cer'
     if variant.startswith('err'):
         rate = int(variant[3:]) / 100
