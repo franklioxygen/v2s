@@ -1,0 +1,26 @@
+{
+  "id": "pl",
+  "name": "Polish",
+  "speech_locale": "pl_PL",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Zosia"
+      ],
+      "b_pitch": 0.84,
+      "rate": 193
+    },
+    "news": {
+      "voices": [
+        "Zosia"
+      ],
+      "rate": 240
+    }
+  }
+}

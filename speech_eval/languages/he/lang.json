@@ -1,0 +1,30 @@
+{
+  "id": "he",
+  "name": "Hebrew",
+  "speech_locale": "he_IL",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Carmit"
+      ],
+      "b_pitch": 0.84,
+      "rate": 149
+    },
+    "news": {
+      "voices": [
+        "Carmit"
+      ],
+      "rate": 205
+    }
+  },
+  "normalize": {
+    "strip_marks": true,
+    "why": "Niqqud is optional."
+  }
+}

@@ -146,6 +146,99 @@ final class LiveTranscriptionSessionTests: XCTestCase {
         XCTAssertEqual(unfinalizedText(AttributedString("はい。"), after: 1.0), "はい。")
     }
 
+    // speech_eval de dialogue: a final reissued 17 s of sentences committed from drafts,
+    // without one comma, and eight of them were committed again.
+    func testCommittedTextIsFoundDespiteARevisedComma() {
+        XCTAssertEqual(pending(after: "Der Blumenstand an der alten Brücke, hat meistens die schönsten.",
+                               in: "Der Blumenstand an der alten Brücke hat meistens die schönsten. Klingt gut."),
+                       " Klingt gut.")
+    }
+
+    // speech_eval de dialogue: a draft respelled a committed word ("Tas" → "Tfas").
+    func testCommittedTextIsFoundDespiteARespelledWord() {
+        XCTAssertEqual(pending(after: "Hey, kommst du? Ich helfe ihr beim Tas.",
+                               in: "Hey, kommst du? Ich helfe ihr beim Tfas. Oh nein."),
+                       " Oh nein.")
+    }
+
+    func testCommittedChineseIsMatchedCharacterByCharacter() {
+        XCTAssertEqual(pending(after: "我们明天去市场。", in: "我们明天去市场，你来吗？"), "你来吗？")
+    }
+
+    func testTextThatDoesNotRepeatTheCommittedWordsIsKept() {
+        XCTAssertEqual(pending(after: "Das ist wirklich nett von ihr.", in: "Klingt gut, bis morgen."),
+                       "Klingt gut, bis morgen.")
+    }
+
+    // A final can stop before audio already committed from a draft: the rest of the
+    // committed text is what the next result repeats.
+    func testFinalEndingInsideTheCommittedTextLeavesItsRest() {
+        let overlap = LiveTranscriptionSession.committedOverlap(
+            of: "Hola. Buenos días.", in: "Hola.", allowingUnreachedCommitted: true
+        )
+        XCTAssertEqual(overlap.pendingStart, "Hola.".endIndex)
+        XCTAssertEqual(overlap.unreachedCommitted, "Buenos días.")
+    }
+
+    func testExactCommittedPrefixDoesNotEndInsideAWord() {
+        let text = "Hey, kommst du? Ja."
+        XCTAssertEqual(LiveTranscriptionSession.endOfExactPrefix("Hey, kommst du?", in: text).map { String(text[$0...]) },
+                       " Ja.")
+        XCTAssertNil(LiveTranscriptionSession.endOfExactPrefix("Ich helfe ihr beim Tas", in: "Ich helfe ihr beim Tasche."))
+    }
+
+    // Volatile results carry one time range for all their text, so only the text tells
+    // which words were committed: speech_eval pt news committed its first sentences
+    // three times when the session went by that range instead.
+    @MainActor
+    func testGrowingDraftDoesNotRecommitItsCommittedSentence() async throws {
+        guard #available(macOS 26.0, *) else { throw XCTSkip("SpeechTranscriber word times need macOS 26") }
+        let committed = try await commits(of: [
+            (volatile("A Câmara aprovou o plano.", 0, 2.0), false, 2.0),
+            (volatile("A Câmara aprovou o plano. Segundo as autoridades,", 0, 4.0), false, 4.0),
+            (volatile("A Câmara aprovou o plano. Segundo as autoridades, as mudanças reduzem o trânsito.", 0, 6.0), false, 6.0),
+        ], locale: "pt_BR", expecting: 2)
+        XCTAssertEqual(committed, ["A Câmara aprovou o plano.", "Segundo as autoridades, as mudanças reduzem o trânsito."])
+    }
+
+    @MainActor
+    func testFinalDoesNotRecommitTextCommittedFromADraft() async throws {
+        guard #available(macOS 26.0, *) else { throw XCTSkip("SpeechTranscriber word times need macOS 26") }
+        let draft = volatile("Das ist wirklich nett von ihr. Der Blumenstand an der alten Brücke, hat meistens die schönsten.", 0, 4.6)
+        let final = timed([("Das ist wirklich nett von ihr.", 0, 1.5),
+                           (" Der Blumenstand an der alten Brücke", 1.8, 3.4), (" hat meistens die schönsten.", 3.4, 4.6),
+                           (" Klingt gut.", 5.0, 5.8)])
+        let committed = try await commits(of: [(draft, false, 4.6), (final, true, 5.8)], locale: "de_DE", expecting: 3)
+        XCTAssertEqual(committed, ["Das ist wirklich nett von ihr.",
+                                   "Der Blumenstand an der alten Brücke, hat meistens die schönsten.", "Klingt gut."])
+    }
+
+    @MainActor
+    func testRevisedDraftDoesNotRecommitItsCommittedText() async throws {
+        guard #available(macOS 26.0, *) else { throw XCTSkip("SpeechTranscriber word times need macOS 26") }
+        let committed = try await commits(of: [
+            (volatile("Hey, kommst du? Ich helfe ihr beim Tas.", 0, 3.0), false, 3.0),
+            (volatile("Hey, kommst du? Ich helfe ihr beim Tfas. Oh nein.", 0, 4.2), false, 4.2),
+        ], locale: "de_DE", expecting: 3)
+        XCTAssertEqual(committed, ["Hey, kommst du?", "Ich helfe ihr beim Tas.", "Oh nein."])
+    }
+
+    @MainActor
+    func testResultAfterAShortFinalDoesNotRecommitTheRestOfTheDraft() async throws {
+        guard #available(macOS 26.0, *) else { throw XCTSkip("SpeechTranscriber word times need macOS 26") }
+        let committed = try await commits(of: [
+            (volatile("Hola. Buenos días.", 0, 3.0), false, 3.0),
+            (timed([("Hola.", 0.2, 0.9)]), true, 1.0),
+            (volatile("Buenos días. ¿Qué tal?", 1.0, 4.5), false, 4.5),
+        ], locale: "es_ES", expecting: 3)
+        XCTAssertEqual(committed, ["Hola.", "Buenos días.", "¿Qué tal?"])
+    }
+
+    private func pending(after committed: String, in text: String) -> String {
+        let overlap = LiveTranscriptionSession.committedOverlap(of: committed, in: text, allowingUnreachedCommitted: false)
+        return String(text[overlap.pendingStart...])
+    }
+
     func testOtherLanguagesOnlyTreatACommaAsAFragmentEnding() {
         XCTAssertTrue(isFragment("我们先去，", language: "zh"))
         XCTAssertFalse(isFragment("我们先去", language: "zh"))
@@ -192,6 +285,34 @@ final class LiveTranscriptionSessionTests: XCTestCase {
             )
             text += run
         }
+    }
+
+    /// A volatile result: one time range for all of its text, as SpeechTranscriber reports it.
+    @available(macOS 26.0, *)
+    private func volatile(_ text: String, _ start: Double, _ end: Double) -> AttributedString {
+        timed([(text, start, end)])
+    }
+
+    /// Feeds results one at a time, each once the session has committed what it will, and
+    /// returns every committed caption.
+    @available(macOS 26.0, *)
+    @MainActor
+    private func commits(
+        of results: [(text: AttributedString, isFinal: Bool, end: Double)], locale: String, expecting count: Int
+    ) async throws -> [String] {
+        let session = LiveTranscriptionSession()
+        var committed: [String] = []
+        for (index, result) in results.enumerated() {
+            session.processModernResultForTesting(
+                result.text, isFinal: result.isFinal,
+                range: CMTimeRange(start: .zero, end: CMTime(seconds: result.end, preferredTimescale: 1_000)),
+                localeIdentifier: locale
+            ) { sentence in committed.append(sentence.text) }
+            // A draft is committed by the silence timer (about 0.6 s), a final at once.
+            try await Task.sleep(nanoseconds: index == results.count - 1 ? 1_200_000_000 : 1_000_000_000)
+        }
+        XCTAssertGreaterThanOrEqual(committed.count, count, "Captions: \(committed)")
+        return committed
     }
 
     @available(macOS 26.0, *)

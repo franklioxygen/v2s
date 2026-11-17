@@ -1,0 +1,26 @@
+{
+  "id": "de",
+  "name": "German",
+  "speech_locale": "de_DE",
+  "expected_backend": "on-device",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Anna"
+      ],
+      "b_pitch": 0.84,
+      "rate": 214
+    },
+    "news": {
+      "voices": [
+        "Anna"
+      ],
+      "rate": 235
+    }
+  }
+}

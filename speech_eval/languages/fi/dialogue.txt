@@ -1,0 +1,16 @@
+A: Hei, tuletko vielä kanssani torille tänään iltapäivällä?
+B: Haluaisin, mutta siskoni soitti juuri ja pyysi minua auttamaan sohvan siirtämisessä.
+A: Voi ei, sen ison vihreän, jonka hän osti viime vuonna?
+B: Juuri sen. Se mahtuu hädin tuskin ovesta.
+A: Mennään sitten torille huomenna aamulla.
+B: Se sopii minulle. Mitä sinun pitää ylipäätään ostaa?
+A: Lähinnä vihanneksia, vähän tuoretta leipää ja pieni lahja naapurilleni.
+B: Onko hänellä taas jo syntymäpäivä?
+A: Ei, hän kasteli kasvini, kun olin lomalla.
+B: Tosi ystävällistä häneltä. Voisit ehkä viedä hänelle kukkia.
+A: Hyvä idea. Luulen, että hän rakastaa auringonkukkia.
+B: Vanhan sillan lähellä olevalla kukkakojulla on yleensä kauneimmat.
+A: Hienoa, tavataan sitten sillalla.
+B: Kuulostaa hyvältä. Laitan sinulle viestin, kun lähden kotoa.
+A: Täydellistä. Onnea sohvan kanssa!
+B: Kiitos, sitä minä todella tarvitsen.

@@ -1,0 +1,25 @@
+{
+  "id": "zh-Hans",
+  "name": "Chinese (Simplified)",
+  "speech_locale": "zh_CN",
+  "expected_backend": "on-device",
+  "metric": "cer",
+  "translation_targets": [
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Tingting"
+      ],
+      "b_pitch": 0.84,
+      "rate": 196
+    },
+    "news": {
+      "voices": [
+        "Tingting"
+      ],
+      "rate": 229
+    }
+  }
+}

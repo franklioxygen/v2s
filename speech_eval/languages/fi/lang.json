@@ -1,0 +1,26 @@
+{
+  "id": "fi",
+  "name": "Finnish",
+  "speech_locale": "fi_FI",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Satu"
+      ],
+      "b_pitch": 0.84,
+      "rate": 193
+    },
+    "news": {
+      "voices": [
+        "Satu"
+      ],
+      "rate": 223
+    }
+  }
+}

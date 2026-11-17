@@ -1,0 +1,56 @@
+{
+  "id": "ar",
+  "name": "Arabic",
+  "speech_locale": "ar_SA",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Majed"
+      ],
+      "b_pitch": 1.18,
+      "rate": 306
+    },
+    "news": {
+      "voices": [
+        "Majed"
+      ],
+      "rate": 340
+    }
+  },
+  "normalize": {
+    "replace": [
+      [
+        "أ",
+        "ا"
+      ],
+      [
+        "إ",
+        "ا"
+      ],
+      [
+        "آ",
+        "ا"
+      ],
+      [
+        "ى",
+        "ي"
+      ],
+      [
+        "ة",
+        "ه"
+      ],
+      [
+        "ـ",
+        ""
+      ]
+    ],
+    "strip_marks": true,
+    "why": "Hamza seats, alef maqsura, taa marbuta and tashkeel vary freely in ASR output."
+  }
+}

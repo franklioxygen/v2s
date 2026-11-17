@@ -1,0 +1,26 @@
+{
+  "id": "nl",
+  "name": "Dutch",
+  "speech_locale": "nl_NL",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Xander",
+        "Ellen"
+      ],
+      "rate": 180
+    },
+    "news": {
+      "voices": [
+        "Xander"
+      ],
+      "rate": 194
+    }
+  }
+}

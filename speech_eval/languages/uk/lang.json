@@ -1,0 +1,26 @@
+{
+  "id": "uk",
+  "name": "Ukrainian",
+  "speech_locale": "uk_UA",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Lesya"
+      ],
+      "b_pitch": 0.84,
+      "rate": 219
+    },
+    "news": {
+      "voices": [
+        "Lesya"
+      ],
+      "rate": 273
+    }
+  }
+}

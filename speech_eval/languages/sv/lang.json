@@ -1,0 +1,26 @@
+{
+  "id": "sv",
+  "name": "Swedish",
+  "speech_locale": "sv_SE",
+  "expected_backend": "server",
+  "metric": "wer",
+  "translation_targets": [
+    "zh-Hans",
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Alva"
+      ],
+      "b_pitch": 0.84,
+      "rate": 206
+    },
+    "news": {
+      "voices": [
+        "Alva"
+      ],
+      "rate": 221
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "id": "zh-Hant",
+  "name": "Chinese (Traditional)",
+  "speech_locale": "zh_TW",
+  "expected_backend": "on-device",
+  "metric": "cer",
+  "translation_targets": [
+    "en"
+  ],
+  "tts": {
+    "dialogue": {
+      "voices": [
+        "Meijia"
+      ],
+      "b_pitch": 0.84,
+      "rate": 192
+    },
+    "news": {
+      "voices": [
+        "Meijia"
+      ],
+      "rate": 220
+    }
+  }
+}
