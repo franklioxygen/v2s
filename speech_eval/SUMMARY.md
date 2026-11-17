@@ -6,9 +6,9 @@
 |---|---|---|---|---|---|---|
 | Arabic (`ar`) | legacy-server | WER | 27.9% 🔴 fail | 17.5% 🔴 fail | – ⚪ skipped | 20261117-085254 |
 | Danish (`da`) | legacy-server | WER | 31.9% 🔴 fail | 161.8% 🔴 fail | – ⚪ skipped | 20261117-085254 |
-| German (`de`) | speech-analyzer | WER | 2.5% 🟢 goal | 0.6% 🟢 goal | 90.2% 🔴 fail | 20261117-101548 |
-| English (`en`) | speech-analyzer | WER | 0.6% 🟢 goal | 1.8% 🟢 goal | 92.9% 🟡 pass | 20261117-101548 |
-| Spanish (`es`) | speech-analyzer | WER | 2.2% 🟢 goal | 0.5% 🟢 goal | 93.8% 🟡 pass | 20261117-101548 |
+| German (`de`) | speech-analyzer | WER | 2.5% 🟢 goal | 0.6% 🟢 goal | 90.2% 🔴 fail | 20261117-162053 |
+| English (`en`) | speech-analyzer | WER | 0.6% 🟢 goal | 1.8% 🟢 goal | 92.9% 🟡 pass | 20261117-162053 |
+| Spanish (`es`) | speech-analyzer | WER | 2.2% 🟢 goal | 0.5% 🟢 goal | 93.8% 🟡 pass | 20261117-162053 |
 | Finnish (`fi`) | legacy-server | WER | 116.8% 🔴 fail | 75.0% 🔴 fail | – ⚪ skipped | 20261117-085254 |
 | French (`fr`) | speech-analyzer | WER | 23.3% 🔴 fail | 0.0% 🟢 goal | 98.7% 🟢 goal（1 段未过识别门槛） | 20261117-101548 |
 | Hebrew (`he`) | legacy-server | WER | 151.7% 🔴 fail | 336.3% 🔴 fail | – ⚪ skipped | 20261117-085254 |
@@ -21,7 +21,7 @@
 | Norwegian Bokmål (`nb`) | legacy-server | WER | 303.2% 🔴 fail | 180.3% 🔴 fail | – ⚪ skipped | 20261117-085254 |
 | Dutch (`nl`) | legacy-server | WER | 85.5% 🔴 fail | 72.6% 🔴 fail | – ⚪ skipped | 20261117-085254 |
 | Polish (`pl`) | legacy-server | WER | 17.3% 🔴 fail | 23.6% 🔴 fail | – ⚪ skipped | 20261117-085254 |
-| Portuguese (`pt`) | speech-analyzer | WER | 6.0% 🟡 pass | 4.6% 🟢 goal | 86.8% 🔴 fail | 20261117-101548 |
+| Portuguese (`pt`) | speech-analyzer | WER | 6.0% 🟡 pass | 4.6% 🟢 goal | 86.8% 🔴 fail | 20261117-162053 |
 | Russian (`ru`) | legacy-server | WER | 74.6% 🔴 fail | 97.2% 🔴 fail | – ⚪ skipped | 20261117-085254 |
 | Swedish (`sv`) | legacy-server | WER | 67.3% 🔴 fail | 43.7% 🔴 fail | – ⚪ skipped | 20261117-085254 |
 | Thai (`th`) | legacy-server | CER | 152.6% 🔴 fail | 35.5% 🔴 fail | – ⚪ skipped | 20261117-085254 |

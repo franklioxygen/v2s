@@ -3,6 +3,7 @@ import AVFoundation
 import CoreAudio
 import CoreMedia
 import Foundation
+import NaturalLanguage
 import os.log
 import Speech
 
@@ -2140,11 +2141,96 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             return
         }
 
+        if let split = Self.runOnDraftSplit(in: pendingRawText) {
+            commitRunOnDraftHead(split, transcribed: transcribed)
+            return
+        }
+
         emitDraftUpdate(
             from: transcribed,
             text: Self.joiningHeldFragment(modernHeldFragmentText, to: text, languageCode: activeLanguageCode)
         )
         scheduleSilenceCommit()
+    }
+
+    /// Commits the start of a draft that has run on without sentence punctuation and
+    /// keeps its last words on the draft line.
+    ///
+    /// The transcriber sometimes leaves out every full stop in continuous speech, and
+    /// then nothing ends a sentence until it finalizes the whole utterance: a Portuguese
+    /// replay grew one draft for 28 s, four sentences and seven lines (#42). Later
+    /// results and the final reissue the committed words, and are aligned against them
+    /// like text committed at a sentence boundary.
+    @available(macOS 26.0, *)
+    private func commitRunOnDraftHead(
+        _ split: (committedRawText: String, remainingRawText: String),
+        transcribed: AttributedString
+    ) {
+        cancelSilenceTimer()
+        cancelVADSilenceTimer()
+        markModernDraftCommitted(split.committedRawText)
+        latestModernText = split.remainingRawText
+
+        // A run-on head ends mid-sentence by design, so it is not held as a fragment.
+        let head = Self.joiningHeldFragment(
+            modernHeldFragmentText,
+            to: split.committedRawText.trimmingCharacters(in: .whitespacesAndNewlines),
+            languageCode: activeLanguageCode
+        )
+        clearHeldFragment()
+        emitModernCommit(head, clearDraftAfter: false)
+
+        let tail = split.remainingRawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if tail.isEmpty == false {
+            emitDraftUpdate(from: transcribed, text: tail)
+        }
+        scheduleSilenceCommit()
+    }
+
+    /// Where to cut a draft whose last sentence has run past `runOnDraftLimit` characters
+    /// without ending: before its last `runOnDraftKeptWords` words, which the transcriber
+    /// may still revise, or just after a comma close to that point. Nil while the
+    /// draft's last sentence is within the limit or ends with a sentence terminator.
+    static func runOnDraftSplit(in rawText: String) -> (committedRawText: String, remainingRawText: String)? {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false,
+              SentenceBoundaryHeuristics.endsWithLikelySentenceTerminator(in: trimmed) == false else {
+            return nil
+        }
+
+        let nsText = rawText as NSString
+        let runStart = SentenceBoundaryHeuristics.sentenceRanges(in: nsText).last?.location ?? 0
+        let earlier = nsText.substring(to: runStart)
+        let run = nsText.substring(from: runStart)
+        let limit = run.containsCJKCharacters ? runOnDraftLimitCJK : runOnDraftLimit
+        guard run.trimmingCharacters(in: .whitespacesAndNewlines).count > limit else {
+            return nil
+        }
+
+        let tokenizer = NLTokenizer(unit: .word)
+        tokenizer.string = run
+        var wordStarts: [String.Index] = []
+        tokenizer.enumerateTokens(in: run.startIndex..<run.endIndex) { range, _ in
+            wordStarts.append(range.lowerBound)
+            return true
+        }
+        guard wordStarts.count > runOnDraftKeptWords else {
+            return nil
+        }
+
+        var cut = wordStarts[wordStarts.count - runOnDraftKeptWords]
+        // A comma in the second half of what would be committed is a better place to cut.
+        let minimumHead = run.distance(from: run.startIndex, to: cut) / 2
+        if let comma = run[..<cut].lastIndex(where: { runOnClauseSeparators.contains($0) }),
+           run.distance(from: run.startIndex, to: comma) >= minimumHead {
+            cut = run.index(after: comma)
+        }
+
+        let head = earlier + run[..<cut]
+        guard head.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            return nil
+        }
+        return (head, String(run[cut...]))
     }
 
     /// Records that `rawText`, the start of `latestModernText`, is committed. Every
@@ -4277,6 +4363,14 @@ private extension LiveTranscriptionSession {
     /// marks are left alone: the transcriber adds them for intonation, not for pauses.
     static let pauseFullStops: Set<Character> = ["。", "."]
     static let heldFragmentCheckMs = 300
+    /// Characters an unfinished sentence may reach before its start is committed: about
+    /// two lines of source text, longer than most spoken sentences.
+    static let runOnDraftLimit = 160
+    static let runOnDraftLimitCJK = 64
+    /// Words left on the draft line when a run-on draft is cut. Fast results revise
+    /// their last words and hold the newest back until more speech follows.
+    static let runOnDraftKeptWords = 4
+    static let runOnClauseSeparators: Set<Character> = [",", "，", "、", ";", "；"]
     /// A held fragment is committed on its own after this long with nothing said after it.
     /// It stays visible on the draft line meanwhile, and the next clause can take two
     /// seconds to show up after a pause.
