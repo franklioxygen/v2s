@@ -234,6 +234,62 @@ final class LiveTranscriptionSessionTests: XCTestCase {
         XCTAssertEqual(committed, ["Hola.", "Buenos días.", "¿Qué tal?"])
     }
 
+    // From a Portuguese replay where the transcriber dropped every full stop for 28 s (#42).
+    private static let runOn = "O guia local explica que o animal só sai do esconderijo quando a temperatura cai "
+        + "pouco depois do pôr do sol enquanto espera os pesquisadores montam as câmeras e conferem as baterias "
+        + "sabendo que talvez tenham apenas uma chance de repente um deles aponta para um tronco caído"
+
+    func testRunOnDraftIsCutBeforeItsLastWords() throws {
+        let split = try XCTUnwrap(LiveTranscriptionSession.runOnDraftSplit(in: Self.runOn))
+        XCTAssertEqual(split.remainingRawText, "para um tronco caído")
+        XCTAssertEqual(split.committedRawText + split.remainingRawText, Self.runOn)
+    }
+
+    func testDraftWithinTheLimitOrEndingItsSentenceIsNotCut() {
+        XCTAssertNil(LiveTranscriptionSession.runOnDraftSplit(in: String(Self.runOn.prefix(150))))
+        XCTAssertNil(LiveTranscriptionSession.runOnDraftSplit(in: Self.runOn + "."))
+    }
+
+    func testRunOnDraftIsCutAfterACommaNearTheEnd() throws {
+        let text = Self.runOn.replacingOccurrences(of: "baterias sabendo", with: "baterias, sabendo")
+        let split = try XCTUnwrap(LiveTranscriptionSession.runOnDraftSplit(in: text))
+        XCTAssertTrue(split.committedRawText.hasSuffix("baterias,"), split.committedRawText)
+        XCTAssertTrue(split.remainingRawText.hasPrefix(" sabendo que talvez"), split.remainingRawText)
+    }
+
+    func testOnlyTheUnfinishedSentenceCountsTowardTheLimit() throws {
+        XCTAssertNil(LiveTranscriptionSession.runOnDraftSplit(in: "Eles caminham devagar entre as pedras. "
+            + String(Self.runOn.prefix(120))))
+        let split = try XCTUnwrap(LiveTranscriptionSession.runOnDraftSplit(in: "Eles caminham devagar. " + Self.runOn))
+        XCTAssertTrue(split.committedRawText.hasPrefix("Eles caminham devagar. O guia local"))
+        XCTAssertEqual(split.remainingRawText, "para um tronco caído")
+    }
+
+    func testRunOnChineseUsesItsOwnLimit() throws {
+        let text = "研究人员决定沿着溪流继续前进里面空气清新湿润墙壁上覆盖着多年来动物留下的痕迹导游点亮手电筒在这里展示了几十只小蝎子紧紧抓住石头生物学家感到非常激动"
+        XCTAssertNil(LiveTranscriptionSession.runOnDraftSplit(in: String(text.prefix(50))))
+        let split = try XCTUnwrap(LiveTranscriptionSession.runOnDraftSplit(in: text))
+        XCTAssertEqual(split.committedRawText + split.remainingRawText, text)
+        XCTAssertFalse(split.remainingRawText.isEmpty)
+        XCTAssertLessThan(split.remainingRawText.count, 16)
+    }
+
+    @MainActor
+    func testRunOnDraftIsCommittedInPartsWithoutRepeatingWords() async throws {
+        guard #available(macOS 26.0, *) else { throw XCTSkip("SpeechTranscriber word times need macOS 26") }
+        let words = Self.runOn.split(separator: " ")
+        let more = " dentro do tronco meio escondido pela sombra aparece um escorpião enorme"
+        let committed = try await commits(of: [
+            (volatile(words.prefix(18).joined(separator: " "), 0, 7.0), false, 7.0),
+            (volatile(Self.runOn, 0, 14.0), false, 14.0),
+            (volatile(Self.runOn + more, 0, 18.0), false, 18.0),
+            (volatile(Self.runOn + more + ".", 0, 19.0), true, 19.0),
+        ], locale: "pt_BR", expecting: 2)
+        XCTAssertEqual(committed.count, 2, "Captions: \(committed)")
+        XCTAssertEqual(committed.first, String(Self.runOn.dropLast(" para um tronco caído".count)))
+        XCTAssertEqual(committed.last, "para um tronco caído" + more + ".")
+    }
+
     private func pending(after committed: String, in text: String) -> String {
         let overlap = LiveTranscriptionSession.committedOverlap(of: committed, in: text, allowingUnreachedCommitted: false)
         return String(text[overlap.pendingStart...])

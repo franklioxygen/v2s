@@ -13,6 +13,7 @@
 | 20261116-182549 | a00ddd0 | baseline | 2.2% | – | 🟢 goal | 0 | 1.6s / 2.1s | 71.5 (96.8%) | 51.5 (93.8%) | 🟡 pass |  |
 | 20261117-085254 | a00ddd0* | Drop reissued words by audio time outside Japanese | 13.9% | +11.7 | 🔴 fail | 1 | 2.8s / 7.3s | – | – | ⚪ skipped | WER +11.7 pt vs 20261116-182549 |
 | 20261117-101548 | a00ddd0* | Find committed text in later results by word alignment, not audio time | 2.2% | -11.7 | 🟢 goal | 0 | 1.6s / 2.1s | 71.5 (96.8%) | 51.5 (93.8%) | 🟡 pass |  |
+| 20261117-162053 | ff254fc* | Commit run-on drafts without punctuation in parts (#42) | 2.2% | +0.0 | 🟢 goal | 0 | 1.6s / 2.1s | 71.5 (96.8%) | 51.5 (93.8%) | 🟡 pass |  |
 
 ## 新闻 news
 
@@ -23,5 +24,6 @@
 | 20261116-182549 | a00ddd0 | baseline | 20.7% | – | 🔴 fail | 0 | 1.5s / 2.7s | – | – | ⚪ skipped |  |
 | 20261117-085254 | a00ddd0* | Drop reissued words by audio time outside Japanese | 7.1% | -13.6 | 🟡 pass | 1 | 2.2s / 7.0s | 68.4 (92.3%) | 50.6 (93.0%) | 🔴 fail |  |
 | 20261117-101548 | a00ddd0* | Find committed text in later results by word alignment, not audio time | 0.5% | -6.6 | 🟢 goal | 0 | 1.5s / 2.0s | 73.5 (99.2%) | 53.2 (97.8%) | 🟢 goal |  |
+| 20261117-162053 | ff254fc* | Commit run-on drafts without punctuation in parts (#42) | 0.5% | +0.0 | 🟢 goal | 0 | 1.5s / 2.0s | 73.0 (98.4%) | 53.2 (97.9%) | 🟢 goal |  |
 
 `*` = 运行时工作区有未提交改动。Δ 只与同一音频、同一模式的上一次运行比较。
