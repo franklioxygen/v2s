@@ -114,6 +114,24 @@ class CheckImportsTests(unittest.TestCase):
             "-o", cls.duplicate_names,
         )
 
+        # Two present libraries sharing a short name, with a symbol imported from one:
+        # nm's "(from libshared_fixture)" cannot tell which library supplies it.
+        shared = []
+        for version in ("1", "2"):
+            library_source.write_text(f"int shared_fixture_{version}(void) {{ return 0; }}\n")
+            library_path = cls.root / f"libshared_fixture.{version}.dylib"
+            cls.compile(
+                "-arch", cls.arch, "-dynamiclib", library_source,
+                "-install_name", library_path, "-o", library_path,
+            )
+            shared.append(library_path)
+        source.write_text(
+            "extern int shared_fixture_2(void);\n"
+            "int main(void) { return shared_fixture_2(); }\n"
+        )
+        cls.ambiguous = cls.root / "ambiguous"
+        cls.compile("-arch", cls.arch, source, *(f"-Wl,-needed_library,{path}" for path in shared), "-o", cls.ambiguous)
+
         # Linked strongly but nothing imported from it, so only its load command needs it.
         source.write_text('#include <stdio.h>\nint main(void) { return puts("fixture") < 0; }\n')
         cls.unreferenced = cls.root / "unreferenced"
@@ -216,10 +234,15 @@ class CheckImportsTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn(f"STRONG {self.umbrella} re-exports {self.reexported}, which is not on this macOS", result.stdout)
 
-    def test_missing_reexport_of_weak_library_passes(self):
+    def test_missing_reexport_of_present_weak_library_fails(self):
+        # The umbrella exists, so dyld loads it and then needs what it re-exports.
         result = self.check(self.weak_umbrella)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(f"weak   {self.umbrella} re-exports {self.reexported}, which is not on this macOS", result.stdout)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"STRONG {self.umbrella} re-exports {self.reexported}, which is not on this macOS", result.stdout)
+
+    def test_import_from_shared_short_name_fails(self):
+        result = self.assert_inspection_fails(self.ambiguous)
+        self.assertIn("a name several linked libraries share", result.stderr)
 
     def test_missing_library_sharing_a_name_fails(self):
         result = self.check(self.duplicate_names)

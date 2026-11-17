@@ -159,7 +159,9 @@ def main():
     if not linked or not imports:
         raise ValueError(f"Could not read linked libraries and imported symbols from {binary} ({arch})")
     # nm names a library only by its short name, so imports are matched that way.
-    libraries = {short_name(path): (path, is_weak) for path, is_weak in linked}
+    libraries = collections.defaultdict(set)
+    for path, is_weak in linked:
+        libraries[short_name(path)].add((path, is_weak))
     cache = {}
     missing_strong = 0
     missing_weak = 0
@@ -174,20 +176,31 @@ def main():
             continue
         result = exported_symbols(path, arch, cache)
         if result is None:
-            problems = [f"{path} is not on this macOS"]
-        else:
-            problems = [f"{parent} re-exports {child}, which is not on this macOS" for parent, child in sorted(result[1])]
-        for problem in problems:
             if library_is_weak:
-                print(f"weak   {problem}")
+                print(f"weak   {path} is not on this macOS")
             else:
                 missing_strong += 1
-                print(f"STRONG {problem}")
+                print(f"STRONG {path} is not on this macOS")
+            continue
+        # Weak linking only lets the library itself be absent. Once dyld loads it,
+        # the libraries it re-exports are required whatever the binary's link says.
+        for parent, child in sorted(result[1]):
+            missing_strong += 1
+            print(f"STRONG {parent} re-exports {child}, which is not on this macOS")
 
     for library, symbols in sorted(imports.items()):
-        if library not in libraries:
+        candidates = libraries.get(library, set())
+        if not candidates:
             raise ValueError(f"{binary} imports symbols from {library}, which none of its load commands names")
-        path, library_is_weak = libraries[library]
+        paths = sorted({path for path, _ in candidates})
+        if len(paths) > 1:
+            # nm does not say which of them each symbol binds to.
+            raise ValueError(
+                f"{binary} imports symbols from {library}, a name several linked libraries share: {', '.join(paths)}"
+            )
+        path = paths[0]
+        # Weak only if every load command of the library is weak.
+        library_is_weak = all(is_weak for _, is_weak in candidates)
         if path.startswith("@rpath/"):
             continue
 
