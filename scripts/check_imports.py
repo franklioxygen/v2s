@@ -89,7 +89,28 @@ def imported_symbols(binary, arch):
     return imports
 
 
-def exported_symbols(path, cache, seen=frozenset()):
+# Slices a process of each architecture can load, best first. Apple's own arm64
+# libraries are often built for arm64e only.
+LOADABLE_SLICES = {"arm64": ("arm64", "arm64e")}
+
+
+def arch_options(path, arch):
+    """The dyld_info options that limit it to the slice of `path` an `arch` process loads.
+
+    A library only in the dyld shared cache has no file, and the cache is built for the
+    running architecture, so it needs none. A file on disk may be universal, and
+    without -arch dyld_info would print the exports of every slice.
+    """
+    if not os.path.exists(path):
+        return []
+    slices = run("lipo", "-archs", path).split()
+    for candidate in LOADABLE_SLICES.get(arch, (arch,)):
+        if candidate in slices:
+            return ["-arch", candidate]
+    raise ValueError(f"{path} has no slice an {arch} process can load (available: {', '.join(slices) or 'none'})")
+
+
+def exported_symbols(path, arch, cache, seen=frozenset()):
     """Symbols a system library exports, including those of the libraries it re-exports.
 
     Returns None when this macOS does not have the library, which is expected for a
@@ -99,13 +120,15 @@ def exported_symbols(path, cache, seen=frozenset()):
         if not library_exists(path):
             cache[path] = None
             return None
-        output = run("dyld_info", "-exports", path)
+        options = arch_options(path, arch)
+        output = run("dyld_info", *options, "-exports", path)
         symbols = set(re.findall(r"^\s+0x[0-9A-Fa-f]+\s+(\S+)", output, re.M))
         symbols |= set(re.findall(r"^\s+\[re-export\]\s+(\S+)", output, re.M))
-        for reexported in re.findall(r"^\s+re-export\s+(\S+)", run("dyld_info", "-linked_dylibs", path), re.M):
+        linked = run("dyld_info", *options, "-linked_dylibs", path)
+        for reexported in re.findall(r"^\s+re-export\s+(\S+)", linked, re.M):
             if reexported in seen:
                 continue
-            reexported_symbols = exported_symbols(reexported, cache, seen | {path})
+            reexported_symbols = exported_symbols(reexported, arch, cache, seen | {path})
             if reexported_symbols is None:
                 # Its symbols then show up below as missing imports from this library.
                 print(f"note   {path} re-exports {reexported}, which is not on this macOS")
@@ -137,21 +160,28 @@ def main():
     missing_strong = 0
     missing_weak = 0
 
+    # dyld loads every linked library, including one the binary imports nothing from
+    # (kept with -needed_library, for example), so each must exist.
+    for path, library_is_weak in sorted(libraries.values()):
+        # Embedded frameworks such as Sparkle ship inside the app bundle.
+        if path.startswith("@rpath/") or library_exists(path):
+            continue
+        if library_is_weak:
+            print(f"weak   {path} is not on this macOS")
+        else:
+            missing_strong += 1
+            print(f"STRONG {path} is not on this macOS")
+
     for library, symbols in sorted(imports.items()):
         if library not in libraries:
             raise ValueError(f"{binary} imports symbols from {library}, which none of its load commands names")
         path, library_is_weak = libraries[library]
         if path.startswith("@rpath/"):
-            # Embedded frameworks such as Sparkle ship inside the app bundle.
             continue
 
-        exported = exported_symbols(path, cache)
+        exported = exported_symbols(path, arch, cache)
         if exported is None:
-            if library_is_weak:
-                print(f"weak   {path} is not on this macOS")
-            else:
-                missing_strong += 1
-                print(f"STRONG {path} is not on this macOS")
+            # Already reported above.
             continue
 
         for symbol, symbol_is_weak in symbols:

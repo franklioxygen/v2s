@@ -81,6 +81,38 @@ class CheckImportsTests(unittest.TestCase):
         cls.compile("-arch", cls.arch, source, cls.umbrella, "-o", cls.through_umbrella)
         cls.reexported.unlink()
 
+        # Linked strongly but nothing imported from it, so only its load command needs it.
+        source.write_text('#include <stdio.h>\nint main(void) { return puts("fixture") < 0; }\n')
+        cls.unreferenced = cls.root / "unreferenced"
+        cls.compile("-arch", cls.arch, source, f"-Wl,-needed_library,{library}", "-o", cls.unreferenced)
+
+        # A universal library whose native slice lacks the imported symbol, which only
+        # the other slice exports. The binary links a native-only build first.
+        cls.universal = cls.root / "libslice_fixture.dylib"
+        library_source.write_text("int slice_fixture(void) { return 0; }\n")
+        cls.compile(
+            "-arch", cls.arch, "-dynamiclib", library_source,
+            "-install_name", cls.universal, "-o", cls.universal,
+        )
+        source.write_text(
+            "extern int slice_fixture(void);\n"
+            "int main(void) { return slice_fixture(); }\n"
+        )
+        cls.sliced = cls.root / "sliced"
+        cls.compile("-arch", cls.arch, source, cls.universal, "-o", cls.sliced)
+        other_slice = cls.root / "other-slice.dylib"
+        cls.compile(
+            "-arch", other_arch, "-dynamiclib", library_source,
+            "-install_name", cls.universal, "-o", other_slice,
+        )
+        library_source.write_text("int other_fixture(void) { return 0; }\n")
+        native_slice = cls.root / "native-slice.dylib"
+        cls.compile(
+            "-arch", cls.arch, "-dynamiclib", library_source,
+            "-install_name", cls.universal, "-o", native_slice,
+        )
+        cls.lipo("-create", native_slice, other_slice, "-output", cls.universal)
+
         # libc++ is installed as libc++.1.dylib, which nm calls "libc++".
         cxx_source = cls.root / "main.cpp"
         cxx_source.write_text('#include <string>\nint main() { return std::string("x").size() != 1; }\n')
@@ -91,6 +123,12 @@ class CheckImportsTests(unittest.TestCase):
     def compile(*args, compiler="clang"):
         """Compile only the generated fixtures with Apple's fixed tool path."""
         command = ["/usr/bin/xcrun", compiler, *map(str, args)]
+        subprocess.run(command, capture_output=True, text=True, check=True)  # nosec B603  # nosemgrep
+
+    @staticmethod
+    def lipo(*args):
+        """Combine generated fixture slices with Apple's fixed tool path."""
+        command = ["/usr/bin/lipo", *map(str, args)]
         subprocess.run(command, capture_output=True, text=True, check=True)  # nosec B603  # nosemgrep
 
     def check(self, binary):
@@ -139,6 +177,16 @@ class CheckImportsTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn(f"note   {self.umbrella} re-exports {self.reexported}, which is not on this macOS", result.stdout)
         self.assertIn("STRONG libumbrella_fixture: _reexported_fixture", result.stdout)
+
+    def test_missing_unreferenced_library_fails(self):
+        result = self.check(self.unreferenced)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"STRONG {self.missing_library} is not on this macOS", result.stdout)
+
+    def test_symbol_only_in_other_slice_fails(self):
+        result = self.check(self.sliced)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("STRONG libslice_fixture: _slice_fixture", result.stdout)
 
     def test_missing_weak_library_passes(self):
         result = self.check(self.weak)

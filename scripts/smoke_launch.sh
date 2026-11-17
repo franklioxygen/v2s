@@ -56,7 +56,8 @@ echo "----------------------"
 # The reason for a crash is in its crash report, which ReportCrash can take most of a minute to write.
 REPORT=""
 for ((attempt = 0; attempt < 60; attempt++)); do
-  REPORT="$(find "$HOME/Library/Logs/DiagnosticReports" -name 'v2s*.ips' -newer "$STARTED_MARKER" 2>/dev/null | head -n 1)"
+  # find fails until ReportCrash creates the directory; that only means no report yet.
+  REPORT="$(find "$HOME/Library/Logs/DiagnosticReports" -name 'v2s*.ips' -newer "$STARTED_MARKER" 2>/dev/null | head -n 1 || true)"
   [[ -n "$REPORT" ]] && break
   sleep 1
 done
