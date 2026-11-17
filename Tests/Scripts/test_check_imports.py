@@ -79,7 +79,40 @@ class CheckImportsTests(unittest.TestCase):
         )
         cls.through_umbrella = cls.root / "through-umbrella"
         cls.compile("-arch", cls.arch, source, cls.umbrella, "-o", cls.through_umbrella)
+        # Importing only the umbrella's own symbol still needs what it re-exports.
+        source.write_text(
+            "extern int umbrella_fixture(void);\n"
+            "int main(void) { return umbrella_fixture(); }\n"
+        )
+        cls.umbrella_only = cls.root / "umbrella-only"
+        cls.compile("-arch", cls.arch, source, cls.umbrella, "-o", cls.umbrella_only)
+        source.write_text(
+            "extern int umbrella_fixture(void) __attribute__((weak_import));\n"
+            "int main(void) { return umbrella_fixture ? umbrella_fixture() : 0; }\n"
+        )
+        cls.weak_umbrella = cls.root / "weak-umbrella"
+        cls.compile("-arch", cls.arch, source, f"-Wl,-weak_library,{cls.umbrella}", "-o", cls.weak_umbrella)
         cls.reexported.unlink()
+
+        # Two linked libraries that nm would both call "libduplicate_fixture": the
+        # first is missing and the second exists.
+        duplicates = []
+        for version, install_name in (("1", cls.root / "missing" / "libduplicate_fixture.1.dylib"),
+                                      ("2", cls.root / "libduplicate_fixture.2.dylib")):
+            library_source.write_text(f"int duplicate_fixture_{version}(void) {{ return 0; }}\n")
+            duplicate = cls.root / f"libduplicate_fixture.{version}.dylib"
+            cls.compile(
+                "-arch", cls.arch, "-dynamiclib", library_source,
+                "-install_name", install_name, "-o", duplicate,
+            )
+            duplicates.append(duplicate)
+        cls.missing_duplicate = cls.root / "missing" / "libduplicate_fixture.1.dylib"
+        source.write_text('#include <stdio.h>\nint main(void) { return puts("fixture") < 0; }\n')
+        cls.duplicate_names = cls.root / "duplicate-names"
+        cls.compile(
+            "-arch", cls.arch, source, *(f"-Wl,-needed_library,{path}" for path in duplicates),
+            "-o", cls.duplicate_names,
+        )
 
         # Linked strongly but nothing imported from it, so only its load command needs it.
         source.write_text('#include <stdio.h>\nint main(void) { return puts("fixture") < 0; }\n')
@@ -172,11 +205,26 @@ class CheckImportsTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn(f"STRONG {self.missing_library} is not on this macOS", result.stdout)
 
-    def test_missing_reexported_library_is_noted(self):
+    def test_missing_reexported_library_fails(self):
         result = self.check(self.through_umbrella)
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn(f"note   {self.umbrella} re-exports {self.reexported}, which is not on this macOS", result.stdout)
+        self.assertIn(f"STRONG {self.umbrella} re-exports {self.reexported}, which is not on this macOS", result.stdout)
         self.assertIn("STRONG libumbrella_fixture: _reexported_fixture", result.stdout)
+
+    def test_missing_reexport_of_used_library_fails(self):
+        result = self.check(self.umbrella_only)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"STRONG {self.umbrella} re-exports {self.reexported}, which is not on this macOS", result.stdout)
+
+    def test_missing_reexport_of_weak_library_passes(self):
+        result = self.check(self.weak_umbrella)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"weak   {self.umbrella} re-exports {self.reexported}, which is not on this macOS", result.stdout)
+
+    def test_missing_library_sharing_a_name_fails(self):
+        result = self.check(self.duplicate_names)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"STRONG {self.missing_duplicate} is not on this macOS", result.stdout)
 
     def test_missing_unreferenced_library_fails(self):
         result = self.check(self.unreferenced)

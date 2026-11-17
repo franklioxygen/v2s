@@ -65,16 +65,15 @@ def short_name(path):
 
 
 def linked_libraries(binary, arch):
-    """Maps each library name `nm` prints to its install path and whether it is weak-linked."""
-    libraries = {}
+    """The install path of every library the binary links, and whether it is weak-linked."""
+    libraries = []
     load_command = None
     for line in run("otool", "-arch", arch, "-l", binary).splitlines():
         line = line.strip()
         if line.startswith("cmd "):
             load_command = line.split()[1]
         elif line.startswith("name ") and load_command in LINK_COMMANDS:
-            path = line.split()[1]
-            libraries[short_name(path)] = (path, load_command == "LC_LOAD_WEAK_DYLIB")
+            libraries.append((line.split()[1], load_command == "LC_LOAD_WEAK_DYLIB"))
     return libraries
 
 
@@ -113,8 +112,10 @@ def arch_options(path, arch):
 def exported_symbols(path, arch, cache, seen=frozenset()):
     """Symbols a system library exports, including those of the libraries it re-exports.
 
-    Returns None when this macOS does not have the library, which is expected for a
-    weak-linked library on an older macOS. A library that exists must be readable.
+    Returns the symbols and the (library, re-exported path) pairs whose re-exported
+    library this macOS does not have; dyld cannot load the library without them.
+    Returns None when this macOS does not have the library itself, which is expected
+    for a weak-linked library on an older macOS. A library that exists must be readable.
     """
     if path not in cache:
         if not library_exists(path):
@@ -124,17 +125,18 @@ def exported_symbols(path, arch, cache, seen=frozenset()):
         output = run("dyld_info", *options, "-exports", path)
         symbols = set(re.findall(r"^\s+0x[0-9A-Fa-f]+\s+(\S+)", output, re.M))
         symbols |= set(re.findall(r"^\s+\[re-export\]\s+(\S+)", output, re.M))
+        missing = set()
         linked = run("dyld_info", *options, "-linked_dylibs", path)
         for reexported in re.findall(r"^\s+re-export\s+(\S+)", linked, re.M):
             if reexported in seen:
                 continue
-            reexported_symbols = exported_symbols(reexported, arch, cache, seen | {path})
-            if reexported_symbols is None:
-                # Its symbols then show up below as missing imports from this library.
-                print(f"note   {path} re-exports {reexported}, which is not on this macOS")
+            nested = exported_symbols(reexported, arch, cache, seen | {path})
+            if nested is None:
+                missing.add((path, reexported))
             else:
-                symbols |= reexported_symbols
-        cache[path] = symbols
+                symbols |= nested[0]
+                missing |= nested[1]
+        cache[path] = (symbols, missing)
     return cache[path]
 
 
@@ -150,27 +152,37 @@ def main():
     architectures = run("lipo", "-archs", binary).split()
     if arch not in architectures:
         raise ValueError(f"{binary} has no {arch} slice (available: {', '.join(architectures) or 'none'})")
-    libraries = linked_libraries(binary, arch)
+    linked = linked_libraries(binary, arch)
     imports = imported_symbols(binary, arch)
     # v2s always has linked libraries and imports. Empty results mean the tools
     # could not read the app, or their output no longer matches our parsers.
-    if not libraries or not imports:
+    if not linked or not imports:
         raise ValueError(f"Could not read linked libraries and imported symbols from {binary} ({arch})")
+    # nm names a library only by its short name, so imports are matched that way.
+    libraries = {short_name(path): (path, is_weak) for path, is_weak in linked}
     cache = {}
     missing_strong = 0
     missing_weak = 0
 
     # dyld loads every linked library, including one the binary imports nothing from
-    # (kept with -needed_library, for example), so each must exist.
-    for path, library_is_weak in sorted(libraries.values()):
+    # (kept with -needed_library, for example), and the libraries each re-exports,
+    # so all of them must exist. Two load commands can share a short name, so this
+    # goes through the load commands rather than the names.
+    for path, library_is_weak in sorted(set(linked)):
         # Embedded frameworks such as Sparkle ship inside the app bundle.
-        if path.startswith("@rpath/") or library_exists(path):
+        if path.startswith("@rpath/"):
             continue
-        if library_is_weak:
-            print(f"weak   {path} is not on this macOS")
+        result = exported_symbols(path, arch, cache)
+        if result is None:
+            problems = [f"{path} is not on this macOS"]
         else:
-            missing_strong += 1
-            print(f"STRONG {path} is not on this macOS")
+            problems = [f"{parent} re-exports {child}, which is not on this macOS" for parent, child in sorted(result[1])]
+        for problem in problems:
+            if library_is_weak:
+                print(f"weak   {problem}")
+            else:
+                missing_strong += 1
+                print(f"STRONG {problem}")
 
     for library, symbols in sorted(imports.items()):
         if library not in libraries:
@@ -179,10 +191,11 @@ def main():
         if path.startswith("@rpath/"):
             continue
 
-        exported = exported_symbols(path, arch, cache)
-        if exported is None:
+        result = exported_symbols(path, arch, cache)
+        if result is None:
             # Already reported above.
             continue
+        exported = result[0]
 
         for symbol, symbol_is_weak in symbols:
             if symbol in exported:
