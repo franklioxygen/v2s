@@ -55,10 +55,10 @@ struct OverlayView: View {
                             }
                         }
                         .padding(.bottom, Self.captionBottomInset)
-                        .animation(
-                            Self.captionFlowAnimation,
-                            value: historyLayoutAnimationState(for: state, visibleHistoryEntries: visibleHistoryEntries)
-                        )
+                        // Every row moves at once. The live rows have to change in
+                        // place (a promoted caption takes its draft's row), and history
+                        // rows that glided after them slid through those rows (#42).
+                        .transaction { $0.animation = nil }
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .bottom)
                     }
@@ -123,9 +123,6 @@ struct OverlayView: View {
                 draftLayer(state)
             }
         }
-        // A promoted caption occupies the same bottom row as its draft. Leaving
-        // an empty draft slot underneath it used to move the words up a full row.
-        .transaction { $0.animation = nil }
     }
 
     /// The current line is the newest complete sentence. When that is still a
@@ -264,18 +261,6 @@ struct OverlayView: View {
         )
             || (showsTranslatedSubtitle && state.translatedText.isEmpty == false)
             || (showsOriginalSubtitle && state.sourceText.isEmpty == false)
-    }
-
-    private func historyLayoutAnimationState(
-        for state: OverlayPreviewState,
-        visibleHistoryEntries: [OverlayHistoryEntry]
-    ) -> OverlayHistoryLayoutAnimationState {
-        OverlayHistoryLayoutAnimationState(
-            historyIDs: visibleHistoryEntries.map(\.id),
-            hasCommittedCaption: hasCommittedCaption(state),
-            draftPromotionID: showsDraftLayer(state) ? state.draftPromotionID : nil,
-            draftRowCount: showsDraftLayer(state) ? model.draftRows.count : 0
-        )
     }
 
     private func historyEntryHeight(for entry: OverlayHistoryEntry) -> CGFloat {
@@ -593,11 +578,6 @@ struct OverlayView: View {
 }
 
 private extension OverlayView {
-    static let captionFlowAnimation = Animation.interactiveSpring(
-        response: 0.32,
-        dampingFraction: 0.88,
-        blendDuration: 0.08
-    )
     static let liveStackSpacing: CGFloat = 10.0
     /// The newest history entry's opacities (see historyEntry).
     static let recentTranslatedOpacity = 0.68
@@ -614,13 +594,6 @@ private extension OverlayView {
         CGSize(width: 1, height: -1),
         CGSize(width: 1, height: 1)
     ]
-}
-
-private struct OverlayHistoryLayoutAnimationState: Equatable {
-    let historyIDs: [UUID]
-    let hasCommittedCaption: Bool
-    let draftPromotionID: UUID?
-    let draftRowCount: Int
 }
 
 private struct LiveLayersHeightPreferenceKey: PreferenceKey {
