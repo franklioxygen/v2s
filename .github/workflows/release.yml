@@ -78,10 +78,10 @@ jobs:
           DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
           DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
         run: |
-          if [ -z "$DEVELOPER_ID_P12_BASE64" ]; then
-            echo "::warning::DEVELOPER_ID_P12_BASE64 is not set; publishing an unsigned (ad-hoc) build."
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          # The install docs promise a notarized app, so never publish an ad-hoc build.
+          if [ -z "$DEVELOPER_ID_P12_BASE64" ] || [ -z "$DEVELOPER_ID_P12_PASSWORD" ]; then
+            echo "::error::DEVELOPER_ID_P12_BASE64 / DEVELOPER_ID_P12_PASSWORD are not set; refusing to publish an unsigned build."
+            exit 1
           fi
 
           KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"

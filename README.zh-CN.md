@@ -56,12 +56,7 @@ v2s 会向 Apple 的 Speech 与 Translation 框架查询当前 Mac 支持的语�
 brew install --cask franklioxygen/v2s/v2s
 ```
 
-v2s 尚未通过 Apple 公证，macOS 会在下载后将其隔离。执行一次下面的命令清除隔离标记，
-之后即可正常启动：
-
-```bash
-xattr -dr com.apple.quarantine /Applications/v2s.app
-```
+发布版本使用 Developer ID 签名并通过了 Apple 公证，安装后可以直接打开。
 
 如果之前手动安装过、`Applications` 里已经有 `v2s.app`，请加上 `--adopt`，让
 Homebrew 接管现有副本，而不是因为无法覆盖而报错。
