@@ -107,27 +107,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let center = DistributedNotificationCenter.default()
         var acknowledgedPID: pid_t?
 
+        // The request ID and PID travel in the notification's object string, not in
+        // userInfo: a sandboxed app (the Mac App Store build) may not post userInfo.
         let ackObserver = center.addObserver(
             forName: wakeAcknowledgedName,
-            object: identifier,
+            object: nil,
             queue: .main
         ) { notification in
-            guard let receivedRequestID = notification.userInfo?["requestID"] as? String,
-                  receivedRequestID == requestID else {
+            guard let payload = notification.object as? String,
+                  let acknowledgement = Self.parseSingleInstanceWakeAcknowledgement(payload),
+                  acknowledgement.requestID == requestID else {
                 return
             }
 
-            if let pid = notification.userInfo?["pid"] as? NSNumber {
-                acknowledgedPID = pid.int32Value
-            } else {
-                acknowledgedPID = existingApplications.first?.processIdentifier
-            }
+            acknowledgedPID = acknowledgement.pid ?? existingApplications.first?.processIdentifier
         }
 
         center.postNotificationName(
             wakeRequestedName,
-            object: identifier,
-            userInfo: ["requestID": requestID],
+            object: requestID,
+            userInfo: nil,
             deliverImmediately: true
         )
         existingApplications.first?.activate(options: [.activateAllWindows])
@@ -308,10 +307,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let wakeAcknowledgedName = Self.singleInstanceWakeAcknowledgedNotificationName(for: identifier)
         singleInstanceWakeObserver = DistributedNotificationCenter.default().addObserver(
             forName: wakeRequestedName,
-            object: identifier,
+            object: nil,
             queue: .main
         ) { [weak self] notification in
-            guard let requestID = notification.userInfo?["requestID"] as? String else {
+            guard let requestID = notification.object as? String, requestID.isEmpty == false else {
                 return
             }
 
@@ -324,11 +323,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.activate(ignoringOtherApps: true)
                 DistributedNotificationCenter.default().postNotificationName(
                     wakeAcknowledgedName,
-                    object: identifier,
-                    userInfo: [
-                        "requestID": requestID,
-                        "pid": NSNumber(value: ProcessInfo.processInfo.processIdentifier)
-                    ],
+                    object: Self.singleInstanceWakeAcknowledgementPayload(
+                        requestID: requestID,
+                        pid: ProcessInfo.processInfo.processIdentifier
+                    ),
+                    userInfo: nil,
                     deliverImmediately: true
                 )
             }
@@ -407,5 +406,21 @@ private extension AppDelegate {
         for identifier: String
     ) -> Notification.Name {
         Notification.Name("\(identifier).singleInstanceWakeAcknowledged")
+    }
+
+    /// "<requestID>|<pid>", sent as the acknowledgement's object.
+    nonisolated static func singleInstanceWakeAcknowledgementPayload(requestID: String, pid: pid_t) -> String {
+        "\(requestID)|\(pid)"
+    }
+
+    nonisolated static func parseSingleInstanceWakeAcknowledgement(
+        _ payload: String
+    ) -> (requestID: String, pid: pid_t?)? {
+        let parts = payload.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let requestID = parts.first, requestID.isEmpty == false else {
+            return nil
+        }
+        let pid = parts.count > 1 ? pid_t(parts[1]) : nil
+        return (String(requestID), pid)
     }
 }
