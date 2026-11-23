@@ -41,13 +41,11 @@ sed -e "s/__VERSION__/${VERSION}/g" -e "s/__SHA256__/${SHA256}/g" \
 
 ## Notarization
 
-The release build is ad-hoc signed (`CODE_SIGN_IDENTITY = "-"`), so macOS
-quarantines the app and refuses to launch it until the user runs
-`xattr -dr com.apple.quarantine /Applications/v2s.app`. Homebrew 6 removed the
-`--no-quarantine` install flag, so there is no way to avoid this from the cask.
+Since v0.3.41 the release workflow signs the app with a Developer ID
+certificate, notarizes it and staples the ticket, so Gatekeeper accepts the
+cask's download without users clearing the quarantine flag by hand.
 
-Signing with a Developer ID certificate and notarizing in the release workflow
-would remove that step, and is also a prerequisite for `brew audit --new`, which
-currently fails with "not signed by a distributor that meets the system
+Signing was also the prerequisite for `brew audit --new`, which failed on
+ad-hoc builds with "not signed by a distributor that meets the system
 Gatekeeper requirements" — the check that gates submission to the official
 `homebrew/cask` repository.

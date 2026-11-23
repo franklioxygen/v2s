@@ -64,12 +64,8 @@ v2s asks Apple's Speech and Translation frameworks which languages the current M
 brew install --cask franklioxygen/v2s/v2s
 ```
 
-v2s is not notarized by Apple yet, so macOS quarantines it after download. Clear
-the flag once, then launch the app:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/v2s.app
-```
+Releases are signed with a Developer ID and notarized by Apple, so the app opens
+directly after install.
 
 If you already have `v2s.app` in your Applications folder from a manual install,
 add `--adopt` so Homebrew takes over the existing copy instead of refusing to
