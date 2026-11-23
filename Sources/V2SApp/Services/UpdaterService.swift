@@ -31,7 +31,14 @@ final class UpdaterService: ObservableObject {
             userDriverDelegate: nil
         )
         self.automaticallyChecksForUpdates = false
+        #if DEBUG
+        // A Debug build lives in DerivedData. If Sparkle updated it, it would swap
+        // in the notarized release, and macOS App Management would then block
+        // Xcode from writing into that bundle on the next build.
+        Logger.updater.info("Sparkle updater disabled in Debug builds")
+        #else
         start()
+        #endif
     }
 
     func checkForUpdates() {
@@ -62,6 +69,8 @@ final class UpdaterService: ObservableObject {
     static let isAvailable = false
 
     @Published var automaticallyChecksForUpdates = false
+
+    let isStarted = false
 
     func checkForUpdates() {}
 }
