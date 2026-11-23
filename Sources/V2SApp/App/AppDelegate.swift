@@ -23,7 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            terminateSingleInstanceLockOwnerIfNeeded()
+            // No other copy is left running. The lock is a flock, which the kernel
+            // releases when its owner exits, so a holder that is still quitting
+            // frees it shortly.
             guard waitForSingleInstanceLock(timeout: 2.0) else {
                 NSApp.terminate(nil)
                 return
@@ -90,6 +92,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Single-instance enforcement
 
+    /// Asks a running copy to come forward. Returns true when this launch quits.
+    ///
+    /// This never terminates the other copy. A missing acknowledgement does not show
+    /// that it is hung: distributed notifications can be delayed or dropped, the copy
+    /// may be quitting, or it may be an older version with a different handoff format.
+    /// Terminating it could end an active session.
     private func handOffToExistingInstanceIfPossible() -> Bool {
         let identifier = singleInstanceIdentifier
         let currentPID = ProcessInfo.processInfo.processIdentifier
@@ -105,22 +113,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let wakeRequestedName = Self.singleInstanceWakeRequestedNotificationName(for: identifier)
         let wakeAcknowledgedName = Self.singleInstanceWakeAcknowledgedNotificationName(for: identifier)
         let center = DistributedNotificationCenter.default()
-        var acknowledgedPID: pid_t?
+        var acknowledged = false
 
-        // The request ID and PID travel in the notification's object string, not in
-        // userInfo: a sandboxed app (the Mac App Store build) may not post userInfo.
+        // The request ID travels as the notification object, not in userInfo:
+        // a sandboxed app (the Mac App Store build) may not post userInfo.
         let ackObserver = center.addObserver(
             forName: wakeAcknowledgedName,
             object: nil,
             queue: .main
         ) { notification in
-            guard let payload = notification.object as? String,
-                  let acknowledgement = Self.parseSingleInstanceWakeAcknowledgement(payload),
-                  acknowledgement.requestID == requestID else {
-                return
+            if notification.object as? String == requestID {
+                acknowledged = true
             }
-
-            acknowledgedPID = acknowledgement.pid ?? existingApplications.first?.processIdentifier
         }
 
         center.postNotificationName(
@@ -132,20 +136,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         existingApplications.first?.activate(options: [.activateAllWindows])
 
         let deadline = Date().addingTimeInterval(Self.singleInstanceWakeAcknowledgementTimeout)
-        while acknowledgedPID == nil && Date() < deadline {
+        while acknowledged == false && Date() < deadline {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.04))
         }
         center.removeObserver(ackObserver)
 
-        if let acknowledgedPID {
-            let staleApplications = existingApplications.filter { $0.processIdentifier != acknowledgedPID }
-            terminateExistingApplications(staleApplications)
-            NSApp.terminate(nil)
-            return true
+        if acknowledged == false {
+            // The other copy may be quitting (for example during a relaunch). Give it a
+            // moment, and launch normally if it is gone.
+            let exitDeadline = Date().addingTimeInterval(Self.singleInstanceExitWaitTimeout)
+            while existingApplications.contains(where: { $0.isTerminated == false }) && Date() < exitDeadline {
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+            }
+            if existingApplications.allSatisfy(\.isTerminated) {
+                return false
+            }
+            existingApplications.first { $0.isTerminated == false }?.activate(options: [.activateAllWindows])
         }
 
-        terminateExistingApplications(existingApplications)
-        return false
+        NSApp.terminate(nil)
+        return true
     }
 
     private func runningApplicationsForSingleInstance() -> [NSRunningApplication] {
@@ -242,61 +252,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = metadata.withCString { write(descriptor, $0, strlen($0)) }
     }
 
-    private func terminateSingleInstanceLockOwnerIfNeeded() {
-        guard let lockURL = singleInstanceLockURL(),
-              let metadata = singleInstanceLockMetadata(at: lockURL),
-              let pid = metadata.pid,
-              pid > 0,
-              pid != ProcessInfo.processInfo.processIdentifier,
-              let application = NSRunningApplication(processIdentifier: pid),
-              application.isTerminated == false,
-              matchesSingleInstanceIdentity(application, metadata: metadata) else {
-            return
-        }
-
-        terminateExistingApplications([application])
-    }
-
-    private func singleInstanceLockMetadata(at lockURL: URL) -> SingleInstanceLockMetadata? {
-        guard let contents = try? String(contentsOf: lockURL, encoding: .utf8) else {
-            return nil
-        }
-
-        var pid: Int32?
-        var identifier: String?
-        var path: String?
-
-        for line in contents.split(separator: "\n") {
-            if line.hasPrefix("pid=") {
-                pid = Int32(line.dropFirst(4))
-            } else if line.hasPrefix("identifier=") {
-                identifier = String(line.dropFirst("identifier=".count))
-            } else if line.hasPrefix("path=") {
-                path = String(line.dropFirst("path=".count))
-            }
-        }
-
-        return SingleInstanceLockMetadata(pid: pid, identifier: identifier, path: path)
-    }
-
-    private func matchesSingleInstanceIdentity(
-        _ application: NSRunningApplication,
-        metadata: SingleInstanceLockMetadata
-    ) -> Bool {
-        if let metadataIdentifier = metadata.identifier,
-           let bundleIdentifier = application.bundleIdentifier,
-           bundleIdentifier == metadataIdentifier {
-            return true
-        }
-
-        if let metadataPath = metadata.path,
-           application.bundleURL?.resolvingSymlinksInPath().path == metadataPath {
-            return true
-        }
-
-        return false
-    }
-
     private func installSingleInstanceWakeObserver() {
         guard singleInstanceWakeObserver == nil else {
             return
@@ -310,7 +265,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            guard let requestID = notification.object as? String, requestID.isEmpty == false else {
+            // Versions up to 0.3.40 send the request ID in userInfo, with the bundle
+            // identifier as the object. Current versions send it as the object.
+            let legacyRequestID = notification.userInfo?["requestID"] as? String
+            guard let requestID = legacyRequestID ?? (notification.object as? String),
+                  requestID.isEmpty == false else {
                 return
             }
 
@@ -321,35 +280,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
                 self.settingsWindowController?.showSettings()
                 NSApp.activate(ignoringOtherApps: true)
+
+                if legacyRequestID != nil {
+                    #if !APPSTORE
+                    // Answer an older launcher in its own format so it does not time out
+                    // and terminate this copy. A sandboxed app cannot post userInfo.
+                    DistributedNotificationCenter.default().postNotificationName(
+                        wakeAcknowledgedName,
+                        object: identifier,
+                        userInfo: [
+                            "requestID": requestID,
+                            "pid": NSNumber(value: ProcessInfo.processInfo.processIdentifier)
+                        ],
+                        deliverImmediately: true
+                    )
+                    #endif
+                    return
+                }
+
                 DistributedNotificationCenter.default().postNotificationName(
                     wakeAcknowledgedName,
-                    object: Self.singleInstanceWakeAcknowledgementPayload(
-                        requestID: requestID,
-                        pid: ProcessInfo.processInfo.processIdentifier
-                    ),
+                    object: requestID,
                     userInfo: nil,
                     deliverImmediately: true
                 )
             }
-        }
-    }
-
-    private func terminateExistingApplications(_ applications: [NSRunningApplication]) {
-        guard applications.isEmpty == false else {
-            return
-        }
-
-        for application in applications where application.isTerminated == false {
-            application.terminate()
-        }
-
-        let deadline = Date().addingTimeInterval(1.2)
-        while applications.contains(where: { $0.isTerminated == false }) && Date() < deadline {
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
-        }
-
-        for application in applications where application.isTerminated == false {
-            application.forceTerminate()
         }
     }
 
@@ -387,14 +342,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-private struct SingleInstanceLockMetadata {
-    let pid: Int32?
-    let identifier: String?
-    let path: String?
-}
-
 private extension AppDelegate {
     nonisolated static let singleInstanceWakeAcknowledgementTimeout: TimeInterval = 0.35
+    /// How long a launch waits for an unanswering copy that may be quitting.
+    nonisolated static let singleInstanceExitWaitTimeout: TimeInterval = 2.0
 
     nonisolated static func singleInstanceWakeRequestedNotificationName(
         for identifier: String
@@ -406,21 +357,5 @@ private extension AppDelegate {
         for identifier: String
     ) -> Notification.Name {
         Notification.Name("\(identifier).singleInstanceWakeAcknowledged")
-    }
-
-    /// "<requestID>|<pid>", sent as the acknowledgement's object.
-    nonisolated static func singleInstanceWakeAcknowledgementPayload(requestID: String, pid: pid_t) -> String {
-        "\(requestID)|\(pid)"
-    }
-
-    nonisolated static func parseSingleInstanceWakeAcknowledgement(
-        _ payload: String
-    ) -> (requestID: String, pid: pid_t?)? {
-        let parts = payload.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
-        guard let requestID = parts.first, requestID.isEmpty == false else {
-            return nil
-        }
-        let pid = parts.count > 1 ? pid_t(parts[1]) : nil
-        return (String(requestID), pid)
     }
 }
