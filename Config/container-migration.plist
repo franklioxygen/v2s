@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Mac App Store build only. The first time the sandboxed app launches,
+	     macOS moves these into its container, so users switching from the
+	     GitHub / Homebrew build keep their settings (settings.json lives in
+	     Application Support/v2s). Preferences are migrated automatically. -->
+	<key>Move</key>
+	<array>
+		<string>${ApplicationSupport}/v2s</string>
+	</array>
+</dict>
+</plist>

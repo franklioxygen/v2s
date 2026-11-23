@@ -1,0 +1,58 @@
+name: Build
+
+# Compiles both the GitHub/Homebrew target (v2s) and the Mac App Store target
+# (v2s-AppStore) without signing, so a pull request cannot break either one.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        scheme: [v2s, v2s-AppStore]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ${{ matrix.scheme }}
+        run: |
+          xcodebuild \
+            -project v2s.xcodeproj \
+            -scheme "${{ matrix.scheme }}" \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath .build/ci \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Check Sparkle is only in the GitHub build
+        run: |
+          APP=".build/ci/Build/Products/Release/v2s.app"
+          if [ "${{ matrix.scheme }}" = "v2s-AppStore" ]; then
+            if [ -e "$APP/Contents/Frameworks/Sparkle.framework" ]; then
+              echo "::error::Sparkle.framework is embedded in the App Store build"
+              exit 1
+            fi
+            if otool -L "$APP/Contents/MacOS/v2s" | grep -q Sparkle; then
+              echo "::error::App Store binary links Sparkle"
+              exit 1
+            fi
+            # Moves existing settings into the sandbox container on first launch.
+            if [ ! -f "$APP/Contents/Resources/container-migration.plist" ]; then
+              echo "::error::container-migration.plist is missing from the App Store build"
+              exit 1
+            fi
+          else
+            test -d "$APP/Contents/Frameworks/Sparkle.framework"
+            if [ -e "$APP/Contents/Resources/container-migration.plist" ]; then
+              echo "::error::container-migration.plist belongs only in the App Store build"
+              exit 1
+            fi
+          fi
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist"
