@@ -5,11 +5,25 @@ name: Launch check
 # the newest SDK, so this is where a symbol that only exists on newer macOS
 # shows up as a startup crash.
 
+# Changes that cannot affect the built app skip this check, since macOS arm64
+# runners are often short on capacity and every run risks a queue timeout.
 on:
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "speech_eval/**"
+      - "packaging/**"
+      - "LICENSES/**"
   push:
     branches:
       - main
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "speech_eval/**"
+      - "packaging/**"
+      - "LICENSES/**"
   workflow_dispatch:
 
 permissions:

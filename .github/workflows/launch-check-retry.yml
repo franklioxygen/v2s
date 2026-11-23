@@ -1,0 +1,54 @@
+name: Launch check retry
+
+# GitHub cancels a job that waits too long for a hosted runner ("The job was not
+# acquired by Runner"), which happens often on macOS arm64. Re-run the failed
+# jobs of a Launch check run when every failure is one of those cancellations,
+# up to two extra attempts. A real failure is left alone.
+#
+# workflow_run only fires for this file as it exists on the default branch, and
+# it does not check out or run any code from the pull request.
+
+on:
+  workflow_run:
+    workflows: ["Launch check"]
+    types: [completed]
+
+permissions:
+  actions: write
+  checks: read
+
+jobs:
+  retry:
+    if: >-
+      github.event.workflow_run.conclusion != 'success' &&
+      github.event.workflow_run.conclusion != 'skipped' &&
+      github.event.workflow_run.run_attempt < 3
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-run jobs that never got a runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          FAILED_JOBS="$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs" --paginate \
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | .id')"
+
+          if [ -z "$FAILED_JOBS" ]; then
+            echo "No failed jobs; nothing to re-run."
+            exit 0
+          fi
+
+          for JOB in $FAILED_JOBS; do
+            if ! gh api "repos/$REPO/check-runs/$JOB/annotations" --jq '.[].message' \
+                | grep -q 'not acquired by Runner'; then
+              echo "Job $JOB failed for another reason; not re-running."
+              exit 0
+            fi
+          done
+
+          echo "Every failed job was a runner-capacity cancellation; re-running (attempt $((ATTEMPT + 1)))."
+          gh run rerun "$RUN_ID" --repo "$REPO" --failed
