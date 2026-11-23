@@ -111,6 +111,11 @@ struct SettingsView: View {
                             selection: model.interfaceLanguageSelectionBinding
                         )
                     }
+                    if !UpdaterService.isAvailable {
+                        Divider()
+                        openAtLoginRow
+                        launchAtLoginNotes
+                    }
                 }
                 settingsCard {
                     sectionHeader(model.localized(.inputSource), icon: "mic.fill")
@@ -180,45 +185,18 @@ struct SettingsView: View {
                     }
                     LanguageResourcesFooter(model: model)
                 }
-                settingsCard {
-                    sectionHeader(model.localized(.updates), icon: "arrow.triangle.2.circlepath")
-                    settingsRow(model.localized(.openAtLogin)) {
-                        Toggle("", isOn: launchAtLoginBinding)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-                    if UpdaterService.isAvailable {
+                // Builds without in-app updates show "Open at Login" in the General card instead.
+                if UpdaterService.isAvailable {
+                    settingsCard {
+                        sectionHeader(model.localized(.updates), icon: "arrow.triangle.2.circlepath")
+                        openAtLoginRow
                         Divider()
                         settingsRow(model.localized(.checkForUpdatesAutomatically)) {
                             Toggle("", isOn: $updaterService.automaticallyChecksForUpdates)
                                 .toggleStyle(.switch)
                                 .labelsHidden()
                         }
-                    }
-                    if launchAtLoginService.requiresApproval {
-                        Text(model.localized(.enableAtLoginInSystemSettings))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        HStack {
-                            Spacer()
-                            Button {
-                                launchAtLoginService.openLoginItems()
-                            } label: {
-                                Label(model.localized(.openLoginItems), systemImage: "gearshape")
-                                    .font(.caption)
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.secondary)
-                        }
-                    }
-                    if let updateErrorMessage = launchAtLoginService.updateErrorMessage {
-                        Text(model.localized(.launchAtLoginUpdateFailedFormat, updateErrorMessage))
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if UpdaterService.isAvailable {
+                        launchAtLoginNotes
                         HStack {
                             Spacer()
                             Button {
@@ -431,6 +409,42 @@ struct SettingsView: View {
             get: { launchAtLoginService.launchesAtLogin },
             set: { launchAtLoginService.setLaunchesAtLogin($0) }
         )
+    }
+
+    private var openAtLoginRow: some View {
+        settingsRow(model.localized(.openAtLogin)) {
+            Toggle("", isOn: launchAtLoginBinding)
+                .toggleStyle(.switch)
+                .labelsHidden()
+        }
+    }
+
+    /// Approval hint and error shown under the "Open at Login" toggle.
+    @ViewBuilder
+    private var launchAtLoginNotes: some View {
+        if launchAtLoginService.requiresApproval {
+            Text(model.localized(.enableAtLoginInSystemSettings))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button {
+                    launchAtLoginService.openLoginItems()
+                } label: {
+                    Label(model.localized(.openLoginItems), systemImage: "gearshape")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+            }
+        }
+        if let updateErrorMessage = launchAtLoginService.updateErrorMessage {
+            Text(model.localized(.launchAtLoginUpdateFailedFormat, updateErrorMessage))
+                .font(.caption)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var topInsetBinding: Binding<Double> {
