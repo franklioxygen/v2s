@@ -48,6 +48,12 @@ jobs:
               echo "::error::container-migration.plist is missing from the App Store build"
               exit 1
             fi
+            # App Store Connect rejects uploads that use required-reason APIs
+            # (systemUptime) without declaring them (ITMS-91053).
+            if ! plutil -lint "$APP/Contents/Resources/PrivacyInfo.xcprivacy"; then
+              echo "::error::PrivacyInfo.xcprivacy is missing from the App Store build"
+              exit 1
+            fi
           else
             test -d "$APP/Contents/Frameworks/Sparkle.framework"
             if [ -e "$APP/Contents/Resources/container-migration.plist" ]; then
