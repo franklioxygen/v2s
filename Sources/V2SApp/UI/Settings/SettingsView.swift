@@ -195,6 +195,7 @@ struct SettingsView: View {
                             Toggle("", isOn: $updaterService.automaticallyChecksForUpdates)
                                 .toggleStyle(.switch)
                                 .labelsHidden()
+                                .disabled(!updaterService.isStarted)
                         }
                         launchAtLoginNotes
                         HStack {
@@ -207,6 +208,7 @@ struct SettingsView: View {
                             }
                             .buttonStyle(.plain)
                             .foregroundStyle(.secondary)
+                            .disabled(!updaterService.isStarted)
                         }
                     }
                 }
