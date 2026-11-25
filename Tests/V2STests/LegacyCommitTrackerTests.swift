@@ -184,7 +184,18 @@ final class LegacyCommitTrackerTests: XCTestCase {
 
         XCTAssertTrue(tracker.startsNewUtterance(previous: previous, current: segments("Good")))
         XCTAssertTrue(tracker.startsNewUtterance(previous: previous, current: segments("Good morning")))
+        XCTAssertTrue(tracker.startsNewUtterance(previous: previous, current: segments("Good morning to everyone")))
         XCTAssertFalse(tracker.startsNewUtterance(previous: previous, current: segments("Hello there")))
+        XCTAssertFalse(tracker.startsNewUtterance(previous: previous, current: segments("Hello there to everyone")))
+    }
+
+    func testARevisionOfTheFirstTwoWordsOfCommittedTextIsNotANewUtterance() {
+        var tracker = LegacyCommitTracker()
+        let previous = segments("in many ways he argues")
+        tracker.markCommitted(through: 4, of: previous)
+
+        XCTAssertFalse(tracker.startsNewUtterance(previous: previous, current: segments("and any ways he argues")))
+        XCTAssertTrue(tracker.startsNewUtterance(previous: previous, current: segments("he nonetheless maintains that one")))
     }
 
     func testATimedRevisionOverCommittedAudioIsNotANewUtterance() {

@@ -180,17 +180,17 @@ struct LegacyCommitTracker {
         if currentWords.count < previousWords.count {
             return currentWords.count < committedWordCount || currentWords.count * 2 <= previousWords.count
         }
-        // Different words, no fewer of them: the first words of a new utterance after
-        // a short one that was committed in full.
-        return currentWords.count <= 3 && committedWordCount >= previousWords.count
+        // Different words, no fewer of them, after an utterance committed in full:
+        // a new utterance, however many words its first result brings.
+        return committedWordCount >= previousWords.count
     }
 
-    /// Whether the first or second word of `current`, with the word after it, is found
-    /// among the first words of `previous`.
+    /// Whether one of the first three words of `current`, with the word after it, is
+    /// found among the first words of `previous`.
     private static func opensLikeRevision(_ current: [String], of previous: [String]) -> Bool {
         let length = min(2, current.count, previous.count)
         guard length > 0 else { return false }
-        for currentStart in 0...min(1, current.count - length) {
+        for currentStart in 0...min(2, current.count - length) {
             let opening = current[currentStart..<currentStart + length]
             for previousStart in 0...min(3, previous.count - length)
             where previous[previousStart..<previousStart + length].elementsEqual(opening) {
