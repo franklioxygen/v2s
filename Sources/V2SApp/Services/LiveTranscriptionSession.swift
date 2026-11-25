@@ -163,9 +163,9 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     private var audioConverterInputSignature: AudioFormatSignature?
     private var modernAudioConverter: AVAudioConverter?
     private var modernAudioConverterInputSignature: AudioFormatSignature?
-    private var committedSegmentCount = 0
-    private let committedBoundaryToleranceSec: TimeInterval = 0.08
-    private var committedAudioBoundaryTime: TimeInterval?
+    /// How much of the legacy recognizer's current utterance is committed.
+    private var legacyCommits = LegacyCommitTracker()
+    private var committedSegmentCount: Int { legacyCommits.committedSegmentCount }
     private var recognitionContextualStrings: [String] = []
     private var recognitionBackend: RecognitionBackend = .legacy
     private var activeLocaleIdentifier: String?
@@ -244,6 +244,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     // a sentence has no "next segment" and therefore never triggers a pause boundary.
     private var silenceCommitTimer: DispatchSourceTimer?
     private var latestSegments: [SFTranscriptionSegment] = []
+    private var latestSegmentTimes: [LegacyTranscriptSegment] = []
     private var latestFormattedText: NSString = ""
 
     // MARK: Silero VAD (captureQueue)
@@ -726,9 +727,9 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     }
 
     private func resetLegacyTranscriptionState() {
-        committedSegmentCount = 0
-        committedAudioBoundaryTime = nil
+        legacyCommits.reset()
         latestSegments = []
+        latestSegmentTimes = []
         latestFormattedText = ""
     }
 
@@ -1788,21 +1789,42 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         let segments = transcription.segments
         let formattedText = transcription.formattedString as NSString
         var committedEmissions: [CommittedEmission] = []
+        let segmentTimes = segments.map(LegacyTranscriptSegment.init)
+
+        // Without sending isFinal, the recognizer starts its text over after a pause.
+        // Words it had not committed yet are missing from the new result, so commit
+        // them now or they are lost.
+        if legacyCommits.startsNewUtterance(previous: latestSegmentTimes, current: segmentTimes) {
+            if let tail = uncommittedLegacyText() {
+                committedEmissions.append(CommittedEmission(text: tail, promotionSegmentID: currentDraftId))
+            }
+            legacyCommits.reset()
+            resetDraftState()
+        }
 
         // Always save the latest transcript so the silence timer can commit it
         latestSegments = segments
+        latestSegmentTimes = segmentTimes
         latestFormattedText = formattedText
 
-        alignCommittedSegmentCount(to: segments)
+        if legacyCommits.align(to: segmentTimes) {
+            resetDraftState()
+        }
 
         guard committedSegmentCount < segments.count else {
             cancelSilenceTimer()
+            if committedEmissions.isEmpty == false {
+                Task { [committedEmissions] in
+                    await emitCommittedSequence(committedEmissions, clearDraftAfter: true)
+                }
+            }
             // The task has no more pending text. If it just finished, restart it.
             if result.isFinal { restartRecognitionTask() }
             return
         }
 
         var sentenceStartIndex = committedSegmentCount
+        let lastWordIndex = segmentTimes.lastIndex(where: \.isWord) ?? -1
 
         for index in committedSegmentCount..<segments.count {
             let segment = segments[index]
@@ -1820,12 +1842,16 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             let sentenceEndTimestamp = segment.timestamp + segment.duration
             let currentSentenceDuration = max(sentenceEndTimestamp - sentenceStartTimestamp, 0)
             // Apple may place restored punctuation in the gap before the next segment
-            // rather than inside the current segment substring.
-            let punctuationBoundary = hasLikelyPunctuationBoundary(
-                afterSegmentAt: index,
-                in: formattedText,
-                segments: segments
-            )
+            // rather than inside the current segment substring. It also ends most
+            // partial results with a period that moves on as the next words arrive,
+            // so a period after the last word ends a sentence only in a final result;
+            // otherwise the next word confirms it, or the silence commit takes it.
+            let punctuationBoundary = (result.isFinal || index < lastWordIndex)
+                && hasLikelyPunctuationBoundary(
+                    afterSegmentAt: index,
+                    in: formattedText,
+                    segments: segments
+                )
             // 0.85 s was too conservative and often merged two short sentences.
             let strongPauseBoundary = (nextPauseDuration ?? 0) >= max(0.55, Double(modeConfig.minSilenceCommitMs) / 1000.0 + 0.24)
             // Char-length limit removed: 40 chars is only ~6 English words and caused
@@ -1870,9 +1896,8 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
                 )
             }
 
-            committedAudioBoundaryTime = segmentEndTime(for: segments[commitEndIndex])
+            legacyCommits.markCommitted(through: commitEndIndex, of: segmentTimes)
             sentenceStartIndex = commitEndIndex + 1
-            committedSegmentCount = sentenceStartIndex
             resetDraftState()
 
             // If we consumed all remaining segments (tail absorption or final boundary),
@@ -3150,8 +3175,7 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let committedDraftID = currentDraftId
 
-        committedAudioBoundaryTime = segmentEndTime(for: segments[lastIdx])
-        committedSegmentCount = segments.count
+        legacyCommits.markCommitted(through: lastIdx, of: latestSegmentTimes)
         resetDraftState()
         if sentenceText.isEmpty == false {
             Task {
@@ -3198,31 +3222,20 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         return settleWindowMs - max(elapsedMs, 0)
     }
 
-    private func alignCommittedSegmentCount(to segments: [SFTranscriptionSegment]) {
-        if segments.count < committedSegmentCount {
-            resetLegacyTranscriptionState()
-            resetDraftState()
-            return
-        }
-
-        guard let committedAudioBoundaryTime else {
-            return
-        }
-
-        let alignedCount = segments.prefix {
-            segmentEndTime(for: $0) <= committedAudioBoundaryTime + committedBoundaryToleranceSec
-        }.count
-
-        guard alignedCount != committedSegmentCount else {
-            return
-        }
-
-        committedSegmentCount = alignedCount
-        resetDraftState()
-    }
-
-    private func segmentEndTime(for segment: SFTranscriptionSegment) -> TimeInterval {
-        segment.timestamp + segment.duration
+    /// The latest legacy result's text that is not committed yet, if it has any words.
+    private func uncommittedLegacyText() -> String? {
+        guard committedSegmentCount < latestSegments.count else { return nil }
+        let range = emittedTextRange(
+            in: latestFormattedText,
+            segments: latestSegments,
+            from: committedSegmentCount,
+            to: latestSegments.count - 1
+        )
+        let text = latestFormattedText.substring(with: range)
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains) else { return nil }
+        return text
     }
 
     // MARK: - Draft helpers (called on captureQueue)
