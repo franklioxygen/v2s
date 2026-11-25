@@ -47,6 +47,7 @@
 		A00000000000000000000090 /* SentenceBoundaryHeuristics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000091 /* SentenceBoundaryHeuristics.swift */; };
 		A00000000000000000000094 /* TranscriptSummarizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000095 /* TranscriptSummarizer.swift */; };
 		A000000000000000000000A0 /* JapaneseSentenceAssembler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000A1 /* JapaneseSentenceAssembler.swift */; };
+		A000000000000000000000A2 /* LegacyCommitTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000A3 /* LegacyCommitTracker.swift */; };
 		B00000000000000000000001 /* DockVisibilityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000073 /* DockVisibilityController.swift */; };
 		B00000000000000000000002 /* SessionActionButtonLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000074 /* SessionActionButtonLabel.swift */; };
 		B00000000000000000000003 /* AppLocalization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000077 /* AppLocalization.swift */; };
@@ -67,6 +68,7 @@
 		B00000000000000000000012 /* TranslationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000093 /* TranslationCoordinator.swift */; };
 		B00000000000000000000013 /* SentenceBoundaryHeuristics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000091 /* SentenceBoundaryHeuristics.swift */; };
 		B00000000000000000000031 /* JapaneseSentenceAssembler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000A1 /* JapaneseSentenceAssembler.swift */; };
+		B00000000000000000000036 /* LegacyCommitTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000A3 /* LegacyCommitTracker.swift */; };
 		B00000000000000000000014 /* TranscriptSummarizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000095 /* TranscriptSummarizer.swift */; };
 		B00000000000000000000015 /* SettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000039 /* SettingsStore.swift */; };
 		B00000000000000000000016 /* SileroVADEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000007C /* SileroVADEngine.swift */; };
@@ -132,6 +134,7 @@
 		A00000000000000000000091 /* SentenceBoundaryHeuristics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SentenceBoundaryHeuristics.swift; sourceTree = "<group>"; };
 		A00000000000000000000095 /* TranscriptSummarizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptSummarizer.swift; sourceTree = "<group>"; };
 		A000000000000000000000A1 /* JapaneseSentenceAssembler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JapaneseSentenceAssembler.swift; sourceTree = "<group>"; };
+		A000000000000000000000A3 /* LegacyCommitTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyCommitTracker.swift; sourceTree = "<group>"; };
 		B00000000000000000000027 /* v2s.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = v2s.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000028 /* Info-AppStore.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Info-AppStore.plist"; sourceTree = "<group>"; };
 		B00000000000000000000033 /* container-migration.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "container-migration.plist"; sourceTree = "<group>"; };
@@ -251,6 +254,7 @@
 				A00000000000000000000041 /* LiveTranscriptionSession.swift */,
 				A00000000000000000000091 /* SentenceBoundaryHeuristics.swift */,
 				A000000000000000000000A1 /* JapaneseSentenceAssembler.swift */,
+				A000000000000000000000A3 /* LegacyCommitTracker.swift */,
 				A00000000000000000000095 /* TranscriptSummarizer.swift */,
 				A00000000000000000000039 /* SettingsStore.swift */,
 				A0000000000000000000007C /* SileroVADEngine.swift */,
@@ -461,6 +465,7 @@
 				A00000000000000000000092 /* TranslationCoordinator.swift in Sources */,
 				A00000000000000000000090 /* SentenceBoundaryHeuristics.swift in Sources */,
 				A000000000000000000000A0 /* JapaneseSentenceAssembler.swift in Sources */,
+				A000000000000000000000A2 /* LegacyCommitTracker.swift in Sources */,
 				A00000000000000000000094 /* TranscriptSummarizer.swift in Sources */,
 				A00000000000000000000059 /* SettingsStore.swift in Sources */,
 				A0000000000000000000007B /* SileroVADEngine.swift in Sources */,
@@ -506,6 +511,7 @@
 				B00000000000000000000012 /* TranslationCoordinator.swift in Sources */,
 				B00000000000000000000013 /* SentenceBoundaryHeuristics.swift in Sources */,
 				B00000000000000000000031 /* JapaneseSentenceAssembler.swift in Sources */,
+				B00000000000000000000036 /* LegacyCommitTracker.swift in Sources */,
 				B00000000000000000000014 /* TranscriptSummarizer.swift in Sources */,
 				B00000000000000000000015 /* SettingsStore.swift in Sources */,
 				B00000000000000000000016 /* SileroVADEngine.swift in Sources */,
