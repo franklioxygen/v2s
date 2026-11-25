@@ -1773,12 +1773,22 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
         from startIndex: Int,
         to endIndex: Int
     ) -> NSRange {
-        let startLocation = segments[startIndex].substringRange.location
+        let startLocation = legacyTextStart(in: segments, at: startIndex)
         let endLocation = endIndex < segments.count - 1
             ? segments[endIndex + 1].substringRange.location
             : formattedText.length
 
         return NSRange(location: startLocation, length: max(0, endLocation - startLocation))
+    }
+
+    /// Where text of the latest legacy result starts in `segments[index]`. When the
+    /// committed text ends inside that segment, it starts after the committed words.
+    private func legacyTextStart(in segments: [SFTranscriptionSegment], at index: Int) -> Int {
+        let range = segments[index].substringRange
+        let committedWords = legacyCommits.committedWordsInNextSegment
+        guard index == committedSegmentCount, committedWords > 0 else { return range.location }
+        let offset = LegacyTranscriptSegment(segments[index]).utf16Offset(afterWords: committedWords)
+        return range.location + min(offset, range.length)
     }
 
     private func processRecognitionResult(_ result: SFSpeechRecognitionResult) {
@@ -3352,10 +3362,10 @@ final class LiveTranscriptionSession: NSObject, @unchecked Sendable {
     }
 
     private func combinedRange(for segments: [SFTranscriptionSegment], from startIndex: Int, to endIndex: Int) -> NSRange {
-        let firstRange = segments[startIndex].substringRange
+        let startLocation = legacyTextStart(in: segments, at: startIndex)
         let lastRange = segments[endIndex].substringRange
         let endLocation = lastRange.location + lastRange.length
-        return NSRange(location: firstRange.location, length: endLocation - firstRange.location)
+        return NSRange(location: startLocation, length: max(0, endLocation - startLocation))
     }
 
     private func mapApplicationCaptureError(_ error: ApplicationAudioCapture.CaptureError) -> SessionError {

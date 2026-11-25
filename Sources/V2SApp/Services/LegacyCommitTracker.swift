@@ -48,6 +48,29 @@ struct LegacyTranscriptSegment: Equatable {
     var wordCount: Int { words.count }
     var isWord: Bool { wordCount > 0 }
 
+    /// UTF-16 offset in `text` where the word after its first `count` words starts,
+    /// counted the way `words` counts them; the end of the text when no word follows.
+    func utf16Offset(afterWords count: Int) -> Int {
+        var wordsSeen = 0
+        var insideWord = false
+        var offset = 0
+        for scalar in text.unicodeScalars {
+            let width = scalar.utf16.count
+            if scalar.properties.isWhitespace {
+                insideWord = false
+            } else if CharacterSet.alphanumerics.contains(scalar) {
+                let startsWord = Self.isWrittenWithoutSpaces(scalar) || insideWord == false
+                if startsWord {
+                    if wordsSeen == count { return offset }
+                    wordsSeen += 1
+                }
+                insideWord = Self.isWrittenWithoutSpaces(scalar) == false
+            }
+            offset += width
+        }
+        return offset
+    }
+
     /// Han, kana, Thai, Lao, Khmer and Myanmar.
     private static func isWrittenWithoutSpaces(_ scalar: Unicode.Scalar) -> Bool {
         if scalar.properties.isIdeographic { return true }
@@ -63,6 +86,7 @@ struct LegacyTranscriptSegment: Equatable {
     }
 }
 
+
 /// Tracks how much of the legacy recognizer's current utterance is already committed.
 ///
 /// Every partial result repeats the utterance so far, so the committed part has to be
@@ -73,8 +97,12 @@ struct LegacyTranscriptSegment: Equatable {
 struct LegacyCommitTracker {
     static let boundaryToleranceSec: TimeInterval = 0.08
 
-    /// Segments of the latest result that are already committed.
+    /// Segments of the latest result whose words are all committed.
     private(set) var committedSegmentCount = 0
+    /// Committed words at the start of the segment after those, when the committed
+    /// text ends inside it: the recognizer can merge words committed earlier with new
+    /// ones into one segment ("那我们" committed, then "那我们明天").
+    private(set) var committedWordsInNextSegment = 0
     /// Words of this utterance that are already committed.
     private(set) var committedWordCount = 0
     /// End of the committed audio, known only when the committed segments were timed.
@@ -88,6 +116,7 @@ struct LegacyCommitTracker {
     mutating func markCommitted(through index: Int, of segments: [LegacyTranscriptSegment]) {
         let committed = segments[...index]
         committedSegmentCount = index + 1
+        committedWordsInNextSegment = 0
         committedWordCount = committed.reduce(0) { $0 + $1.wordCount }
         committedAudioEndTime = committed.last(where: \.isTimed)?.endTime
     }
@@ -97,6 +126,7 @@ struct LegacyCommitTracker {
     @discardableResult
     mutating func align(to segments: [LegacyTranscriptSegment]) -> Bool {
         let previousWordCount = committedWordCount
+        committedWordsInNextSegment = 0
         if let committedAudioEndTime, segments.contains(where: \.isTimed) {
             let alignedCount = segments.prefix {
                 $0.endTime <= committedAudioEndTime + Self.boundaryToleranceSec
@@ -106,17 +136,17 @@ struct LegacyCommitTracker {
         } else if committedWordCount == 0 {
             committedSegmentCount = 0
         } else {
+            // Whole segments within the committed words, with the punctuation after them.
             var index = 0
             var words = 0
-            while index < segments.count, words < committedWordCount {
+            while index < segments.count, words + segments[index].wordCount <= committedWordCount {
                 words += segments[index].wordCount
                 index += 1
             }
-            // Punctuation right after the committed words belongs to them.
-            while index < segments.count, segments[index].isWord == false {
-                index += 1
-            }
             committedSegmentCount = index
+            if index < segments.count {
+                committedWordsInNextSegment = committedWordCount - words
+            }
         }
         return committedWordCount != previousWordCount
     }
@@ -124,16 +154,22 @@ struct LegacyCommitTracker {
     /// Whether `current` begins a new utterance instead of revising `previous`.
     ///
     /// Without sending isFinal, the on-device recognizer starts its text over after a
-    /// pause. A revision keeps most of the text and may change or drop its first word
-    /// or two; a new utterance starts again from a word or two of different text.
+    /// pause. A revision covers audio already heard and keeps most of the text, though
+    /// it may change or drop its first word or two; a new utterance starts again from
+    /// a word or two of different text.
     func startsNewUtterance(
         previous: [LegacyTranscriptSegment],
         current: [LegacyTranscriptSegment]
     ) -> Bool {
         let previousWords = previous.flatMap(\.words)
         let currentWords = current.flatMap(\.words)
-        guard currentWords.count < previousWords.count,
+        guard previousWords.isEmpty == false,
               previousWords.count >= 3 || committedWordCount > 0 else {
+            return false
+        }
+        if let committedAudioEndTime,
+           let start = current.first(where: \.isTimed)?.timestamp,
+           start < committedAudioEndTime {
             return false
         }
         if Self.opensLikeRevision(currentWords, of: previousWords) {
@@ -141,14 +177,19 @@ struct LegacyCommitTracker {
             // happens to start with the same word.
             return currentWords.count <= 2 && currentWords.count * 4 <= previousWords.count
         }
-        return currentWords.count < committedWordCount || currentWords.count * 2 <= previousWords.count
+        if currentWords.count < previousWords.count {
+            return currentWords.count < committedWordCount || currentWords.count * 2 <= previousWords.count
+        }
+        // Different words, no fewer of them: the first words of a new utterance after
+        // a short one that was committed in full.
+        return currentWords.count <= 3 && committedWordCount >= previousWords.count
     }
 
     /// Whether the first or second word of `current`, with the word after it, is found
     /// among the first words of `previous`.
     private static func opensLikeRevision(_ current: [String], of previous: [String]) -> Bool {
-        let length = min(2, current.count)
-        guard length > 0, previous.count >= length else { return false }
+        let length = min(2, current.count, previous.count)
+        guard length > 0 else { return false }
         for currentStart in 0...min(1, current.count - length) {
             let opening = current[currentStart..<currentStart + length]
             for previousStart in 0...min(3, previous.count - length)

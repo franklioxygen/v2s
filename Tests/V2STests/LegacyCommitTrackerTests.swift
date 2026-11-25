@@ -96,6 +96,37 @@ final class LegacyCommitTrackerTests: XCTestCase {
                        ["belaruss", "市", "场"])
     }
 
+    func testCommittedTextEndingInsideAMergedSegmentKeepsTheRestPending() {
+        var tracker = LegacyCommitTracker()
+        tracker.markCommitted(through: 0, of: segments("那我们"))
+
+        let merged = segments("那我们明天 早上")
+        tracker.align(to: merged)
+
+        XCTAssertEqual(tracker.committedSegmentCount, 0)
+        XCTAssertEqual(tracker.committedWordsInNextSegment, 3)
+        XCTAssertEqual(merged[0].utf16Offset(afterWords: 3), 3)
+
+        tracker.markCommitted(through: 3, of: segments("we flew to new"))
+        var english = segments("we flew to")
+        english.append(LegacyTranscriptSegment(text: "New York", timestamp: 0, duration: 0))
+        english += segments("city")
+        tracker.align(to: english)
+
+        XCTAssertEqual(tracker.committedSegmentCount, 3)
+        XCTAssertEqual(tracker.committedWordsInNextSegment, 1)
+        XCTAssertEqual(english[3].utf16Offset(afterWords: 1), 4)
+    }
+
+    func testWordOffsetsFollowTheWordCount() {
+        let segment = LegacyTranscriptSegment(text: "Belarus's 市场", timestamp: 0, duration: 0)
+
+        XCTAssertEqual(segment.utf16Offset(afterWords: 0), 0)
+        XCTAssertEqual(segment.utf16Offset(afterWords: 1), 10)
+        XCTAssertEqual(segment.utf16Offset(afterWords: 2), 11)
+        XCTAssertEqual(segment.utf16Offset(afterWords: 3), 12)
+    }
+
     func testNothingCommittedLeavesTheWholeResultPending() {
         var tracker = LegacyCommitTracker()
 
@@ -144,6 +175,29 @@ final class LegacyCommitTrackerTests: XCTestCase {
         merged += segments("of russian belarusian", timedFrom: 27)
         XCTAssertFalse(tracker.startsNewUtterance(previous: segments("a belarusian of russian belarusian academic"),
                                                   current: merged))
+    }
+
+    func testDifferentWordsAfterAShortUtteranceCommittedInFullStartANewOne() {
+        var tracker = LegacyCommitTracker()
+        let previous = segments("Hello")
+        tracker.markCommitted(through: 0, of: previous)
+
+        XCTAssertTrue(tracker.startsNewUtterance(previous: previous, current: segments("Good")))
+        XCTAssertTrue(tracker.startsNewUtterance(previous: previous, current: segments("Good morning")))
+        XCTAssertFalse(tracker.startsNewUtterance(previous: previous, current: segments("Hello there")))
+    }
+
+    func testATimedRevisionOverCommittedAudioIsNotANewUtterance() {
+        var tracker = LegacyCommitTracker()
+        let previous = segments("turn on the lights", timedFrom: 5)
+        tracker.markCommitted(through: 3, of: previous)
+
+        let revision = segments("turn off lights", timedFrom: 5)
+        XCTAssertFalse(tracker.startsNewUtterance(previous: previous, current: revision))
+        tracker.align(to: revision)
+        XCTAssertEqual(tracker.committedSegmentCount, 3)
+
+        XCTAssertTrue(tracker.startsNewUtterance(previous: previous, current: segments("Okay", timedFrom: 8)))
     }
 
     func testAnEarlyRevisionOfTheOpeningWordsIsNotANewUtterance() {
