@@ -136,6 +136,10 @@ struct LegacyCommitTracker {
         } else if committedWordCount == 0 {
             committedSegmentCount = 0
         } else {
+            // A revision can drop words ("the cat sat on the mat", then "a bat sat the
+            // mat"). Committed words can't outnumber the words left, or the next new
+            // word would count as committed and never be shown.
+            committedWordCount = min(committedWordCount, segments.reduce(0) { $0 + $1.wordCount })
             // Whole segments within the committed words, with the punctuation after them.
             var index = 0
             var words = 0
