@@ -206,6 +206,36 @@ final class LegacyCommitTrackerTests: XCTestCase {
         XCTAssertFalse(tracker.startsNewUtterance(previous: previous, current: segments("a bat sat on the mat")))
     }
 
+    func testAWordAfterARevisionThatDropsWordsStaysPending() {
+        var tracker = LegacyCommitTracker()
+        let previous = segments("the cat sat on the mat")
+        tracker.markCommitted(through: 5, of: previous)
+
+        let revision = segments("a bat sat the mat")
+        XCTAssertFalse(tracker.startsNewUtterance(previous: previous, current: revision))
+        XCTAssertTrue(tracker.align(to: revision))
+        XCTAssertEqual(tracker.committedWordCount, 5)
+        XCTAssertEqual(tracker.committedSegmentCount, 5)
+
+        // "today" is the sixth segment and stays pending, so the session drafts it.
+        XCTAssertFalse(tracker.align(to: segments("a bat sat the mat today")))
+        XCTAssertEqual(tracker.committedSegmentCount, 5)
+    }
+
+    func testWordsAfterAnUntimedRevisionThatDropsTheOpeningWordsStayPending() {
+        var tracker = LegacyCommitTracker()
+        let previous = segments("have of russian belarusian academic only from before he argues")
+        tracker.markCommitted(through: 9, of: previous)
+
+        let current = segments("russian belarusian academic only from before he argues")
+        XCTAssertFalse(tracker.startsNewUtterance(previous: previous, current: current))
+        tracker.align(to: current)
+
+        tracker.align(to: segments("russian belarusian academic only from before he argues that he"))
+        XCTAssertEqual(tracker.committedSegmentCount, 8)
+        XCTAssertEqual(tracker.committedWordCount, 8)
+    }
+
     func testWordsSharedInsideTheTextDoNotHideANewUtterance() {
         var tracker = LegacyCommitTracker()
         let previous = segments("we should go to school")
