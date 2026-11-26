@@ -172,7 +172,7 @@ struct LegacyCommitTracker {
            start < committedAudioEndTime {
             return false
         }
-        if Self.opensLikeRevision(currentWords, of: previousWords) {
+        if Self.readsLikeRevision(currentWords, of: previousWords) {
             // Opens the same way but most of the text is gone: a new utterance that
             // happens to start with the same word.
             return currentWords.count <= 2 && currentWords.count * 4 <= previousWords.count
@@ -185,12 +185,22 @@ struct LegacyCommitTracker {
         return committedWordCount >= previousWords.count
     }
 
-    /// Whether one of the first three words of `current`, with the word after it, is
-    /// found among the first words of `previous`.
+    /// Whether `current` reads as a revision of `previous`: it opens with the same
+    /// words, or it keeps most of the words of the same stretch of `previous` in
+    /// order. The second covers a revision that changes its first two or three words.
+    private static func readsLikeRevision(_ current: [String], of previous: [String]) -> Bool {
+        if opensLikeRevision(current, of: previous) { return true }
+        let kept = commonSubsequenceLength(current, previous.prefix(current.count + 2))
+        // At least three words, and at least 60% of them.
+        return kept >= max(3, (current.count * 3 + 4) / 5)
+    }
+
+    /// Whether the first or second word of `current`, with the word after it, is found
+    /// among the first words of `previous`.
     private static func opensLikeRevision(_ current: [String], of previous: [String]) -> Bool {
         let length = min(2, current.count, previous.count)
         guard length > 0 else { return false }
-        for currentStart in 0...min(2, current.count - length) {
+        for currentStart in 0...min(1, current.count - length) {
             let opening = current[currentStart..<currentStart + length]
             for previousStart in 0...min(3, previous.count - length)
             where previous[previousStart..<previousStart + length].elementsEqual(opening) {
@@ -198,5 +208,20 @@ struct LegacyCommitTracker {
             }
         }
         return false
+    }
+
+    private static func commonSubsequenceLength(_ first: [String], _ second: ArraySlice<String>) -> Int {
+        let second = Array(second)
+        guard first.isEmpty == false, second.isEmpty == false else { return 0 }
+        var previousRow = [Int](repeating: 0, count: second.count + 1)
+        for word in first {
+            var row = [0]
+            row.reserveCapacity(second.count + 1)
+            for (index, other) in second.enumerated() {
+                row.append(word == other ? previousRow[index] + 1 : max(previousRow[index + 1], row[index]))
+            }
+            previousRow = row
+        }
+        return previousRow[second.count]
     }
 }

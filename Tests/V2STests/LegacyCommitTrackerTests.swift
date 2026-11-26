@@ -198,6 +198,25 @@ final class LegacyCommitTrackerTests: XCTestCase {
         XCTAssertTrue(tracker.startsNewUtterance(previous: previous, current: segments("he nonetheless maintains that one")))
     }
 
+    func testAnUntimedRevisionOfSilenceCommittedTextIsNotANewUtterance() {
+        var tracker = LegacyCommitTracker()
+        let previous = segments("the cat sat on the mat")
+        tracker.markCommitted(through: 5, of: previous)
+
+        XCTAssertFalse(tracker.startsNewUtterance(previous: previous, current: segments("a bat sat on the mat")))
+    }
+
+    func testWordsSharedInsideTheTextDoNotHideANewUtterance() {
+        var tracker = LegacyCommitTracker()
+        let previous = segments("we should go to school")
+        tracker.markCommitted(through: 4, of: previous)
+        XCTAssertTrue(tracker.startsNewUtterance(previous: previous, current: segments("I will go to work")))
+
+        let longer = segments("national protector in the face and then the last theory")
+        tracker.markCommitted(through: 4, of: longer)
+        XCTAssertTrue(tracker.startsNewUtterance(previous: longer, current: segments("and then the")))
+    }
+
     func testATimedRevisionOverCommittedAudioIsNotANewUtterance() {
         var tracker = LegacyCommitTracker()
         let previous = segments("turn on the lights", timedFrom: 5)
